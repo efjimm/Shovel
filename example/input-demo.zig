@@ -28,7 +28,7 @@ pub fn main() !void {
         break :blk false;
     };
 
-    try term.init(.{});
+    term = try spoon.Term.init(.{});
     defer term.deinit();
 
     try os.sigaction(os.SIG.WINCH, &os.Sigaction{
@@ -39,7 +39,7 @@ pub fn main() !void {
 
     var fds: [1]os.pollfd = undefined;
     fds[0] = .{
-        .fd = term.tty.?,
+        .fd = term.tty,
         .events = os.POLL.IN,
         .revents = undefined,
     };
