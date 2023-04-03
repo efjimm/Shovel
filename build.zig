@@ -5,6 +5,10 @@ pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    _ = b.addModule("spoon", .{
+    	.source_file = .{ .path = "import.zig" },
+    });
+
     const tests = b.addTest(.{
     	.root_source_file = .{ .path = "test_main.zig" },
     	.target = target,
