@@ -68,10 +68,62 @@ fn bufferedWriter(self: Self) BufferedWriter {
 	return io.bufferedWriter(self.writer());
 }
 
-pub fn init(term_config: TermConfig) os.OpenError!Self {
-	return Self{
-		.tty = try os.open(term_config.tty_name, constants.O.RDWR, 0),
+// NotATerminal + a subset of os.OpenError, removing all errors which aren't reachable due to how
+// we call os.open
+pub const InitError = error{
+    AccessDenied,
+    BadPathName,
+    FileBusy,
+    FileNotFound,
+    FileTooBig,
+    InvalidUtf8,
+    IsDir,
+    NameTooLong,
+    NoDevice,
+    NotATerminal,
+    ProcessFdQuotaExceeded,
+    SymLinkLoop,
+    SystemFdQuotaExceeded,
+    SystemResources,
+    Unexpected,
+};
+
+pub fn init(term_config: TermConfig) InitError!Self {
+	const ret = Self{
+		.tty = os.open(term_config.tty_name, constants.O.RDWR, 0) catch |err| switch (err) {
+			// None of these are reachable with the flags we pass to os.open
+			error.DeviceBusy,
+			error.FileLocksNotSupported,
+			error.InvalidHandle,
+			error.NoSpaceLeft,
+			error.NotDir,
+			error.PathAlreadyExists,
+			error.WouldBlock,
+				=> unreachable,
+
+		    error.AccessDenied,
+		    error.BadPathName,
+		    error.FileBusy,
+		    error.FileNotFound,
+		    error.FileTooBig,
+		    error.InvalidUtf8,
+		    error.IsDir,
+		    error.NameTooLong,
+		    error.NoDevice,
+		    error.ProcessFdQuotaExceeded,
+		    error.SymLinkLoop,
+		    error.SystemFdQuotaExceeded,
+		    error.SystemResources,
+		    error.Unexpected,
+				=> return @errSetCast(InitError, err), // Always safe cast
+		},
 	};
+	errdefer os.close(ret.tty);
+
+	if (!os.isatty(ret.tty))
+		return error.NotATerminal;
+
+	return ret;
 }
 
 pub fn deinit(self: *Self) void {
@@ -95,7 +147,7 @@ pub inline fn isCooked(self: Self) bool {
 	return self.cooked_termios == null;
 }
 
-const UncookError = os.TermiosGetError || os.TermiosSetError || os.WriteError;
+pub const UncookError = os.TermiosGetError || os.TermiosSetError || os.WriteError;
 
 /// Enter raw mode.
 pub fn uncook(self: *Self, config: AltScreenConfig) UncookError!void {
@@ -179,8 +231,10 @@ pub fn uncook(self: *Self, config: AltScreenConfig) UncookError!void {
 	try buffered_writer.flush();
 }
 
+pub const CookError = os.WriteError || os.TermiosSetError;
+
 /// Enter cooked mode.
-pub fn cook(self: *Self) !void {
+pub fn cook(self: *Self) CookError!void {
 	if (self.isCooked())
 		return;
 
@@ -205,7 +259,7 @@ pub fn cook(self: *Self) !void {
 	self.cooked_termios = null;
 }
 
-pub fn fetchSize(self: *Self) !void {
+pub fn fetchSize(self: *Self) os.UnexpectedError!void {
 	if (self.isCooked())
 		return;
 
