@@ -26,11 +26,11 @@ const debug = std.debug;
 const CodepointStagingArea = struct {
 	const Self = @This();
 
-	len: usize,
-	left: usize,
+	len: u4,
+	left: u4,
 	buf: [4]u8 = undefined,
 
-	pub fn new(first_byte: u8, len: usize) Self {
+	pub fn new(first_byte: u8, len: u4) Self {
 		var ret = Self{
 			.len = len,
 			.left = len - 1,
@@ -71,7 +71,7 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 
 		// This counts terminal cells, not bytes or codepoints!
 		// TODO ok, right now it does count codepoints, see previous TODO comment...
-		len_left: usize,
+		width_left: u32,
 
 		codepoint_staging_area: ?CodepointStagingArea = null,
 		codepoint_holding_area: ?CodepointStagingArea = null,
@@ -82,19 +82,19 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 			if (self.codepoint_holding_area) |_| {
 				try self.underlying_writer.writeAll(self.codepoint_holding_area.?.bytes());
 				self.codepoint_holding_area = null;
-				self.len_left -= 1;
+				self.width_left -= 1;
 			}
 		}
 
 		pub fn pad(self: *Self) !void {
 			try self.finish();
-			try self.underlying_writer.writeByteNTimes(' ', self.len_left);
-			self.len_left = 0;
+			try self.underlying_writer.writeByteNTimes(' ', self.width_left);
+			self.width_left = 0;
 		}
 
-		pub fn getRemaining(self: *Self) !usize {
+		pub fn getRemaining(self: *Self) !u32 {
 			try self.finish();
-			return self.len_left;
+			return self.width_left;
 		}
 
 		pub fn writer(self: *Self) Writer {
@@ -107,19 +107,19 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 				// which we hold because we only know whether to write it based
 				// on whether any codepoints come after it. As such, it is only
 				// active when we only have a single character left on the line.
-				debug.assert(self.len_left == 1);
+				debug.assert(self.width_left == 1);
 
 				// Since this function has been called, there come bytes after
 				// the codepoint we currently hold. As such, it will not get
 				// written, instead we write '…' and return.
 				self.codepoint_holding_area = null;
-				self.len_left = 0;
+				self.width_left = 0;
 				try self.underlying_writer.writeAll("…");
 				return bytes.len;
 			}
 
 			for (bytes, 0..) |c, i| {
-				if (self.len_left == 0) break;
+				if (self.width_left == 0) break;
 
 				// If we are building up a codepoint right now, just add the
 				// byte, try to write and finally continue.
@@ -150,15 +150,15 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 		}
 
 		fn writeError(self: *Self, remaining_bytes_len: usize) !void {
-			debug.assert(self.len_left > 0);
+			debug.assert(self.width_left > 0);
 			const err_symbol = "�";
 			debug.assert(err_symbol.len == 3);
-			if (self.len_left > 1) {
+			if (self.width_left > 1) {
 				try self.underlying_writer.writeAll(err_symbol);
-				self.len_left -= 1;
+				self.width_left -= 1;
 			} else if (remaining_bytes_len > 0) {
 				try self.underlying_writer.writeAll("…");
-				self.len_left -= 1;
+				self.width_left -= 1;
 			} else {
 				self.codepoint_staging_area = null;
 				self.codepoint_holding_area = CodepointStagingArea.new(err_symbol[0], err_symbol.len);
@@ -168,15 +168,15 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 		}
 
 		fn maybeWriteCodepointStagingArea(self: *Self, remaining_bytes_len: usize) !void {
-			debug.assert(self.len_left > 0);
-			if (self.len_left > 1) {
+			debug.assert(self.width_left > 0);
+			if (self.width_left > 1) {
 				try self.underlying_writer.writeAll(self.codepoint_staging_area.?.bytes());
 				self.codepoint_staging_area = null;
-				self.len_left -= 1;
+				self.width_left -= 1;
 			} else if (remaining_bytes_len > 0) {
 				try self.underlying_writer.writeAll("…");
 				self.codepoint_staging_area = null;
-				self.len_left -= 1;
+				self.width_left -= 1;
 			} else {
 				self.codepoint_holding_area = self.codepoint_staging_area;
 				self.codepoint_staging_area = null;
@@ -184,7 +184,7 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 		}
 
 		fn maybeWriteByte(self: *Self, b: u8, remaining_bytes_len: usize) !void {
-			debug.assert(self.len_left > 0);
+			debug.assert(self.width_left > 0);
 
 			// We do not want to end up with control characters in our output,
 			// as they potentially can mess up what we try to write to the
@@ -195,12 +195,12 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 			}
 
 			const byte = if (b == '\n' or b == '\t' or b == '\r' or b == ' ') ' ' else b;
-			if (self.len_left > 1) {
+			if (self.width_left > 1) {
 				try self.underlying_writer.writeByte(byte);
-				self.len_left -= 1;
+				self.width_left -= 1;
 			} else if (remaining_bytes_len > 0) {
 				try self.underlying_writer.writeAll("…");
-				self.len_left -= 1;
+				self.width_left -= 1;
 			} else {
 				self.codepoint_holding_area = CodepointStagingArea.new(byte, 1);
 			}
@@ -208,10 +208,10 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 	};
 }
 
-pub fn restrictedPaddingWriter(underlying_stream: anytype, len: usize) RestrictedPaddingWriter(@TypeOf(underlying_stream)) {
+pub fn restrictedPaddingWriter(underlying_stream: anytype, width: u32) RestrictedPaddingWriter(@TypeOf(underlying_stream)) {
 	return .{
 		.underlying_writer = underlying_stream,
-		.len_left = len,
+		.width_left = width,
 	};
 }
 

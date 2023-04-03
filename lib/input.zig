@@ -68,7 +68,7 @@ pub const InputContent = union(enum) {
 	function: u8,
 	codepoint: u21,
 
-	mouse: struct { x: usize, y: usize, button: MouseButton },
+	mouse: struct { x: u16, y: u16, button: MouseButton },
 };
 
 pub const MouseButton = enum { btn1, btn2, btn3, release, scroll_up, scroll_down };

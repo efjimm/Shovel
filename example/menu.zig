@@ -93,7 +93,7 @@ fn render() !void {
     try menuEntry(&rc, " →µ←", 6, entry_width);
 }
 
-fn menuEntry(rc: *spoon.Term.RenderContext, name: []const u8, row: usize, width: usize) !void {
+fn menuEntry(rc: *spoon.Term.RenderContext, name: []const u8, row: u16, width: u16) !void {
     try rc.moveCursorTo(row, 2);
     try rc.setStyle(.{ .fg = .blue, .attrs = .{ .reverse = (cursor == row - 3) }});
     var rpw = rc.restrictedPaddingWriter(width - 1);

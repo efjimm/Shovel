@@ -1,6 +1,7 @@
 // This file is part of zig-spoon, a TUI library for the zig language.
 //
 // Copyright © 2021 - 2022 Leon Henrik Plickat
+// Copyright © 2023 Evan Bonner
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License version 3 as published
@@ -47,8 +48,8 @@ const TermConfig = struct {
 cooked_termios: ?os.termios = null,
 
 /// Size of the terminal, updated when `fetchSize()` is called.
-width: usize = 0,
-height: usize = 0,
+width: u16 = 0,
+height: u16 = 0,
 
 /// Are we currently rendering?
 currently_rendering: bool = false,
@@ -344,7 +345,7 @@ pub const RenderContext = struct {
 	}
 
 	/// Move the cursor to the specified cell.
-	pub fn moveCursorTo(rc: *RenderContext, row: usize, col: usize) !void {
+	pub fn moveCursorTo(rc: *RenderContext, row: u16, col: u16) !void {
 		debug.assert(rc.term.currently_rendering);
 		const _writer = rc.buffer.writer();
 		try _writer.print(spells.move_cursor_fmt, .{ row + 1, col + 1 });
@@ -371,9 +372,9 @@ pub const RenderContext = struct {
 		try attr.dump(_writer);
 	}
 
-	pub fn restrictedPaddingWriter(rc: *RenderContext, len: usize) RestrictedPaddingWriter {
+	pub fn restrictedPaddingWriter(rc: *RenderContext, width: u16) RestrictedPaddingWriter {
 		debug.assert(rc.term.currently_rendering);
-		return rpw.restrictedPaddingWriter(rc.buffer.writer(), len);
+		return rpw.restrictedPaddingWriter(rc.buffer.writer(), width);
 	}
 
 	/// Write all bytes, wrapping at the end of the line.

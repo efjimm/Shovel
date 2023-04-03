@@ -137,7 +137,7 @@ fn render() !void {
         try rpw.finish();
 
         var it = spoon.inputParser(buf[0..read]);
-        var i: usize = 1;
+        var i: u16 = 1;
         while (it.next()) |in| : (i += 1) {
             rpw = rc.restrictedPaddingWriter(term.width);
             writer = rpw.writer();
@@ -153,7 +153,7 @@ fn render() !void {
                 try writer.writeByteNTimes(' ', msg.len);
             }
 
-            var mouse: ?struct { x: usize, y: usize } = null;
+            var mouse: ?struct { x: u16, y: u16 } = null;
 
             try writer.print("{}: ", .{i});
             switch (in.content) {
