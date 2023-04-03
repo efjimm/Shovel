@@ -27,7 +27,7 @@ const math = std.math;
 // Workaround for bad libc integration of zigs std.
 const constants = if (builtin.link_libc and builtin.os.tag == .linux) os.linux else os.system;
 
-const Attribute = @import("Attribute.zig");
+const Style = @import("Style.zig");
 const spells = @import("spells.zig");
 const rpw = @import("restricted_padding_writer.zig");
 
@@ -296,7 +296,7 @@ pub const RenderContext = struct {
 	}
 
 	/// Set the text attributes for all following writes.
-	pub fn setAttribute(rc: *RenderContext, attr: Attribute) !void {
+	pub fn setStyle(rc: *RenderContext, attr: Style) !void {
 		debug.assert(rc.term.currently_rendering);
 		const _writer = rc.buffer.writer();
 		try attr.dump(_writer);

@@ -1,4 +1,4 @@
-// This example programs demonstrates that spoon.Attribute can also be used
+// This example programs demonstrates that spoon.Style can also be used
 // stand-alone without using spoon.Term.
 
 const std = @import("std");
@@ -6,14 +6,14 @@ const io = std.io;
 
 const spoon = @import("spoon");
 
-const red = spoon.Attribute{ .fg = .red, .italic = true };
-const green = spoon.Attribute{ .fg = .green, .blinking = true };
-const blue = spoon.Attribute{ .fg = .blue, .bold = true };
-const cyan = spoon.Attribute{ .fg = .cyan, .reverse = true };
-const parsed = spoon.Attribute.Colour.fromDescription("magenta") catch
+const red = spoon.Style{ .fg = .red, .attrs = .{ .italic = true } };
+const green = spoon.Style{ .fg = .green, .attrs = .{ .blinking = true } };
+const blue = spoon.Style{ .fg = .blue, .attrs = .{ .bold = true } };
+const cyan = spoon.Style{ .fg = .cyan, .attrs = .{ .reverse = true } };
+const parsed = spoon.Style.Colour.fromDescription("magenta") catch
     @compileError("bad colour description");
-const magenta = spoon.Attribute{ .fg = parsed, .dimmed = true };
-const reset = spoon.Attribute{};
+const magenta = spoon.Style{ .fg = parsed, .attrs = .{ .dimmed = true }};
+const reset = spoon.Style{};
 
 pub fn main() !void {
     const writer = io.getStdOut().writer();

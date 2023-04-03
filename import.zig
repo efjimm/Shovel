@@ -18,7 +18,7 @@ pub const version = "0.1.0";
 
 pub const spells = @import("lib/spells.zig");
 
-pub const Attribute = @import("lib/Attribute.zig");
+pub const Style = @import("lib/Style.zig");
 pub const Term = @import("lib/Term.zig");
 pub const inputParser = @import("lib/input.zig").inputParser;
 pub const Input = @import("lib/input.zig").Input;

@@ -72,13 +72,13 @@ fn render() !void {
     try rc.clear();
 
     if (term.width < 6) {
-        try rc.setAttribute(.{ .fg = .red, .bold = true });
+        try rc.setStyle(.{ .fg = .red, .attrs = .{ .bold = true }});
         try rc.writeAllWrapping("Terminal too small!");
         return;
     }
 
     try rc.moveCursorTo(0, 0);
-    try rc.setAttribute(.{ .fg = .green, .reverse = true });
+    try rc.setStyle(.{ .fg = .green, .attrs = .{ .reverse = true }});
 
     // The RestrictedPaddingWriter helps us avoid writing more than the terminal
     // is wide. It exposes a normal writer interface you can use with any
@@ -90,7 +90,7 @@ fn render() !void {
     try rpw.pad();
 
     try rc.moveCursorTo(1, 0);
-    try rc.setAttribute(.{ .fg = .red, .bold = true });
+    try rc.setStyle(.{ .fg = .red, .attrs = .{ .bold = true }});
     rpw = rc.restrictedPaddingWriter(term.width);
     try rpw.writer().writeAll(" Up and Down arrows to select, q to exit.");
     try rpw.finish(); // No need to pad here, since there is no background.
@@ -104,7 +104,7 @@ fn render() !void {
 
 fn menuEntry(rc: *spoon.Term.RenderContext, name: []const u8, row: usize, width: usize) !void {
     try rc.moveCursorTo(row, 2);
-    try rc.setAttribute(.{ .fg = .blue, .reverse = (cursor == row - 3) });
+    try rc.setStyle(.{ .fg = .blue, .attrs = .{ .reverse = (cursor == row - 3) }});
     var rpw = rc.restrictedPaddingWriter(width - 1);
     defer rpw.pad() catch {};
     try rpw.writer().writeAll(name);

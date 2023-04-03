@@ -19,20 +19,20 @@ const ascii = std.ascii;
 const fmt = std.fmt;
 const mem = std.mem;
 
-const Colour = @import("Attribute.zig").Colour;
+const Colour = @import("Style.zig").Colour;
 
-/// A parser to convert an UTF8 string to an Attribute.Colour union.
+/// A parser to convert an UTF8 string to an Style.Colour union.
 /// RGB colours: "0xRRGGBB"
 /// 256 colours: "154"
 /// ANSI colours: A string equal to one of Colour fields (case sensitive)
 ///
 /// Examples:
 ///	 var rgb = try parseColourDescription("0x2b45a7");
-///		 -> Attribute{ .rgb = { 43, 69, 167 } };
+///		 -> Style{ .rgb = { 43, 69, 167 } };
 ///	 var 256 = try parseColourDescription("234");
-///		 -> Attribute{ .@"256" = 234 };
+///		 -> Style{ .@"256" = 234 };
 ///	 var ansi = try parseColourDescription("red");
-///		 -> Attribute{ .red };
+///		 -> Style{ .red };
 pub fn parseColourDescription(s: []const u8) !Colour {
 	if (s.len == 0) return error.BadColourDescription;
 

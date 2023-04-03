@@ -69,19 +69,19 @@ fn render() !void {
     try rc.clear();
 
     try rc.moveCursorTo(0, 0);
-    try rc.setAttribute(.{ .fg = .green, .reverse = true });
+    try rc.setStyle(.{ .fg = .green, .attrs = .{ .reverse = true } });
     var rpw = rc.restrictedPaddingWriter(term.width);
     try rpw.writer().writeAll(" Spoon example program: input-demo");
     try rpw.pad();
 
     try rc.moveCursorTo(1, 0);
-    try rc.setAttribute(.{ .fg = .red, .bold = true });
+    try rc.setStyle(.{ .fg = .red, .attrs = .{ .bold = true } });
     rpw = rc.restrictedPaddingWriter(term.width);
     try rpw.writer().writeAll(" Input demo / tester, q to exit.");
     try rpw.finish();
 
     try rc.moveCursorTo(3, 0);
-    try rc.setAttribute(.{ .bold = true });
+    try rc.setStyle(.{ .attrs = .{ .bold = true } });
     if (empty) {
         rpw = rc.restrictedPaddingWriter(term.width);
         try rpw.writer().writeAll(" Press a key! Or try to paste something!");
@@ -90,7 +90,7 @@ fn render() !void {
         rpw = rc.restrictedPaddingWriter(term.width);
         var writer = rpw.writer();
         try writer.writeAll(" Bytes read:    ");
-        try rc.setAttribute(.{});
+        try rc.setStyle(.{});
         try writer.print("{}", .{read});
         try rpw.finish();
 
@@ -99,11 +99,11 @@ fn render() !void {
             valid_unicode = false;
         };
         try rc.moveCursorTo(4, 0);
-        try rc.setAttribute(.{ .bold = true });
+        try rc.setStyle(.{ .attrs = .{ .bold = true } });
         rpw = rc.restrictedPaddingWriter(term.width);
         writer = rpw.writer();
         try writer.writeAll(" Valid unicode: ");
-        try rc.setAttribute(.{});
+        try rc.setStyle(.{});
         if (valid_unicode) {
             try writer.writeAll("yes: \"");
             for (buf[0..read]) |c| {
@@ -155,9 +155,9 @@ fn render() !void {
 
             const msg = " Input events:  ";
             if (i == 1) {
-                try rc.setAttribute(.{ .bold = true });
+                try rc.setStyle(.{ .attrs = .{ .bold = true } });
                 try writer.writeAll(msg);
-                try rc.setAttribute(.{ .bold = false });
+                try rc.setStyle(.{ .attrs = .{ .bold = false } });
             } else {
                 try writer.writeByteNTimes(' ', msg.len);
             }
@@ -188,7 +188,7 @@ fn render() !void {
 
             if (mouse) |m| {
                 try rc.moveCursorTo(m.y, m.x);
-                try rc.setAttribute(.{ .bg = .red, .bold = true });
+                try rc.setStyle(.{ .bg = .red, .attrs = .{ .bold = true } });
                 try rc.buffer.writer().writeByte('X');
             }
         }
