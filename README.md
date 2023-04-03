@@ -1,5 +1,8 @@
 # zig-spoon
 
+This is a fork of [zig-spoon](https://git.sr.ht/~leon_plickat/zig-spoon), updated to Zig master and
+with some personal modifications. Below is the original readme:
+
 zig-spoon is a zig library offering a simple, low-level and allocation free
 abstraction for creating TUI programs. zig-spoon takes care of wrangling the
 terminal, but unlike other TUI libraries it does not get in the way when you
