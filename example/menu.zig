@@ -21,13 +21,6 @@ pub fn main() !void {
         .flags = 0,
     }, null);
 
-    var fds: [1]os.pollfd = undefined;
-    fds[0] = .{
-        .fd = term.tty,
-        .events = os.POLL.IN,
-        .revents = undefined,
-    };
-
     // zig-spoon will return the terminal back to cooked state automatically
     // when we call term.deinit().
     try term.uncook(.{});
@@ -38,8 +31,6 @@ pub fn main() !void {
 
     var buf: [16]u8 = undefined;
     while (loop) {
-        _ = try os.poll(&fds, -1);
-
         const read = try term.readInput(&buf);
         var it = spoon.inputParser(buf[0..read]);
         while (it.next()) |in| {

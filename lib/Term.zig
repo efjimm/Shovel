@@ -33,7 +33,7 @@ const rpw = @import("restricted_padding_writer.zig");
 
 const Self = @This();
 
-const AltScreenConfig = struct {
+const UncookOptions = struct {
 	request_kitty_keyboard_protocol: bool = true,
 	request_mouse_tracking: bool = false,
 };
@@ -137,6 +137,26 @@ pub fn deinit(self: *Self) void {
 	self.* = undefined;
 }
 
+const SetBlockingReadError = os.TermiosGetError || os.TermiosSetError;
+
+pub fn setBlockingRead(self: Self, enabled: bool) SetBlockingReadError!void {
+	const termios = blk: {
+		var raw = try os.tcgetattr(self.tty);
+
+		if (enabled) {
+			raw.cc[constants.V.TIME] = 0;
+			raw.cc[constants.V.MIN] = 1;
+		} else {
+			raw.cc[constants.V.TIME] = 0;
+			raw.cc[constants.V.MIN] = 0;
+		}
+
+		break :blk raw;
+	};
+
+	try os.tcsetattr(self.tty, .FLUSH, termios);
+}
+
 pub fn readInput(self: *Self, buffer: []u8) os.ReadError!usize {
 	debug.assert(!self.currently_rendering);
 	debug.assert(!self.isCooked());
@@ -150,7 +170,7 @@ pub inline fn isCooked(self: Self) bool {
 pub const UncookError = os.TermiosGetError || os.TermiosSetError || os.WriteError;
 
 /// Enter raw mode.
-pub fn uncook(self: *Self, config: AltScreenConfig) UncookError!void {
+pub fn uncook(self: *Self, options: UncookOptions) UncookError!void {
 	if (!self.isCooked())
 		return;
 
@@ -200,11 +220,6 @@ pub fn uncook(self: *Self, config: AltScreenConfig) UncookError!void {
 		// anything remotely modern.
 		raw.cflag |= constants.CS8;
 
-		// With these settings, the read syscall will immediately return when it
-		// can't get any bytes. This allows poll to drive our loop.
-		raw.cc[constants.V.TIME] = 0;
-		raw.cc[constants.V.MIN] = 0;
-
 		break :blk raw;
 	};
 
@@ -222,10 +237,10 @@ pub fn uncook(self: *Self, config: AltScreenConfig) UncookError!void {
 			spells.reset_auto_interlace ++
 			spells.hide_cursor,
 	);
-	if (config.request_kitty_keyboard_protocol) {
+	if (options.request_kitty_keyboard_protocol) {
 		try _writer.writeAll(spells.enable_kitty_keyboard);
 	}
-	if (config.request_mouse_tracking) {
+	if (options.request_mouse_tracking) {
 		try _writer.writeAll(spells.enable_mouse_tracking);
 	}
 	try buffered_writer.flush();

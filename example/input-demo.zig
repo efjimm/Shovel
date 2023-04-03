@@ -37,13 +37,6 @@ pub fn main() !void {
         .flags = 0,
     }, null);
 
-    var fds: [1]os.pollfd = undefined;
-    fds[0] = .{
-        .fd = term.tty,
-        .events = os.POLL.IN,
-        .revents = undefined,
-    };
-
     try term.uncook(.{
         .request_kitty_keyboard_protocol = !force_legacy,
         .request_mouse_tracking = mouse,
@@ -54,8 +47,6 @@ pub fn main() !void {
     try render();
 
     while (loop) {
-        _ = try os.poll(&fds, -1);
-
         read = try term.readInput(&buf);
         empty = false;
         try render();
