@@ -1,6 +1,26 @@
 const std = @import("std");
 const Build = std.Build;
 
+fn example(
+	b: *Build,
+	name: []const u8,
+	file: []const u8,
+	target: anytype,
+	optimize: std.builtin.Mode,
+) *Build.CompileStep {
+	const exe = b.addExecutable(.{
+		.name = name,
+		.root_source_file = .{ .path = file },
+		.target = target,
+		.optimize = optimize,
+	});
+    exe.addAnonymousModule("spoon", .{
+    	.source_file = .{ .path = "import.zig" },
+    });
+    exe.install();
+    return exe;
+}
+
 pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -17,69 +37,13 @@ pub fn build(b: *Build) void {
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&tests.step);
 
-    {
-        const exe = b.addExecutable(.{
-        	.name = "menu",
-        	.root_source_file = .{ .path = "example/menu.zig" },
-        	.target = target,
-        	.optimize = optimize,
-        });
-        exe.addAnonymousModule("spoon", .{
-        	.source_file = .{ .path = "import.zig" },
-        });
-        exe.install();
-    }
+    _ = example(b, "menu", "example/menu.zig", target, optimize);
 
-    {
-        const exe = b.addExecutable(.{
-        	.name = "menu-libc",
-        	.root_source_file = .{ .path = "example/menu.zig" },
-        	.target = target,
-        	.optimize = optimize,
-        });
-        exe.linkLibC();
-        exe.addAnonymousModule("spoon", .{
-        	.source_file = .{ .path = "import.zig" },
-        });
-        exe.install();
-    }
+    const menu_libc = example(b, "menu-libc", "example/menu.zig", target, optimize);
+	menu_libc.linkLibC();
 
-    {
-		const exe = b.addExecutable(.{
-			.name = "input-demo",
-			.root_source_file = .{ .path = "example/input-demo.zig" },
-			.target = target,
-			.optimize = optimize,
-		});
-        exe.addAnonymousModule("spoon", .{
-        	.source_file = .{ .path = "import.zig" },
-        });
-        exe.install();
-    }
-
-    {
-    	const exe = b.addExecutable(.{
-    		.name = "colours",
-    		.root_source_file = .{ .path = "example/colours.zig" },
-    		.target = target,
-    		.optimize = optimize,
-    	});
-        exe.addAnonymousModule("spoon", .{
-        	.source_file = .{ .path = "import.zig" },
-        });
-        exe.install();
-    }
-
-    {
-        const exe = b.addExecutable(.{
-        	.name = "table-256-colours",
-        	.root_source_file = .{ .path = "example/table-256-colours.zig" },
-        	.target = target,
-        	.optimize = optimize,
-        });
-        exe.addAnonymousModule("spoon", .{
-        	.source_file = .{ .path = "import.zig" },
-        });
-        exe.install();
-    }
+	_ = example(b, "input-demo", "example/input-demo.zig", target, optimize);
+	_ = example(b, "colours", "example/colours.zig", target, optimize);
+	_ = example(b, "table-256-colours", "example/table-256-colours.zig", target, optimize);
+	_ = example(b, "width", "example/width.zig", target, optimize);
 }

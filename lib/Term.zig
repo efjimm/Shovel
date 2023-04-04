@@ -178,7 +178,6 @@ pub fn uncook(self: *Self, options: UncookOptions) UncookError!void {
 	// The information on the various flags and escape sequences is pieced
 	// together from various sources, including termios(3) and
 	// https://viewsourcecode.org/snaptoken/kilo/02.enteringRawMode.html.
-	// TODO: IUTF8 ?
 
 	self.cooked_termios = try os.tcgetattr(self.tty);
 	errdefer self.cook() catch {};
@@ -212,6 +211,10 @@ pub fn uncook(self: *Self, options: UncookOptions) UncookError!void {
 			constants.tcflag_t,
 			constants.IXON | constants.ICRNL | constants.BRKINT | constants.INPCK | constants.ISTRIP,
 		);
+
+		// IUTF8: (Linux only)
+		if (builtin.os.tag == .linux)
+			raw.iflag &= ~@as(constants.tcflag_t, constants.IUTF8);
 
 		// Disable output processing. Common output processing includes prefixing
 		// newline with a carriage return.

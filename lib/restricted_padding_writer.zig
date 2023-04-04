@@ -1,6 +1,7 @@
 // This file is part of zig-spoon, a TUI library for the zig language.
 //
 // Copyright © 2022 Leon Henrik Plickat
+// Copyright © 2023 Evan Bonner <ebonner@airmail.cc>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License version 3 as published
@@ -15,6 +16,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const wcWidth = @import("wcwidth.zig").wcWidth;
 const ascii = std.ascii;
 const fs = std.fs;
 const io = std.io;
@@ -51,6 +53,11 @@ const CodepointStagingArea = struct {
 	pub fn bytes(self: *Self) []const u8 {
 		return self.buf[0..self.len];
 	}
+
+	pub fn width(self: *Self) u4 {
+		const cp = unicode.utf8Decode(&self.buf) catch return 1;
+		return wcWidth(cp);
+	}
 };
 
 /// A writer that writes at most N terminal cells. If the caller tries to write
@@ -59,7 +66,7 @@ const CodepointStagingArea = struct {
 /// Needs to be finished with either pad(), getRemaining() or finish() to
 /// function correctly.
 ///
-/// TODO graphemes, emoji, double wide characters and similar pain :(
+/// TODO allow zero width codepoints after end without truncating
 pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 	return struct {
 		const Self = @This();
@@ -70,7 +77,6 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 		underlying_writer: UnderlyingWriter,
 
 		// This counts terminal cells, not bytes or codepoints!
-		// TODO ok, right now it does count codepoints, see previous TODO comment...
 		width_left: u32,
 
 		codepoint_staging_area: ?CodepointStagingArea = null,
@@ -169,14 +175,15 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 
 		fn maybeWriteCodepointStagingArea(self: *Self, remaining_bytes_len: usize) !void {
 			debug.assert(self.width_left > 0);
-			if (self.width_left > 1) {
+			const width = self.codepoint_staging_area.?.width();
+			if (self.width_left > width) {
 				try self.underlying_writer.writeAll(self.codepoint_staging_area.?.bytes());
 				self.codepoint_staging_area = null;
-				self.width_left -= 1;
+				self.width_left -= width;
 			} else if (remaining_bytes_len > 0) {
 				try self.underlying_writer.writeAll("…");
 				self.codepoint_staging_area = null;
-				self.width_left -= 1;
+				self.width_left = 0;
 			} else {
 				self.codepoint_holding_area = self.codepoint_staging_area;
 				self.codepoint_staging_area = null;
@@ -194,7 +201,7 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 				return;
 			}
 
-			const byte = if (b == '\n' or b == '\t' or b == '\r' or b == ' ') ' ' else b;
+			const byte = if (b == '\n' or b == '\t' or b == '\r') ' ' else b;
 			if (self.width_left > 1) {
 				try self.underlying_writer.writeByte(byte);
 				self.width_left -= 1;
