@@ -82,7 +82,7 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 		codepoint_staging_area: ?CodepointStagingArea = null,
 		codepoint_holding_area: ?CodepointStagingArea = null,
 
-		pub fn finish(self: *Self) !void {
+		pub fn finish(self: *Self) WriteError!void {
 			// TODO what should happen if the codepoint in the holding area is
 			//	  incomplete or bad?
 			if (self.codepoint_holding_area) |_| {
@@ -92,13 +92,13 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 			}
 		}
 
-		pub fn pad(self: *Self) !void {
+		pub fn pad(self: *Self) WriteError!void {
 			try self.finish();
 			try self.underlying_writer.writeByteNTimes(' ', self.width_left);
 			self.width_left = 0;
 		}
 
-		pub fn getRemaining(self: *Self) !u32 {
+		pub fn getRemaining(self: *Self) WriteError!u32 {
 			try self.finish();
 			return self.width_left;
 		}
@@ -155,7 +155,7 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 			return bytes.len;
 		}
 
-		fn writeError(self: *Self, remaining_bytes_len: usize) !void {
+		fn writeError(self: *Self, remaining_bytes_len: usize) WriteError!void {
 			debug.assert(self.width_left > 0);
 			const err_symbol = "�";
 			debug.assert(err_symbol.len == 3);
@@ -173,7 +173,7 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 			}
 		}
 
-		fn maybeWriteCodepointStagingArea(self: *Self, remaining_bytes_len: usize) !void {
+		fn maybeWriteCodepointStagingArea(self: *Self, remaining_bytes_len: usize) WriteError!void {
 			debug.assert(self.width_left > 0);
 			const width = self.codepoint_staging_area.?.width();
 			if (self.width_left > width) {
@@ -190,7 +190,7 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 			}
 		}
 
-		fn maybeWriteByte(self: *Self, b: u8, remaining_bytes_len: usize) !void {
+		fn maybeWriteByte(self: *Self, b: u8, remaining_bytes_len: usize) WriteError!void {
 			debug.assert(self.width_left > 0);
 
 			// We do not want to end up with control characters in our output,

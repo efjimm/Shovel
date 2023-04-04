@@ -21,19 +21,23 @@ const unicode = std.unicode;
 
 const Input = @import("input.zig").Input;
 
+const ParseError = error {
+	UnknownBadDescription,
+} || AddModError;
+
 /// A parser to convert human readable/writable utf8 plain-text input
 /// descriptions into Input structs.
 /// Examples:
 ///   "M-x" -> Input{ .content = .{ .codepoint = 'x' }, .mod_alt = true }
 ///   "C-a" -> Input{ .content = .{ .codepoint = 'a' }, .mod_ctrl = true }
-pub fn parseInputDescription(str: []const u8) !Input {
+pub fn parseInputDescription(str: []const u8) ParseError!Input {
 	// TODO specifying the same mod more than once is an error
 	var ret = Input{ .content = .unknown };
 
 	var buf: []const u8 = str;
 	while (true) {
 		if (buf.len == 0) {
-			return error.UnkownBadDescription;
+			return error.UnknownBadDescription;
 		} else if (mem.startsWith(u8, buf, "M-")) {
 			try addMod(&ret, .alt);
 			buf = buf["M-".len..];
@@ -110,18 +114,18 @@ pub fn parseInputDescription(str: []const u8) !Input {
 			ret.content = .begin;
 			break;
 		} else if (buf[0] == 'F') {
-			ret.content = .{ .function = fmt.parseInt(u8, buf[1..], 10) catch return error.UnkownBadDescription };
+			ret.content = .{ .function = fmt.parseInt(u8, buf[1..], 10) catch return error.UnknownBadDescription };
 			break;
 		} else {
-			const len = unicode.utf8ByteSequenceLength(buf[0]) catch return error.UnkownBadDescription;
-			if (buf.len != len) return error.UnkownBadDescription;
-			ret.content = .{ .codepoint = unicode.utf8Decode(buf) catch return error.UnkownBadDescription };
+			const len = unicode.utf8ByteSequenceLength(buf[0]) catch return error.UnknownBadDescription;
+			if (buf.len != len) return error.UnknownBadDescription;
+			ret.content = .{ .codepoint = unicode.utf8Decode(buf) catch return error.UnknownBadDescription };
 			break;
 		}
 	}
 
 	if (ret.content == .unknown) {
-		return error.UnkownBadDescription;
+		return error.UnknownBadDescription;
 	} else {
 		return ret;
 	}
@@ -129,7 +133,11 @@ pub fn parseInputDescription(str: []const u8) !Input {
 
 const Mod = enum { alt, control, super };
 
-fn addMod(in: *Input, mod: Mod) !void {
+const AddModError = error {
+	DuplicateMod,
+};
+
+fn addMod(in: *Input, mod: Mod) AddModError!void {
 	switch (mod) {
 		.alt => {
 			if (in.mod_alt) return error.DuplicateMod;
@@ -234,10 +242,10 @@ test "input description parser: bad input" {
 	const testing = std.testing;
 	try testing.expectError(error.DuplicateMod, parseInputDescription("M-M-escape"));
 	try testing.expectError(error.DuplicateMod, parseInputDescription("M-Alt-escape"));
-	try testing.expectError(error.UnkownBadDescription, parseInputDescription("M-"));
-	try testing.expectError(error.UnkownBadDescription, parseInputDescription("M-S-"));
-	try testing.expectError(error.UnkownBadDescription, parseInputDescription("aa"));
-	try testing.expectError(error.UnkownBadDescription, parseInputDescription("a-a"));
-	try testing.expectError(error.UnkownBadDescription, parseInputDescription("escap"));
-	try testing.expectError(error.UnkownBadDescription, parseInputDescription("\xB5"));
+	try testing.expectError(error.UnknownBadDescription, parseInputDescription("M-"));
+	try testing.expectError(error.UnknownBadDescription, parseInputDescription("M-S-"));
+	try testing.expectError(error.UnknownBadDescription, parseInputDescription("aa"));
+	try testing.expectError(error.UnknownBadDescription, parseInputDescription("a-a"));
+	try testing.expectError(error.UnknownBadDescription, parseInputDescription("escap"));
+	try testing.expectError(error.UnknownBadDescription, parseInputDescription("\xB5"));
 }

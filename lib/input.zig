@@ -33,7 +33,9 @@ const kitty_ctrl = 0b100;
 const kitty_super = 0b1000;
 
 pub const Input = struct {
-	pub const fromDescription = @import("input_description.zig").parseInputDescription;
+	const input_description = @import("input_description.zig");
+	pub const fromDescription = input_description.parseInputDescription;
+	pub const FromDescriptionError = input_description.ParseError;
 
 	/// Checks whether the Input equals an input description. Description must
 	/// be comptime known.

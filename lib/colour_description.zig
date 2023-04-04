@@ -21,6 +21,11 @@ const mem = std.mem;
 
 const Colour = @import("Style.zig").Colour;
 
+const ParseError = error {
+	BadColourDescription,
+	BadRgbFormat,
+};
+
 /// A parser to convert an UTF8 string to an Style.Colour union.
 /// RGB colours: "0xRRGGBB"
 /// 256 colours: "154"
@@ -33,8 +38,9 @@ const Colour = @import("Style.zig").Colour;
 ///		 -> Style{ .@"256" = 234 };
 ///	 var ansi = try parseColourDescription("red");
 ///		 -> Style{ .red };
-pub fn parseColourDescription(s: []const u8) !Colour {
-	if (s.len == 0) return error.BadColourDescription;
+pub fn parseColourDescription(s: []const u8) ParseError!Colour {
+	if (s.len == 0)
+		return error.BadColourDescription;
 
 	if (ascii.isDigit(s[0])) {
 		if (s.len == "0xRRGGBB".len and s[0] == '0' and s[1] == 'x') {
@@ -84,7 +90,7 @@ pub fn parseColourDescription(s: []const u8) !Colour {
 }
 
 /// Convert a string in the format "0xRRGGBB" to [3]u8.
-fn hexToRgb(s: []const u8) ![3]u8 {
+fn hexToRgb(s: []const u8) error{ BadRgbFormat }![3]u8 {
 	if (s.len != 6) return error.BadRgbFormat;
 	const r = fmt.parseUnsigned(u8, s[0..2], 16) catch return error.BadRgbFormat;
 	const g = fmt.parseUnsigned(u8, s[2..4], 16) catch return error.BadRgbFormat;

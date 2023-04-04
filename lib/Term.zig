@@ -57,6 +57,8 @@ currently_rendering: bool = false,
 /// Descriptor of opened file.
 tty: os.fd_t,
 
+pub const WriteError = os.WriteError;
+
 /// Dumb writer. Don't use.
 const Writer = io.Writer(os.fd_t, os.WriteError, os.write);
 fn writer(self: Self) Writer {
@@ -292,13 +294,13 @@ pub fn fetchSize(self: *Self) os.UnexpectedError!void {
 }
 
 /// Set window title using OSC 2. Shall not be called while rendering.
-pub fn setWindowTitle(self: *Self, comptime fmt: []const u8, args: anytype) !void {
+pub fn setWindowTitle(self: *Self, comptime fmt: []const u8, args: anytype) WriteError!void {
 	debug.assert(!self.currently_rendering);
 	const _writer = self.writer();
 	try _writer.print("\x1b]2;" ++ fmt ++ "\x1b\\", args);
 }
 
-pub fn getRenderContextSafe(self: *Self) !?RenderContext {
+pub fn getRenderContextSafe(self: *Self) WriteError!?RenderContext {
 	if (self.currently_rendering or self.isCooked())
 		return null;
 
@@ -317,7 +319,7 @@ pub fn getRenderContextSafe(self: *Self) !?RenderContext {
 	return rc;
 }
 
-pub fn getRenderContext(self: *Self) !RenderContext {
+pub fn getRenderContext(self: *Self) WriteError!RenderContext {
 	debug.assert(!self.currently_rendering);
 	debug.assert(!self.isCooked());
 	return (try self.getRenderContextSafe()) orelse unreachable;
@@ -331,7 +333,7 @@ pub const RenderContext = struct {
 
 	/// Finishes the render operation. The render context may not be used any
 	/// further.
-	pub fn done(rc: *RenderContext) !void {
+	pub fn done(rc: *RenderContext) WriteError!void {
 		debug.assert(rc.term.currently_rendering);
 		debug.assert(!rc.term.isCooked());
 		defer rc.term.currently_rendering = false;
@@ -341,35 +343,35 @@ pub const RenderContext = struct {
 	}
 
 	/// Clears all content.
-	pub fn clear(rc: *RenderContext) !void {
+	pub fn clear(rc: *RenderContext) WriteError!void {
 		debug.assert(rc.term.currently_rendering);
 		const _writer = rc.buffer.writer();
 		try _writer.writeAll(spells.clear);
 	}
 
 	/// Move the cursor to the specified cell.
-	pub fn moveCursorTo(rc: *RenderContext, row: u16, col: u16) !void {
+	pub fn moveCursorTo(rc: *RenderContext, row: u16, col: u16) WriteError!void {
 		debug.assert(rc.term.currently_rendering);
 		const _writer = rc.buffer.writer();
 		try _writer.print(spells.move_cursor_fmt, .{ row + 1, col + 1 });
 	}
 
 	/// Hide the cursor.
-	pub fn hideCursor(rc: *RenderContext) !void {
+	pub fn hideCursor(rc: *RenderContext) WriteError!void {
 		debug.assert(rc.term.currently_rendering);
 		const _writer = rc.buffer.writer();
 		try _writer.writeAll(spells.hide_cursor);
 	}
 
 	/// Show the cursor.
-	pub fn showCursor(rc: *RenderContext) !void {
+	pub fn showCursor(rc: *RenderContext) WriteError!void {
 		debug.assert(rc.term.currently_rendering);
 		const _writer = rc.buffer.writer();
 		try _writer.writeAll(spells.show_cursor);
 	}
 
 	/// Set the text attributes for all following writes.
-	pub fn setStyle(rc: *RenderContext, attr: Style) !void {
+	pub fn setStyle(rc: *RenderContext, attr: Style) WriteError!void {
 		debug.assert(rc.term.currently_rendering);
 		const _writer = rc.buffer.writer();
 		try attr.dump(_writer);
@@ -381,7 +383,7 @@ pub const RenderContext = struct {
 	}
 
 	/// Write all bytes, wrapping at the end of the line.
-	pub fn writeAllWrapping(rc: *RenderContext, bytes: []const u8) !void {
+	pub fn writeAllWrapping(rc: *RenderContext, bytes: []const u8) WriteError!void {
 		debug.assert(rc.term.currently_rendering);
 		const _writer = rc.buffer.writer();
 		try _writer.writeAll(spells.enable_auto_wrap);

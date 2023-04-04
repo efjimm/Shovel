@@ -18,7 +18,9 @@
 const Self = @This();
 
 pub const Colour = union(enum) {
-	pub const fromDescription = @import("colour_description.zig").parseColourDescription;
+	const colour_desc = @import("colour_description.zig");
+	pub const FromDescriptionError = colour_desc.ParseError;
+	pub const fromDescription = colour_desc.parseColourDescription;
 
 	// TODO since the default colours are also part of the 256 colour spec,
 	//	  maybe we should just use that. The dump function would then special
@@ -76,7 +78,7 @@ pub fn eql(self: Self, other: Self) bool {
 	return true;
 }
 
-pub fn dump(self: Self, writer: anytype) !void {
+pub fn dump(self: Self, writer: anytype) @TypeOf(writer).Error!void {
 	try writer.writeAll("\x1B[0");
 
 	if (self.attrs.bold) try writer.writeAll(";1");

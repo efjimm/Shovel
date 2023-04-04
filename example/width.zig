@@ -27,9 +27,10 @@ pub fn main() !void {
 	}
 }
 
-fn render(term: *spoon.Term) !void {
+const RenderError = spoon.Term.WriteError;
+
+fn render(term: *spoon.Term) RenderError!void {
 	var rc = try term.getRenderContext();
-	defer rc.done() catch {};
 
 	try rc.clear();
 
@@ -41,6 +42,11 @@ fn render(term: *spoon.Term) !void {
 
 	try rc.moveCursorTo(2, 0);
 	try testPaddingWriter(&rc, "😀😀…", "😀😀This is epic", 5);
+
+	try rc.moveCursorTo(3, 0);
+	try testPaddingWriter(&rc, " ", "\t", 1);
+
+	try rc.done();
 }
 
 fn testPaddingWriter(
