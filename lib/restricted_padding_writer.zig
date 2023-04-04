@@ -55,7 +55,7 @@ const CodepointStagingArea = struct {
 	}
 
 	pub fn width(self: *Self) u4 {
-		const cp = unicode.utf8Decode(&self.buf) catch return 1;
+		const cp = unicode.utf8Decode(self.buf[0..self.len]) catch return 1;
 		return wcWidth(cp);
 	}
 };
