@@ -160,10 +160,11 @@ pub fn setBlockingRead(self: Self, enabled: bool) SetBlockingReadError!void {
 	try os.tcsetattr(self.tty, .FLUSH, termios);
 }
 
-pub fn readInput(self: *Self, buffer: []u8) os.ReadError!usize {
+pub fn readInput(self: *Self, buffer: []u8) os.ReadError![]u8 {
 	debug.assert(!self.currently_rendering);
 	debug.assert(!self.isCooked());
-	return try os.read(self.tty, buffer);
+	const bytes_read = try os.read(self.tty, buffer);
+	return buffer[0..bytes_read];
 }
 
 pub inline fn isCooked(self: Self) bool {
