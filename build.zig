@@ -17,7 +17,7 @@ fn example(
     exe.addAnonymousModule("spoon", .{
     	.source_file = .{ .path = "import.zig" },
     });
-    exe.install();
+    b.installArtifact(exe);
     return exe;
 }
 
