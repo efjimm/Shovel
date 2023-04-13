@@ -13,8 +13,8 @@ pub fn main() !void {
 	while (running) {
 		try render(&term);
 
-		const bytes_read = try term.readInput(&buf);
-		var iter = spoon.inputParser(buf[0..bytes_read]);
+		const slice = try term.readInput(&buf);
+		var iter = spoon.inputParser(slice);
 		while (iter.next()) |in| {
 			switch (in.content) {
 				.codepoint => |cp| switch (cp) {

@@ -31,8 +31,8 @@ pub fn main() !void {
 
     var buf: [16]u8 = undefined;
     while (loop) {
-        const read = try term.readInput(&buf);
-        var it = spoon.inputParser(buf[0..read]);
+        const slice = try term.readInput(&buf);
+        var it = spoon.inputParser(slice);
         while (it.next()) |in| {
             // The input descriptor parser is not only useful for user-configuration.
             // Since it can work at comptime, you can use it to simplify the

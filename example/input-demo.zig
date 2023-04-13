@@ -47,7 +47,7 @@ pub fn main() !void {
     try render();
 
     while (loop) {
-        read = try term.readInput(&buf);
+        read = (try term.readInput(&buf)).len;
         empty = false;
         try render();
     }
