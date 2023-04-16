@@ -34,8 +34,10 @@ pub fn build(b: *Build) void {
     	.target = target,
     	.optimize = optimize,
     });
+
+    const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run all tests");
-    test_step.dependOn(&tests.step);
+    test_step.dependOn(&run_tests.step);
 
     _ = example(b, "menu", "example/menu.zig", target, optimize);
 
