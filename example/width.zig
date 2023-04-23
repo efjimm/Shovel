@@ -30,7 +30,7 @@ pub fn main() !void {
 const RenderError = spoon.Term.WriteError;
 
 fn render(term: *spoon.Term) RenderError!void {
-	var rc = try term.getRenderContext();
+	var rc = try term.getRenderContext(4096);
 
 	try rc.clear();
 
@@ -50,7 +50,7 @@ fn render(term: *spoon.Term) RenderError!void {
 }
 
 fn testPaddingWriter(
-	rc: *spoon.Term.RenderContext,
+	rc: anytype,
 	desired: []const u8,
 	string: []const u8,
 	width: u16,

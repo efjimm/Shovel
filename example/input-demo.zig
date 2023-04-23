@@ -54,7 +54,7 @@ pub fn main() !void {
 }
 
 fn render() !void {
-    var rc = try term.getRenderContext();
+    var rc = try term.getRenderContext(4096);
     defer rc.done() catch {};
 
     try rc.clear();

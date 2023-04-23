@@ -32,7 +32,7 @@ const Style = @import("Style.zig");
 const spells = @import("spells.zig");
 const rpw = @import("restricted_padding_writer.zig");
 
-const Self = @This();
+const Term = @This();
 
 const UncookOptions = struct {
 	request_kitty_keyboard_protocol: bool = true,
@@ -61,14 +61,18 @@ pub const WriteError = os.WriteError;
 
 /// Dumb writer. Don't use.
 const Writer = io.Writer(os.fd_t, os.WriteError, os.write);
-fn writer(self: Self) Writer {
+fn writer(self: Term) Writer {
 	return .{ .context = self.tty };
 }
 
 /// Buffered writer. Use.
-const BufferedWriter = io.BufferedWriter(4096, Writer);
-fn bufferedWriter(self: Self) BufferedWriter {
-	return io.bufferedWriter(self.writer());
+fn bufferedWriter(
+	self: Term,
+	comptime buffer_size: usize,
+) io.BufferedWriter(buffer_size, Writer) {
+	return io.BufferedWriter(buffer_size, Writer){
+		.unbuffered_writer = self.writer(),
+	};
 }
 
 // NotATerminal + a subset of os.OpenError, removing all errors which aren't reachable due to how
@@ -91,8 +95,8 @@ pub const InitError = error{
     Unexpected,
 };
 
-pub fn init(term_config: TermConfig) InitError!Self {
-	const ret = Self{
+pub fn init(term_config: TermConfig) InitError!Term {
+	const ret = Term{
 		.tty = os.open(term_config.tty_name, constants.O.RDWR, 0) catch |err| switch (err) {
 			// None of these are reachable with the flags we pass to os.open
 			error.DeviceBusy,
@@ -129,7 +133,7 @@ pub fn init(term_config: TermConfig) InitError!Self {
 	return ret;
 }
 
-pub fn deinit(self: *Self) void {
+pub fn deinit(self: *Term) void {
 	debug.assert(!self.currently_rendering);
 
 	// It's probably a good idea to cook the terminal on exit.
@@ -142,7 +146,7 @@ pub fn deinit(self: *Self) void {
 
 const SetBlockingReadError = os.TermiosGetError || os.TermiosSetError;
 
-pub fn setBlockingRead(self: Self, enabled: bool) SetBlockingReadError!void {
+pub fn setBlockingRead(self: Term, enabled: bool) SetBlockingReadError!void {
 	const termios = blk: {
 		var raw = try os.tcgetattr(self.tty);
 
@@ -160,21 +164,21 @@ pub fn setBlockingRead(self: Self, enabled: bool) SetBlockingReadError!void {
 	try os.tcsetattr(self.tty, .FLUSH, termios);
 }
 
-pub fn readInput(self: *Self, buffer: []u8) os.ReadError![]u8 {
+pub fn readInput(self: *Term, buffer: []u8) os.ReadError![]u8 {
 	debug.assert(!self.currently_rendering);
 	debug.assert(!self.isCooked());
 	const bytes_read = try os.read(self.tty, buffer);
 	return buffer[0..bytes_read];
 }
 
-pub inline fn isCooked(self: Self) bool {
+pub inline fn isCooked(self: Term) bool {
 	return self.cooked_termios == null;
 }
 
 pub const UncookError = os.TermiosGetError || os.TermiosSetError || os.WriteError;
 
 /// Enter raw mode.
-pub fn uncook(self: *Self, options: UncookOptions) UncookError!void {
+pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
 	if (!self.isCooked())
 		return;
 
@@ -232,7 +236,7 @@ pub fn uncook(self: *Self, options: UncookOptions) UncookError!void {
 
 	try os.tcsetattr(self.tty, .FLUSH, raw_termios);
 
-	var buffered_writer = self.bufferedWriter();
+	var buffered_writer = self.bufferedWriter(256);
 	const _writer = buffered_writer.writer();
 	try _writer.writeAll(
 		spells.save_cursor_position ++
@@ -256,11 +260,11 @@ pub fn uncook(self: *Self, options: UncookOptions) UncookError!void {
 pub const CookError = os.WriteError || os.TermiosSetError;
 
 /// Enter cooked mode.
-pub fn cook(self: *Self) CookError!void {
+pub fn cook(self: *Term) CookError!void {
 	if (self.isCooked())
 		return;
 
-	var buffered_writer = self.bufferedWriter();
+	var buffered_writer = self.bufferedWriter(128);
 	const _writer = buffered_writer.writer();
 	try _writer.writeAll(
 		// Even if we did not request the kitty keyboard protocol or mouse
@@ -281,7 +285,7 @@ pub fn cook(self: *Self) CookError!void {
 	self.cooked_termios = null;
 }
 
-pub fn fetchSize(self: *Self) os.UnexpectedError!void {
+pub fn fetchSize(self: *Term) os.UnexpectedError!void {
 	if (self.isCooked())
 		return;
 
@@ -295,22 +299,25 @@ pub fn fetchSize(self: *Self) os.UnexpectedError!void {
 }
 
 /// Set window title using OSC 2. Shall not be called while rendering.
-pub fn setWindowTitle(self: *Self, comptime fmt: []const u8, args: anytype) WriteError!void {
+pub fn setWindowTitle(self: *Term, comptime fmt: []const u8, args: anytype) WriteError!void {
 	debug.assert(!self.currently_rendering);
 	const _writer = self.writer();
 	try _writer.print("\x1b]2;" ++ fmt ++ "\x1b\\", args);
 }
 
-pub fn getRenderContextSafe(self: *Self) WriteError!?RenderContext {
+pub fn getRenderContextSafe(
+	self: *Term,
+	comptime buffer_size: usize,
+) WriteError!?RenderContext(buffer_size) {
 	if (self.currently_rendering or self.isCooked())
 		return null;
 
 	self.currently_rendering = true;
 	errdefer self.currently_rendering = false;
 
-	var rc = RenderContext{
+	var rc = RenderContext(buffer_size){
 		.term = self,
-		.buffer = self.bufferedWriter(),
+		.buffer = self.bufferedWriter(buffer_size),
 	};
 
 	const _writer = rc.buffer.writer();
@@ -320,75 +327,112 @@ pub fn getRenderContextSafe(self: *Self) WriteError!?RenderContext {
 	return rc;
 }
 
-pub fn getRenderContext(self: *Self) WriteError!RenderContext {
+pub fn getRenderContext(
+	self: *Term,
+	comptime buffer_size: usize,
+) WriteError!RenderContext(buffer_size) {
 	debug.assert(!self.currently_rendering);
 	debug.assert(!self.isCooked());
-	return (try self.getRenderContextSafe()) orelse unreachable;
+	return (try self.getRenderContextSafe(buffer_size)) orelse unreachable;
 }
 
-pub const RenderContext = struct {
-	term: *Self,
-	buffer: BufferedWriter,
+pub fn RenderContext(comptime buffer_size: usize) type {
+	return struct {
+		term: *Term,
+		buffer: BufferedWriter,
 
-	const RestrictedPaddingWriter = rpw.RestrictedPaddingWriter(BufferedWriter.Writer);
+		const Self = @This();
+		const BufferedWriter = io.BufferedWriter(buffer_size, Writer);
+		const RestrictedPaddingWriter = rpw.RestrictedPaddingWriter(BufferedWriter.Writer);
 
-	/// Finishes the render operation. The render context may not be used any
-	/// further.
-	pub fn done(rc: *RenderContext) WriteError!void {
-		debug.assert(rc.term.currently_rendering);
-		debug.assert(!rc.term.isCooked());
-		defer rc.term.currently_rendering = false;
-		const _writer = rc.buffer.writer();
-		try _writer.writeAll(spells.end_sync);
-		try rc.buffer.flush();
-	}
+		/// Finishes the render operation. The render context may not be used any
+		/// further.
+		pub fn done(rc: *Self) WriteError!void {
+			debug.assert(rc.term.currently_rendering);
+			debug.assert(!rc.term.isCooked());
+			defer rc.term.currently_rendering = false;
+			const _writer = rc.buffer.writer();
+			try _writer.writeAll(spells.end_sync);
+			try rc.buffer.flush();
+		}
 
-	/// Clears all content.
-	pub fn clear(rc: *RenderContext) WriteError!void {
-		debug.assert(rc.term.currently_rendering);
-		const _writer = rc.buffer.writer();
-		try _writer.writeAll(spells.clear);
-	}
+		/// Clears all content. Avoid calling often, as fully clearing and redrawing the screen can
+		/// cause flicker on some terminals (such as the Linux tty). Prefer more granular clearing
+		/// functions like `clearToEol` and `clearToBot`.
+		pub fn clear(rc: *Self) WriteError!void {
+			debug.assert(rc.term.currently_rendering);
+			const _writer = rc.buffer.writer();
+			try _writer.writeAll(spells.clear);
+		}
 
-	/// Move the cursor to the specified cell.
-	pub fn moveCursorTo(rc: *RenderContext, row: u16, col: u16) WriteError!void {
-		debug.assert(rc.term.currently_rendering);
-		const _writer = rc.buffer.writer();
-		try _writer.print(spells.move_cursor_fmt, .{ row + 1, col + 1 });
-	}
+		/// Clears the screen from the current line to the bottom.
+		pub fn clearToBot(rc: *Self) WriteError!void {
+			debug.assert(rc.term.curerntly_rendering);
+			const _writer = rc.buffer.writer();
+			try _writer.writeAll(spells.clear_to_bot);
+		}
 
-	/// Hide the cursor.
-	pub fn hideCursor(rc: *RenderContext) WriteError!void {
-		debug.assert(rc.term.currently_rendering);
-		const _writer = rc.buffer.writer();
-		try _writer.writeAll(spells.hide_cursor);
-	}
+		/// Clears the screen from the current line to the top.
+		pub fn clearToTop(rc: *Self) WriteError!void {
+			debug.assert(rc.term.curerntly_rendering);
+			const _writer = rc.buffer.writer();
+			try _writer.writeAll(spells.clear_to_top);
+		}
 
-	/// Show the cursor.
-	pub fn showCursor(rc: *RenderContext) WriteError!void {
-		debug.assert(rc.term.currently_rendering);
-		const _writer = rc.buffer.writer();
-		try _writer.writeAll(spells.show_cursor);
-	}
+		/// Clears from the cursor position to the end of the line.
+		pub fn clearToEol(rc: *Self) WriteError!void {
+			debug.assert(rc.term.currently_rendering);
+			const _writer = rc.buffer.writer();
+			try _writer.writeAll(spells.clear_to_eol);
+		}
 
-	/// Set the text attributes for all following writes.
-	pub fn setStyle(rc: *RenderContext, attr: Style) WriteError!void {
-		debug.assert(rc.term.currently_rendering);
-		const _writer = rc.buffer.writer();
-		try attr.dump(_writer);
-	}
+		/// Clears the screen from the cursor to the beginning of the line.
+		pub fn clearToBol(rc: *Self) WriteError!void {
+			debug.assert(rc.term.currently_rendering);
+			const _writer = rc.buffer.writer();
+			try _writer.writeAll(spells.clear_to_bol);
+		}
 
-	pub fn restrictedPaddingWriter(rc: *RenderContext, width: u16) RestrictedPaddingWriter {
-		debug.assert(rc.term.currently_rendering);
-		return rpw.restrictedPaddingWriter(rc.buffer.writer(), width);
-	}
+		/// Move the cursor to the specified cell.
+		pub fn moveCursorTo(rc: *Self, row: u16, col: u16) WriteError!void {
+			debug.assert(rc.term.currently_rendering);
+			const _writer = rc.buffer.writer();
+			try _writer.print(spells.move_cursor_fmt, .{ row + 1, col + 1 });
+		}
 
-	/// Write all bytes, wrapping at the end of the line.
-	pub fn writeAllWrapping(rc: *RenderContext, bytes: []const u8) WriteError!void {
-		debug.assert(rc.term.currently_rendering);
-		const _writer = rc.buffer.writer();
-		try _writer.writeAll(spells.enable_auto_wrap);
-		try _writer.writeAll(bytes);
-		try _writer.writeAll(spells.reset_auto_wrap);
-	}
-};
+		/// Hide the cursor.
+		pub fn hideCursor(rc: *Self) WriteError!void {
+			debug.assert(rc.term.currently_rendering);
+			const _writer = rc.buffer.writer();
+			try _writer.writeAll(spells.hide_cursor);
+		}
+
+		/// Show the cursor.
+		pub fn showCursor(rc: *Self) WriteError!void {
+			debug.assert(rc.term.currently_rendering);
+			const _writer = rc.buffer.writer();
+			try _writer.writeAll(spells.show_cursor);
+		}
+
+		/// Set the text attributes for all following writes.
+		pub fn setStyle(rc: *Self, attr: Style) WriteError!void {
+			debug.assert(rc.term.currently_rendering);
+			const _writer = rc.buffer.writer();
+			try attr.dump(_writer);
+		}
+
+		pub fn restrictedPaddingWriter(rc: *Self, width: u16) RestrictedPaddingWriter {
+			debug.assert(rc.term.currently_rendering);
+			return rpw.restrictedPaddingWriter(rc.buffer.writer(), width);
+		}
+
+		/// Write all bytes, wrapping at the end of the line.
+		pub fn writeAllWrapping(rc: *Self, bytes: []const u8) WriteError!void {
+			debug.assert(rc.term.currently_rendering);
+			const _writer = rc.buffer.writer();
+			try _writer.writeAll(spells.enable_auto_wrap);
+			try _writer.writeAll(bytes);
+			try _writer.writeAll(spells.reset_auto_wrap);
+		}
+	};
+}

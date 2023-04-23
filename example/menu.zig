@@ -57,7 +57,7 @@ pub fn main() !void {
 }
 
 fn render() !void {
-    var rc = try term.getRenderContext();
+    var rc = try term.getRenderContext(4096);
     defer rc.done() catch {};
 
     try rc.clear();
@@ -93,7 +93,7 @@ fn render() !void {
     try menuEntry(&rc, " →µ←", 6, entry_width);
 }
 
-fn menuEntry(rc: *spoon.Term.RenderContext, name: []const u8, row: u16, width: u16) !void {
+fn menuEntry(rc: anytype, name: []const u8, row: u16, width: u16) !void {
     try rc.moveCursorTo(row, 2);
     try rc.setStyle(.{ .fg = .blue, .attrs = .{ .reverse = (cursor == row - 3) }});
     var rpw = rc.restrictedPaddingWriter(width - 1);

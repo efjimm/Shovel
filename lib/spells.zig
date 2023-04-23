@@ -38,7 +38,13 @@ pub const leave_alt_buffer = "\x1B[?1049l";
 pub const restore_screen = "\x1B[?47l";
 pub const restore_cursor_position = "\x1B[u";
 
+pub const clear_to_bot = "\x1B[0J";
+pub const clear_to_top = "\x1B[1J";
 pub const clear = "\x1B[2J";
+
+pub const clear_to_eol = "\x1B[0K";
+pub const clear_to_bol = "\x1B[1K";
+pub const clear_line = "\x1B[2K";
 
 pub const reset_attributes = "\x1B[0m";
 
