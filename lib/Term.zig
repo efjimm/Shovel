@@ -57,6 +57,8 @@ currently_rendering: bool = false,
 /// Descriptor of opened file.
 tty: os.fd_t,
 
+cursor_visible: bool = true,
+
 pub const WriteError = os.WriteError;
 
 /// Dumb writer. Don't use.
@@ -403,15 +405,21 @@ pub fn RenderContext(comptime buffer_size: usize) type {
 		/// Hide the cursor.
 		pub fn hideCursor(rc: *Self) WriteError!void {
 			debug.assert(rc.term.currently_rendering);
+			if (!rc.term.cursor_visible)
+				return;
 			const _writer = rc.buffer.writer();
 			try _writer.writeAll(spells.hide_cursor);
+			rc.term.cursor_visible = false;
 		}
 
 		/// Show the cursor.
 		pub fn showCursor(rc: *Self) WriteError!void {
 			debug.assert(rc.term.currently_rendering);
+			if (rc.term.cursor_visible)
+				return;
 			const _writer = rc.buffer.writer();
 			try _writer.writeAll(spells.show_cursor);
+			rc.term.cursor_visible = true;
 		}
 
 		/// Set the text attributes for all following writes.
