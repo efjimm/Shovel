@@ -58,6 +58,9 @@ currently_rendering: bool = false,
 tty: os.fd_t,
 
 cursor_visible: bool = true,
+cursor_shape: CursorShape = .unknown,
+
+pub const CursorShape = spells.CursorShape;
 
 pub const WriteError = os.WriteError;
 
@@ -441,6 +444,14 @@ pub fn RenderContext(comptime buffer_size: usize) type {
 			try _writer.writeAll(spells.enable_auto_wrap);
 			try _writer.writeAll(bytes);
 			try _writer.writeAll(spells.reset_auto_wrap);
+		}
+
+		pub fn setCursorShape(rc: *Self, shape: CursorShape) WriteError!void {
+			debug.assert(rc.term.currently_rendering);
+			if (rc.term.cursor_shape == shape) return;
+			const _writer = rc.buffer.writer();
+			try _writer.writeAll(spells.cursor_shapes.get(shape));
+			rc.term.cursor_shape = shape;
 		}
 	};
 }

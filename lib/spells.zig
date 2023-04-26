@@ -13,10 +13,33 @@
 //
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
+const std = @import("std");
 
 pub const hide_cursor = "\x1B[?25l";
 pub const show_cursor = "\x1B[?25h";
 pub const move_cursor_fmt = "\x1B[{};{}H";
+
+pub const CursorShape = enum {
+	unknown,
+	blinking_block,
+	blinking_bar,
+	blinking_underline,
+	block,
+	bar,
+	underline,
+};
+
+pub const cursor_shapes = blk: {
+	var ret = std.EnumArray(CursorShape, []const u8).initUndefined();
+	ret.set(.unknown, "");
+	ret.set(.blinking_block, "\x1B[1 q");
+	ret.set(.block, "\x1B[2 q");
+	ret.set(.blinking_underline, "\x1B[3 q");
+	ret.set(.underline, "\x1B[4 q");
+	ret.set(.blinking_bar, "\x1B[5 q");
+	ret.set(.bar, "\x1B[6 q");
+	break :blk ret;
+};
 
 // https://sw.kovidgoyal.net/kitty/keyboard-protocol/
 // This enables an alternative input mode, that makes it possible, among
