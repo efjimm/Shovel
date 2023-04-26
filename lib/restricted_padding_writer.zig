@@ -16,7 +16,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
-const wcWidth = @import("wcwidth.zig").wcWidth;
+const wcWidth = @import("wcwidth").wcWidth;
 const ascii = std.ascii;
 const fs = std.fs;
 const io = std.io;

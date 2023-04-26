@@ -25,8 +25,17 @@ pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const wcwidth = b.dependency("wcwidth", .{}).module("wcwidth");
+    b.modules.put(b.dupe("wcwidth"), wcwidth) catch @panic("OOM");
+
     _ = b.addModule("spoon", .{
     	.source_file = .{ .path = "import.zig" },
+    	.dependencies = &.{
+    		.{
+    			.name = "wcwidth",
+    			.module = wcwidth,
+    		},
+    	},
     });
 
     const tests = b.addTest(.{
@@ -34,6 +43,7 @@ pub fn build(b: *Build) void {
     	.target = target,
     	.optimize = optimize,
     });
+    tests.addModule("wcwidth", wcwidth);
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run all tests");
