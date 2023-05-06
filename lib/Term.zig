@@ -169,10 +169,30 @@ pub fn setBlockingRead(self: Term, enabled: bool) SetBlockingReadError!void {
 	try os.tcsetattr(self.tty, .FLUSH, termios);
 }
 
-pub fn readInput(self: *Term, buffer: []u8) os.ReadError![]u8 {
+pub fn readInput(self: *Term, buffer: []u8) ![]u8 {
 	debug.assert(!self.currently_rendering);
 	debug.assert(!self.isCooked());
-	const bytes_read = try os.read(self.tty, buffer);
+
+	// Use system.read instead of os.read so it won't restart on signals.
+
+	const rc = os.system.read(self.tty, buffer.ptr, buffer.len);
+
+	const bytes_read = switch (os.errno(rc)) {
+        .SUCCESS => @intCast(usize, rc),
+        .INTR => 0,
+        .INVAL => unreachable,
+        .FAULT => unreachable,
+        .AGAIN => return error.WouldBlock,
+        .BADF => return error.NotOpenForReading, // Can be a race condition.
+        .IO => return error.InputOutput,
+        .ISDIR => return error.IsDir,
+        .NOBUFS => return error.SystemResources,
+        .NOMEM => return error.SystemResources,
+        .CONNRESET => return error.ConnectionResetByPeer,
+        .TIMEDOUT => return error.ConnectionTimedOut,
+        else => |err| return os.unexpectedErrno(err),
+	};
+
 	return buffer[0..bytes_read];
 }
 
