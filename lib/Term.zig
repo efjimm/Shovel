@@ -60,6 +60,9 @@ tty: os.fd_t,
 cursor_visible: bool = true,
 cursor_shape: CursorShape = .unknown,
 
+codepoint: [4]u8 = undefined,
+codepoint_len: u3 = 0,
+
 pub const CursorShape = spells.CursorShape;
 
 pub const WriteError = os.WriteError;
@@ -169,12 +172,24 @@ pub fn setBlockingRead(self: Term, enabled: bool) SetBlockingReadError!void {
 	try os.tcsetattr(self.tty, .FLUSH, termios);
 }
 
-pub fn readInput(self: *Term, buffer: []u8) ![]u8 {
+// Reads from stdin to the supplied buffer. Asserts that `buf.len >= 8`.
+pub fn readInput(self: *Term, buf: []u8) ![]u8 {
+	debug.assert(buf.len >= 8); // Ensures that at least one full escape sequence can be handled
 	debug.assert(!self.currently_rendering);
 	debug.assert(!self.isCooked());
 
-	// Use system.read instead of os.read so it won't restart on signals.
+	// If we have a partial codepoint from the last read, append it to the buffer
+	const buffer = blk: {
+		const len = self.codepoint_len;
+		if (len > 0) {
+			@memcpy(buf[0..len], self.codepoint[0..len]);
+			self.codepoint_len = 0;
+			break :blk buf[len..];
+		}
+		break :blk buf;
+	};
 
+	// Use system.read instead of os.read so it won't restart on signals.
 	const rc = os.system.read(self.tty, buffer.ptr, buffer.len);
 
 	const bytes_read = switch (os.errno(rc)) {
@@ -193,7 +208,28 @@ pub fn readInput(self: *Term, buffer: []u8) ![]u8 {
         else => |err| return os.unexpectedErrno(err),
 	};
 
-	return buffer[0..bytes_read];
+	const slice = buffer[0..bytes_read];
+	// Check if last part of the buffer is a partial utf-8 codepoint. If this happens, we write the
+	// partial codepoint to an internal buffer, and complete it on the next call to readInput.
+	if (bytes_read == buffer.len and buffer[buffer.len - 1] > 0x7F) {
+		var i: usize = buffer.len;
+		while (i > 0) {
+			i -= 1;
+			if (buffer[i] & 0xC0 == 0xC0) break;
+		} else return slice; // Have invalid utf-8, pass it through
+
+		const codepoint_len = std.unicode.utf8ByteSequenceLength(buffer[i]) catch return slice;
+		const len = buffer.len - i; // Length of unfinished codepoint
+		if (codepoint_len <= len) return slice; // Have invalid utf-8
+
+		// Copy unfinished codepoint into internal buffer
+		@memcpy(self.codepoint[0..len], buffer[i..]);
+		self.codepoint_len = @intCast(u3, len);
+		// Return the buffer without the trailing unfinished codepoint
+		return buffer[0..i];
+	}
+
+	return slice;
 }
 
 pub inline fn isCooked(self: Term) bool {
