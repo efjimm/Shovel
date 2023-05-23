@@ -7,7 +7,6 @@ fn example(
 	file: []const u8,
 	target: anytype,
 	optimize: std.builtin.Mode,
-	wcwidth: *Build.Module,
 ) *Build.CompileStep {
 	const exe = b.addExecutable(.{
 		.name = name,
@@ -15,6 +14,7 @@ fn example(
 		.target = target,
 		.optimize = optimize,
 	});
+    const wcwidth = b.dependency("wcwidth", .{}).module("wcwidth");
     exe.addAnonymousModule("spoon", .{
     	.source_file = .{ .path = "import.zig" },
     	.dependencies = &.{
@@ -33,7 +33,6 @@ pub fn build(b: *Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const wcwidth = b.dependency("wcwidth", .{}).module("wcwidth");
-    b.modules.put(b.dupe("wcwidth"), wcwidth) catch @panic("OOM");
 
     _ = b.addModule("spoon", .{
     	.source_file = .{ .path = "import.zig" },
@@ -56,13 +55,13 @@ pub fn build(b: *Build) void {
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_tests.step);
 
-    _ = example(b, "menu", "example/menu.zig", target, optimize, wcwidth);
+    _ = example(b, "menu", "example/menu.zig", target, optimize);
 
-    const menu_libc = example(b, "menu-libc", "example/menu.zig", target, optimize, wcwidth);
+    const menu_libc = example(b, "menu-libc", "example/menu.zig", target, optimize);
 	menu_libc.linkLibC();
 
-	_ = example(b, "input-demo", "example/input-demo.zig", target, optimize, wcwidth);
-	_ = example(b, "colours", "example/colours.zig", target, optimize, wcwidth);
-	_ = example(b, "table-256-colours", "example/table-256-colours.zig", target, optimize, wcwidth);
-	_ = example(b, "width", "example/width.zig", target, optimize, wcwidth);
+	_ = example(b, "input-demo", "example/input-demo.zig", target, optimize);
+	_ = example(b, "colours", "example/colours.zig", target, optimize);
+	_ = example(b, "table-256-colours", "example/table-256-colours.zig", target, optimize);
+	_ = example(b, "width", "example/width.zig", target, optimize);
 }
