@@ -1,10 +1,10 @@
 .{
-	.name = "spoon",
-	.version = "0.1.0",
-	.dependencies = .{
-		.wcwidth = .{
-			.url = "https://github.com/efjimm/zig-wcwidth/archive/91891b022dd680dfac8a8ce703418cac65db8ee6.tar.gz",
-			.hash = "1220457c28f164c8095eaa49f81265f233eaaccedc7ed0a1ca299c99e11265c3ce10",
-		},
-	},
+    .name = "spoon",
+    .version = "0.1.0",
+    .dependencies = .{
+        .wcwidth = .{
+            .url = "https://github.com/efjimm/zig-wcwidth/archive/91891b022dd680dfac8a8ce703418cac65db8ee6.tar.gz",
+            .hash = "1220457c28f164c8095eaa49f81265f233eaaccedc7ed0a1ca299c99e11265c3ce10",
+        },
+    },
 }

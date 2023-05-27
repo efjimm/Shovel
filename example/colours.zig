@@ -12,7 +12,7 @@ const blue = spoon.Style{ .fg = .blue, .attrs = .{ .bold = true } };
 const cyan = spoon.Style{ .fg = .cyan, .attrs = .{ .reverse = true } };
 const parsed = spoon.Style.Colour.fromDescription("magenta") catch
     @compileError("bad colour description");
-const magenta = spoon.Style{ .fg = parsed, .attrs = .{ .dimmed = true }};
+const magenta = spoon.Style{ .fg = parsed, .attrs = .{ .dimmed = true } };
 const reset = spoon.Style{};
 
 pub fn main() !void {

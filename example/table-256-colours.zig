@@ -5,7 +5,7 @@ const spoon = @import("spoon");
 
 const title_colour = spoon.Style.Colour.fromDescription("7") catch
     @compileError("bad colour description");
-const title = spoon.Style{ .fg = title_colour, .attrs = . { .bold = true }};
+const title = spoon.Style{ .fg = title_colour, .attrs = .{ .bold = true } };
 const reset = spoon.Style{};
 
 pub fn main() !void {
