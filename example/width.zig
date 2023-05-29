@@ -44,7 +44,7 @@ fn render(term: *spoon.Term) RenderError!void {
     try testPaddingWriter(&rc, "😀😀…", "😀😀This is epic", 5);
 
     try rc.moveCursorTo(3, 0);
-    try testPaddingWriter(&rc, " ", "\t", 1);
+    try testPaddingWriter(&rc, "漢字漢…", "漢字漢字", 7);
 
     try rc.done();
 }
@@ -60,9 +60,9 @@ fn testPaddingWriter(
     try writer.print("Should display '{s}': '", .{desired});
 
     var rpw = rc.restrictedPaddingWriter(width);
-    defer rpw.finish() catch {};
 
     try rpw.writer().writeAll(string);
+    try rpw.finish();
 
     try writer.writeAll("'");
 }

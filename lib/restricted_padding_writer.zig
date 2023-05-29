@@ -26,14 +26,12 @@ const unicode = std.unicode;
 const debug = std.debug;
 
 const CodepointStagingArea = struct {
-    const Self = @This();
-
     len: u4,
     left: u4,
     buf: [4]u8 = undefined,
 
-    pub fn new(first_byte: u8, len: u4) Self {
-        var ret = Self{
+    pub fn new(first_byte: u8, len: u4) CodepointStagingArea {
+        var ret = CodepointStagingArea{
             .len = len,
             .left = len - 1,
         };
@@ -43,18 +41,18 @@ const CodepointStagingArea = struct {
 
     /// Add a byte to the staging area. Returns true if the codepoint has been
     /// completed by that byte, otherwise false.
-    pub fn addByte(self: *Self, b: u8) bool {
+    pub fn addByte(self: *CodepointStagingArea, b: u8) bool {
         debug.assert(self.left > 0);
         self.buf[self.len - self.left] = b;
         self.left -= 1;
         return self.left == 0;
     }
 
-    pub fn bytes(self: *Self) []const u8 {
+    pub fn bytes(self: *CodepointStagingArea) []const u8 {
         return self.buf[0..self.len];
     }
 
-    pub fn width(self: *Self) u4 {
+    pub fn width(self: CodepointStagingArea) u4 {
         const cp = unicode.utf8Decode(self.buf[0..self.len]) catch return 1;
         return wcWidth(cp);
     }
@@ -85,10 +83,16 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
         pub fn finish(self: *Self) WriteError!void {
             // TODO what should happen if the codepoint in the holding area is
             //	  incomplete or bad?
-            if (self.codepoint_holding_area) |_| {
-                try self.underlying_writer.writeAll(self.codepoint_holding_area.?.bytes());
-                self.codepoint_holding_area = null;
-                self.width_left -= 1;
+            if (self.codepoint_holding_area) |s| {
+                const width = s.width();
+                if (width <= self.width_left) {
+                    try self.underlying_writer.writeAll(self.codepoint_holding_area.?.bytes());
+                    self.codepoint_holding_area = null;
+                    self.width_left -= width;
+                } else {
+                    try self.underlying_writer.writeAll("…");
+                    self.width_left = 0;
+                }
             }
         }
 
