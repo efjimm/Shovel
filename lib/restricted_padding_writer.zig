@@ -1,11 +1,7 @@
 const std = @import("std");
+const wcWidth = @import("wcwidth").wcWidth;
 const io = std.io;
 const assert = std.debug.assert;
-
-pub fn wcWidth(cp: u21) u4 {
-    if (cp >= 128) return 2;
-    return 1;
-}
 
 pub fn restrictedPaddingWriter(writer: anytype, width: u32) RestrictedPaddingWriter(@TypeOf(writer)) {
     return .{
