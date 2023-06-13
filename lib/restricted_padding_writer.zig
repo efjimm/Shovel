@@ -20,6 +20,7 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 
         width_left: u32,
         codepoint_buf: ?u21 = null,
+        finished: bool = false,
 
         const Self = @This();
         const WriteError = UnderlyingWriter.Error;
@@ -32,7 +33,7 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
         }
 
         pub fn write(self: *Self, bytes: []const u8) WriteError!usize {
-            if (self.width_left == 0) {
+            if (self.finished) {
                 if (self.codepoint_buf) |_| {
                     self.codepoint_buf = null;
                     try self.underlying_writer.writeAll("…");
@@ -49,14 +50,15 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
                 const cp = std.unicode.utf8Decode(slice) catch unreachable;
                 const width = wcWidth(cp);
                 if (width == self.width_left) {
-                    self.width_left = 0;
-
                     if (iter.i >= bytes.len) {
                         // Have no more input after this - buffer the codepoint
                         self.codepoint_buf = cp;
+                        self.width_left = 0;
                     } else {
                         // Have more input after this - truncate
                         self.codepoint_buf = null;
+                        self.width_left -= 1;
+                        self.finished = true;
                         try self.underlying_writer.writeAll("…");
                     }
 
@@ -64,7 +66,8 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
                 } else if (width > self.width_left) {
                     assert(self.width_left > 0);
                     self.codepoint_buf = null;
-                    self.width_left = 0;
+                    self.width_left -= 1;
+                    self.finished = true;
                     try self.underlying_writer.writeAll("…");
                     break;
                 }
@@ -110,9 +113,10 @@ test "RestrictedPaddingWriter" {
         .{ .finish, 8, "12345678", "12345678" },
         .{ .finish, 7, "12345678", "123456…" },
         .{ .pad, 20, "12345678", "12345678            " },
-        .{ .pad, 10, "漢字漢字漢字漢字", "漢字漢字…" },
+        .{ .pad, 10, "漢字漢字漢字漢字", "漢字漢字… " },
         .{ .pad, 16, "漢字漢字漢字漢字", "漢字漢字漢字漢字" },
         .{ .pad, 20, "漢字漢字漢字漢字", "漢字漢字漢字漢字    " },
+        .{ .pad, 6, "漢字漢字", "漢字… " },
     };
 
     inline for (data) |d| try testWriter(d[0], d[1], d[2], d[3]);
