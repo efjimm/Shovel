@@ -117,7 +117,6 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
                 // which we hold because we only know whether to write it based
                 // on whether any codepoints come after it. As such, it is only
                 // active when we only have a single character left on the line.
-                debug.assert(self.width_left == 1);
 
                 // Since this function has been called, there come bytes after
                 // the codepoint we currently hold. As such, it will not get
