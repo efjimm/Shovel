@@ -351,9 +351,9 @@ pub fn fetchSize(self: *Term) os.UnexpectedError!void {
         return;
 
     var size = mem.zeroes(constants.winsize);
-    const err = os.system.ioctl(self.tty, constants.T.IOCGWINSZ, @ptrToInt(&size));
+    const err = os.system.ioctl(self.tty, constants.T.IOCGWINSZ, @intFromPtr(&size));
     if (os.errno(err) != .SUCCESS) {
-        return os.unexpectedErrno(@intToEnum(os.system.E, err));
+        return os.unexpectedErrno(@enumFromInt(os.system.E, err));
     }
     self.height = size.ws_row;
     self.width = size.ws_col;
