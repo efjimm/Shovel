@@ -46,15 +46,15 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
                 const cp = std.unicode.utf8Decode(slice) catch unreachable;
                 const width = wcWidth(cp);
                 if (width == self.width_left) {
+                    self.finished = true;
                     if (iter.i >= bytes.len) {
                         // Have no more input after this - buffer the codepoint
                         self.codepoint_buf = cp;
-                        self.width_left = 0;
+                        self.width_left -= width;
                     } else {
                         // Have more input after this - truncate
                         self.codepoint_buf = null;
                         self.width_left -= 1;
-                        self.finished = true;
                         try self.underlying_writer.writeAll("…");
                     }
 
