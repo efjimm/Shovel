@@ -130,7 +130,7 @@ pub fn init(term_config: TermConfig) InitError!Term {
             error.SystemFdQuotaExceeded,
             error.SystemResources,
             error.Unexpected,
-            => return @errSetCast(InitError, err), // Always safe cast
+            => return @as(InitError, @errSetCast(err)), // Always safe cast
         },
     };
     errdefer os.close(ret.tty);
@@ -192,8 +192,8 @@ pub fn readInput(self: *Term, buf: []u8) ![]u8 {
     // Use system.read instead of os.read so it won't restart on signals.
     const rc = os.system.read(self.tty, buffer.ptr, buffer.len);
 
-    const bytes_read = switch (os.errno(rc)) {
-        .SUCCESS => @intCast(usize, rc),
+    const bytes_read: usize = switch (os.errno(rc)) {
+        .SUCCESS => @intCast(rc),
         .INTR => 0,
         .INVAL => unreachable,
         .FAULT => unreachable,
@@ -224,7 +224,7 @@ pub fn readInput(self: *Term, buf: []u8) ![]u8 {
 
         // Copy unfinished codepoint into internal buffer
         @memcpy(self.codepoint[0..len], buffer[i..]);
-        self.codepoint_len = @intCast(u3, len);
+        self.codepoint_len = @intCast(len);
         // Return the buffer without the trailing unfinished codepoint
         return buffer[0..i];
     }
@@ -353,7 +353,7 @@ pub fn fetchSize(self: *Term) os.UnexpectedError!void {
     var size = mem.zeroes(constants.winsize);
     const err = os.system.ioctl(self.tty, constants.T.IOCGWINSZ, @intFromPtr(&size));
     if (os.errno(err) != .SUCCESS) {
-        return os.unexpectedErrno(@enumFromInt(os.system.E, err));
+        return os.unexpectedErrno(@enumFromInt(err));
     }
     self.height = size.ws_row;
     self.width = size.ws_col;
