@@ -79,7 +79,7 @@ pub fn eql(self: Self, other: Self) bool {
 }
 
 pub fn dump(self: Self, writer: anytype) @TypeOf(writer).Error!void {
-    try writer.writeAll("\x1B[0");
+    try writer.writeAll("\x1B[");
 
     if (self.attrs.bold) try writer.writeAll(";1");
     if (self.attrs.dimmed) try writer.writeAll(";2");
