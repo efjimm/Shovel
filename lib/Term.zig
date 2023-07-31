@@ -114,6 +114,7 @@ pub fn init(term_config: TermConfig) InitError!Term {
             error.NotDir,
             error.PathAlreadyExists,
             error.WouldBlock,
+            error.NetworkNotFound,
             => unreachable,
 
             error.AccessDenied,
