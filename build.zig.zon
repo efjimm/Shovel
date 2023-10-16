@@ -1,6 +1,16 @@
 .{
     .name = "spoon",
     .version = "0.1.0",
+    .paths = .{
+        "lib",
+        "example",
+        "README.md",
+        "build.zig",
+        "build.zig.zon",
+        "import.zig",
+        "test_main.zig",
+        "LICENSE",
+    },
     .dependencies = .{
         .wcwidth = .{
             .url = "https://github.com/efjimm/zig-wcwidth/archive/d665dfbbf687900b0a3ed31879bb1e2a7f8b236d.tar.gz",
