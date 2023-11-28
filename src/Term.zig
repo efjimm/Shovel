@@ -131,7 +131,7 @@ pub fn init(term_config: TermConfig) InitError!Term {
             error.SystemFdQuotaExceeded,
             error.SystemResources,
             error.Unexpected,
-            => return @as(InitError, @errorCast(err)), // Always safe cast
+            => |new_err| return new_err,
         },
     };
     errdefer os.close(ret.tty);

@@ -16,13 +16,20 @@
 
 pub const version = "0.1.0";
 
-pub const spells = @import("lib/spells.zig");
+pub const spells = @import("spells.zig");
 
-pub const Style = @import("lib/Style.zig");
-pub const Term = @import("lib/Term.zig");
-pub const inputParser = @import("lib/input.zig").inputParser;
-pub const Input = @import("lib/input.zig").Input;
-pub const InputContent = @import("lib/input.zig").InputContent;
+pub const Style = @import("Style.zig");
+pub const Term = @import("Term.zig");
+pub const inputParser = @import("input.zig").inputParser;
+pub const Input = @import("input.zig").Input;
+pub const InputContent = @import("input.zig").InputContent;
 
-pub const restrictedPaddingWriter = @import("lib/restricted_padding_writer.zig").restrictedPaddingWriter;
-pub const RestrictedPaddingWriter = @import("lib/restricted_padding_writer.zig").RestrictedPaddingWriter;
+pub const restrictedPaddingWriter = @import("restricted_padding_writer.zig").restrictedPaddingWriter;
+pub const RestrictedPaddingWriter = @import("restricted_padding_writer.zig").RestrictedPaddingWriter;
+
+test {
+    _ = @import("input.zig");
+    _ = @import("input_description.zig");
+    _ = @import("colour_description.zig");
+    _ = @import("restricted_padding_writer.zig");
+}
