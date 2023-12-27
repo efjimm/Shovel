@@ -17,6 +17,8 @@
 
 const builtin = @import("builtin");
 const std = @import("std");
+const log = @import("log.zig");
+const Allocator = std.mem.Allocator;
 const ascii = std.ascii;
 const io = std.io;
 const mem = std.mem;
@@ -31,6 +33,7 @@ const constants = if (builtin.link_libc and builtin.os.tag == .linux) os.linux e
 const Style = @import("Style.zig");
 const spells = @import("spells.zig");
 const rpw = @import("restricted_padding_writer.zig");
+const terminfo = @import("terminfo_parser.zig");
 
 const Term = @This();
 
@@ -62,6 +65,8 @@ cursor_shape: CursorShape = .unknown,
 
 codepoint: [4]u8 = undefined,
 codepoint_len: u3 = 0,
+
+capabilities: terminfo.Capabilities,
 
 pub const CursorShape = spells.CursorShape;
 
@@ -133,6 +138,7 @@ pub fn init(term_config: TermConfig) InitError!Term {
             error.Unexpected,
             => |new_err| return new_err,
         },
+        .capabilities = getCapabilities() catch .{},
     };
     errdefer os.close(ret.tty);
 
@@ -140,6 +146,34 @@ pub fn init(term_config: TermConfig) InitError!Term {
         return error.NotATerminal;
 
     return ret;
+}
+
+fn getCapabilities() !terminfo.Capabilities {
+    const term_var = std.os.getenv("TERM") orelse {
+        log.info("No TERM variable defined", .{});
+        return error.NoTermInfo;
+    };
+
+    var buf: [terminfo.max_file_length]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const allocator = fba.allocator();
+
+    var iter: terminfo.FileIter = .{ .term = term_var };
+    while (iter.next()) |file| {
+        defer file.close();
+
+        const bytes = file.readToEndAlloc(allocator, terminfo.max_file_length) catch |err| {
+            log.info("{} when reading terminfo file, skipping", .{err});
+            continue;
+        };
+        return terminfo.parse(bytes) catch |err| {
+            log.info("Could not parse terminfo file, skipping {}", .{err});
+            continue;
+        };
+    }
+
+    log.info("Could not find terminfo description", .{});
+    return error.NoTermInfo;
 }
 
 pub fn deinit(self: *Term) void {

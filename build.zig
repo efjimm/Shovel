@@ -17,9 +17,17 @@ pub fn build(b: *Build) void {
 
     const wcwidth = b.dependency("wcwidth", .{}).module("wcwidth");
 
+    const enable_logging = b.option(bool, "logging", "Enable logging") orelse false;
+    const opts = b.addOptions();
+    opts.addOption(bool, "logging_enabled", enable_logging);
+    const opts_module = opts.createModule();
+
     const spoon_module = b.addModule("spoon", .{
         .source_file = .{ .path = "src/main.zig" },
-        .dependencies = &.{.{ .name = "wcwidth", .module = wcwidth }},
+        .dependencies = &.{
+            .{ .name = "wcwidth", .module = wcwidth },
+            .{ .name = "build_options", .module = opts_module },
+        },
     });
 
     const tests = b.addTest(.{
