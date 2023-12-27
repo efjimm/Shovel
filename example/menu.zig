@@ -12,8 +12,12 @@ var loop: bool = true;
 var cursor: usize = 0;
 
 pub fn main() !void {
-    term = try spoon.Term.init(.{});
-    defer term.deinit();
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    term = try spoon.Term.init(allocator, .{});
+    defer term.deinit(allocator);
 
     try os.sigaction(os.SIG.WINCH, &os.Sigaction{
         .handler = .{ .handler = handleSigWinch },

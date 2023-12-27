@@ -4,20 +4,18 @@ const getenv = std.os.getenv;
 const sep = std.fs.path.sep;
 const readInt = std.mem.readInt;
 const native_endian = @import("builtin").cpu.arch.endian();
+const Allocator = std.mem.Allocator;
 
 pub const max_file_length = 32768;
+const Self = @This();
 
 const Header = extern struct {
     format: Format,
     terminal_names_size: u16,
-    boolean_flags_size: u16,
-    numbers_shorts: u16,
-    strings_shorts: u16,
+    flag_count: u16,
+    number_count: u16,
+    string_count: u16,
     string_table_size: u16,
-
-    const max_bools = 37;
-    const max_numbers = 33;
-    const max_strings = 394;
 
     const Format = enum(i16) {
         legacy = 0o0432,
@@ -30,12 +28,60 @@ const Header = extern struct {
             .extended => 4,
         };
     }
-};
 
-const header_size = @sizeOf(Header);
+    fn names(header: Header, bytes: []const u8) [:0]const u8 {
+        return if (header.terminal_names_size == 0)
+            ""
+        else
+            bytes[@sizeOf(Header)..][0 .. header.terminal_names_size - 1 :0];
+    }
 
-pub const ParseError = error{
-    InvalidFormat,
+    fn flags(header: Header, bytes: []const u8) []const bool {
+        return @ptrCast(
+            bytes[@sizeOf(Header) + header.terminal_names_size ..][0..header.flag_count],
+        );
+    }
+
+    fn Number(comptime format: Format) type {
+        return switch (format) {
+            .legacy => i16,
+            .extended => i32,
+        };
+    }
+
+    fn numSize(header: Header) u4 {
+        return switch (header.format) {
+            .legacy => 2,
+            .extended => 4,
+        };
+    }
+
+    fn numbers(header: Header, bytes: []const u8, comptime format: Format) []align(1) const Number(format) {
+        std.debug.assert(header.format == format);
+        const off = @sizeOf(Header) +
+            header.terminal_names_size +
+            header.flag_count;
+        const start: [*]align(1) const Number(format) = @ptrCast(bytes[off + off % 2 ..]);
+        return start[0..header.number_count];
+    }
+
+    fn strings(header: Header, bytes: []const u8) []align(1) const i16 {
+        const off = @sizeOf(Header) +
+            header.terminal_names_size +
+            header.flag_count +
+            header.number_count * header.numSize();
+        const start: [*]align(1) const i16 = @ptrCast(bytes[off + off % 2 ..]);
+        return start[0..header.string_count];
+    }
+
+    fn stringTable(header: Header, bytes: []const u8) []const u8 {
+        const off = @sizeOf(Header) +
+            header.terminal_names_size +
+            header.flag_count +
+            header.number_count * header.numSize() +
+            header.string_count * 2;
+        return bytes[off + off % 2 ..][0..header.string_table_size];
+    }
 };
 
 fn searchTermInfoDirectory(term: []const u8) ?std.fs.File {
@@ -204,7 +250,7 @@ fn readNonNegative(src: *const [2]u8) ParseError!u15 {
 }
 
 fn parseHeader(bytes: []const u8) ParseError!Header {
-    if (bytes.len < header_size)
+    if (bytes.len < @sizeOf(Header))
         return error.InvalidFormat;
 
     const magic = std.meta.intToEnum(Header.Format, readInt(i16, bytes[0..2], .little));
@@ -212,17 +258,17 @@ fn parseHeader(bytes: []const u8) ParseError!Header {
     const ret: Header = .{
         .format = magic catch return error.InvalidFormat,
         .terminal_names_size = try readNonNegative(bytes[2..4]),
-        .boolean_flags_size = try readNonNegative(bytes[4..6]),
-        .numbers_shorts = try readNonNegative(bytes[6..8]),
-        .strings_shorts = try readNonNegative(bytes[8..10]),
+        .flag_count = try readNonNegative(bytes[4..6]),
+        .number_count = try readNonNegative(bytes[6..8]),
+        .string_count = try readNonNegative(bytes[8..10]),
         .string_table_size = try readNonNegative(bytes[10..12]),
     };
 
     const total_size = @sizeOf(Header) +
         ret.terminal_names_size +
-        ret.boolean_flags_size +
-        ret.numbers_shorts * ret.numberCapabilitySize() +
-        ret.strings_shorts * @sizeOf(i16) +
+        ret.flag_count +
+        ret.number_count * ret.numberCapabilitySize() +
+        ret.string_count * @sizeOf(i16) +
         ret.string_table_size;
 
     if (bytes.len < total_size)
@@ -235,598 +281,582 @@ fn parseHeader(bytes: []const u8) ParseError!Header {
     return ret;
 }
 
-fn parseFlags(max_bools: u15, buf: []u8, bytes: []const u8) ParseError!void {
-    const num_flags = @min(Header.max_bools, max_bools);
-    @memcpy(buf[0..num_flags], bytes[0..num_flags]);
+pub fn destroy(self: *Self, allocator: Allocator) void {
+    allocator.free(self.names);
+    allocator.free(self.string_table);
+    allocator.destroy(self);
 }
 
-fn parseNums(max_nums: u15, buf: []u8, bytes: []const u8) ParseError!void {
-    const num_nums = @min(Header.max_numbers, max_nums);
-    for (0..num_nums) |i| {
-        const n = readInt(i16, bytes[i..][0..2], .little);
-        buf[i..][0..2].* = @bitCast(n);
-    }
-}
+pub const ParseError = error{
+    InvalidFormat,
+} || Allocator.Error;
 
-pub fn parse(bytes: []const u8) ParseError!Capabilities {
+pub fn parse(allocator: Allocator, bytes: []const u8) ParseError!*Self {
     const header = try parseHeader(bytes);
 
-    const num_flags: u15 = @min(Header.max_bools, header.boolean_flags_size);
-    const num_nums: u15 = @min(Header.max_numbers, header.numbers_shorts);
-    const num_strs: u15 = @min(Header.max_strings, header.strings_shorts);
+    const num_flags: u15 = @min(total_flags, header.flag_count);
+    const num_nums: u15 = @min(total_numbers, header.number_count);
+    const num_strs: u15 = @min(total_strings, header.string_count);
 
-    var ret: Capabilities = .{
-        .names = if (header.terminal_names_size > 0)
-            bytes[@sizeOf(Header)..][0 .. header.terminal_names_size - 1 :0]
-        else
-            "",
-        .string_table = undefined,
-    };
-    var dest = std.io.fixedBufferStream(std.mem.asBytes(&ret));
-    var src = std.io.fixedBufferStream(bytes);
+    const ret = try allocator.create(Self);
+    errdefer allocator.destroy(ret);
 
-    // The seek functions have an empty error set, so use `try` instead of `catch unreachable`
-    // for aesthetic purposes.
+    ret.names = try allocator.dupeZ(u8, header.names(bytes));
+    errdefer allocator.free(ret.names);
 
-    try src.seekTo(@sizeOf(Header) + header.terminal_names_size);
-    try dest.seekTo(@intFromPtr(&ret.flags) - @intFromPtr(&ret));
+    ret.string_table = try allocator.dupe(u8, header.stringTable(bytes));
+    errdefer allocator.free(ret.string_table);
 
-    const writer = dest.writer();
-    const reader = src.reader();
+    const flags_dest: *[total_flags]bool = @ptrCast(&ret.flags);
+    @memcpy(flags_dest[0..num_flags], header.flags(bytes)[0..num_flags]);
+    @memset(flags_dest[num_flags..total_flags], false);
 
-    for (0..num_flags) |_| {
-        const c = reader.readByte() catch return error.InvalidFormat;
-        writer.writeByte(c) catch unreachable;
+    switch (header.format) {
+        inline else => |format| {
+            const T = Header.Number(format);
+            const nums_dest: *[total_numbers]i32 = @ptrCast(&ret.numbers);
+            for (nums_dest[0..num_nums], header.numbers(bytes, format)[0..]) |*d, s| {
+                d.* = std.mem.littleToNative(T, s);
+            }
+            @memset(nums_dest[num_nums..total_numbers], -1);
+        },
     }
 
-    try src.seekBy(header.boolean_flags_size -| Header.max_bools + num_flags % 2);
-    try dest.seekTo(@intFromPtr(&ret.numbers) - @intFromPtr(&ret));
-
-    for (0..num_nums) |_| {
-        const c = switch (header.format) {
-            .legacy => reader.readInt(i16, .little) catch return error.InvalidFormat,
-            .extended => reader.readInt(i32, .little) catch return error.InvalidFormat,
-        };
-        writer.writeInt(i32, c, native_endian) catch unreachable;
+    const strings_dest: *[total_strings]i16 = @ptrCast(&ret.strings);
+    for (strings_dest[0..num_strs], header.strings(bytes)[0..num_strs]) |*d, s| {
+        d.* = std.mem.littleToNative(i16, s);
     }
-
-    const num_size: u8 = switch (header.format) {
-        .legacy => 2,
-        .extended => 4,
-    };
-    try src.seekBy(num_size * (header.numbers_shorts -| Header.max_numbers));
-    try dest.seekTo(@intFromPtr(&ret.strings) - @intFromPtr(&ret));
-
-    for (0..num_strs) |_| {
-        const c = reader.readInt(i16, .little) catch return error.InvalidFormat;
-        if (c >= header.string_table_size) return error.InvalidFormat;
-        writer.writeInt(i16, c, native_endian) catch unreachable;
-    }
-
-    try src.seekBy(2 * (header.strings_shorts -| Header.max_strings));
-    try dest.seekBy(2 * (Header.max_strings - num_strs));
-    ret.string_table = @ptrCast(bytes[src.pos..]);
+    @memset(strings_dest[num_strs..total_strings], -1);
 
     return ret;
 }
 
-pub const Capabilities = extern struct {
-    pub fn getFlagCapability(self: *const Capabilities, comptime tag: FlagTag) bool {
-        const info = comptime std.meta.fieldInfo(Flags, tag);
-        return @field(self.flags, info.name);
-    }
+pub fn getFlagCapability(self: *const Self, tag: FlagTag) bool {
+    const slice: *const [total_flags]bool = @ptrCast(&self.flags);
+    return slice[@intFromEnum(tag)];
+}
 
-    pub fn getNumberCapability(self: *const Capabilities, comptime tag: NumberTag) ?u31 {
-        const info = comptime std.meta.fieldInfo(Numbers, tag);
-        const v = @field(self.numbers, info.name);
-        return if (v < 0) null else @intCast(v);
-    }
+pub fn getNumberCapability(self: *const Self, tag: NumberTag) ?u31 {
+    const slice: *const [total_numbers]i32 = @ptrCast(&self.numbers);
+    const v = slice[@intFromEnum(tag)];
+    return if (v < 0) null else @intCast(v);
+}
 
-    pub fn getStringCapability(self: *const Capabilities, comptime tag: StringTag) ?[:0]const u8 {
-        const info = comptime std.meta.fieldInfo(Strings, tag);
-        const v = std.math.cast(u15, @field(self.strings, info.name)) orelse return null;
-        return std.mem.span(self.string_table[v..]);
-    }
+pub fn getStringCapability(self: *const Self, tag: StringTag) ?[:0]const u8 {
+    const slice: *const [total_strings]i16 = @ptrCast(&self.strings);
+    const v = std.math.cast(u16, slice[@intFromEnum(tag)]) orelse return null;
+    return std.mem.span(@as([*:0]const u8, @ptrCast(self.string_table[v..].ptr)));
+}
 
-    names: [*:0]const u8 = "",
-    string_table: [*:0]const u8 = "",
+names: [:0]const u8 = "",
+string_table: []const u8 = "",
 
-    flags: Flags = .{},
-    numbers: Numbers = .{},
-    strings: Strings = .{},
+flags: Flags = .{},
+numbers: Numbers = .{},
+strings: Strings = .{},
 
-    pub const FlagTag = std.meta.FieldEnum(Flags);
-    pub const NumberTag = std.meta.FieldEnum(Numbers);
-    pub const StringTag = std.meta.FieldEnum(Strings);
+// extended_flags: std.StringHashMapUnmanaged(void) = .{},
+// extended_numbers: std.StringHashMapUnmanaged(u31) = .{},
+// extended_strings: std.StringHashMapUnmanaged(u15) = .{},
 
-    pub const Flags = extern struct {
-        auto_left_margin: bool = false,
-        auto_right_margin: bool = false,
-        no_esc_ctlc: bool = false,
-        ceol_standout_glitch: bool = false,
-        eat_newline_glitch: bool = false,
-        erase_overstrike: bool = false,
-        generic_type: bool = false,
-        hard_copy: bool = false,
-        has_meta_key: bool = false,
-        has_status_line: bool = false,
-        insert_null_glitch: bool = false,
-        memory_above: bool = false,
-        memory_below: bool = false,
-        move_insert_mode: bool = false,
-        move_standout_mode: bool = false,
-        over_strike: bool = false,
-        status_line_esc_ok: bool = false,
-        dest_tabs_magic_smso: bool = false,
-        tilde_glitch: bool = false,
-        transparent_underline: bool = false,
-        xon_xoff: bool = false,
-        needs_xon_xoff: bool = false,
-        prtr_silent: bool = false,
-        hard_cursor: bool = false,
-        non_rev_rmcup: bool = false,
-        no_pad_char: bool = false,
-        non_dest_scroll_region: bool = false,
-        can_change: bool = false,
-        back_color_erase: bool = false,
-        hue_lightness_saturation: bool = false,
-        col_addr_glitch: bool = false,
-        cr_cancels_micro_mode: bool = false,
-        has_print_wheel: bool = false,
-        row_addr_glitch: bool = false,
-        semi_auto_right_margin: bool = false,
-        cpi_changes_res: bool = false,
-        lpi_changes_res: bool = false,
-    };
+pub const FlagTag = std.meta.FieldEnum(Flags);
+pub const NumberTag = std.meta.FieldEnum(Numbers);
+pub const StringTag = std.meta.FieldEnum(Strings);
 
-    pub const Numbers = extern struct {
-        columns: i32 = -1,
-        init_tabs: i32 = -1,
-        lines: i32 = -1,
-        lines_of_memory: i32 = -1,
-        magic_cookie_glitch: i32 = -1,
-        padding_baud_rate: i32 = -1,
-        virtual_terminal: i32 = -1,
-        width_status_line: i32 = -1,
-        num_labels: i32 = -1,
-        label_height: i32 = -1,
-        label_width: i32 = -1,
-        max_attributes: i32 = -1,
-        maximum_windows: i32 = -1,
-        max_colors: i32 = -1,
-        max_pairs: i32 = -1,
-        no_color_video: i32 = -1,
-        buffer_capacity: i32 = -1,
-        dot_vert_spacing: i32 = -1,
-        dot_horz_spacing: i32 = -1,
-        max_micro_address: i32 = -1,
-        max_micro_jump: i32 = -1,
-        micro_col_size: i32 = -1,
-        micro_line_size: i32 = -1,
-        number_of_pins: i32 = -1,
-        output_res_char: i32 = -1,
-        output_res_line: i32 = -1,
-        output_res_horz_inch: i32 = -1,
-        output_res_vert_inch: i32 = -1,
-        print_rate: i32 = -1,
-        wide_char_size: i32 = -1,
-        buttons: i32 = -1,
-        bit_image_entwining: i32 = -1,
-        bit_image_type: i32 = -1,
-    };
+const total_flags: comptime_int = @typeInfo(Flags).Struct.fields.len;
+const total_numbers: comptime_int = @typeInfo(Numbers).Struct.fields.len;
+const total_strings: comptime_int = @typeInfo(Strings).Struct.fields.len;
 
-    pub const Strings = extern struct {
-        back_tab: i16 = -1,
-        bell: i16 = -1,
-        carriage_return: i16 = -1,
-        change_scroll_region: i16 = -1,
-        clear_all_tabs: i16 = -1,
-        clear_screen: i16 = -1,
-        clr_eol: i16 = -1,
-        clr_eos: i16 = -1,
-        column_address: i16 = -1,
-        command_character: i16 = -1,
-        cursor_address: i16 = -1,
-        cursor_down: i16 = -1,
-        cursor_home: i16 = -1,
-        cursor_invisible: i16 = -1,
-        cursor_left: i16 = -1,
-        cursor_mem_address: i16 = -1,
-        cursor_normal: i16 = -1,
-        cursor_right: i16 = -1,
-        cursor_to_ll: i16 = -1,
-        cursor_up: i16 = -1,
-        cursor_visible: i16 = -1,
-        delete_character: i16 = -1,
-        delete_line: i16 = -1,
-        dis_status_line: i16 = -1,
-        down_half_line: i16 = -1,
-        enter_alt_charset_mode: i16 = -1,
-        enter_blink_mode: i16 = -1,
-        enter_bold_mode: i16 = -1,
-        enter_ca_mode: i16 = -1,
-        enter_delete_mode: i16 = -1,
-        enter_dim_mode: i16 = -1,
-        enter_insert_mode: i16 = -1,
-        enter_secure_mode: i16 = -1,
-        enter_protected_mode: i16 = -1,
-        enter_reverse_mode: i16 = -1,
-        enter_standout_mode: i16 = -1,
-        enter_underline_mode: i16 = -1,
-        erase_chars: i16 = -1,
-        exit_alt_charset_mode: i16 = -1,
-        exit_attribute_mode: i16 = -1,
-        exit_ca_mode: i16 = -1,
-        exit_delete_mode: i16 = -1,
-        exit_insert_mode: i16 = -1,
-        exit_standout_mode: i16 = -1,
-        exit_underline_mode: i16 = -1,
-        flash_screen: i16 = -1,
-        form_feed: i16 = -1,
-        from_status_line: i16 = -1,
-        init_1string: i16 = -1,
-        init_2string: i16 = -1,
-        init_3string: i16 = -1,
-        init_file: i16 = -1,
-        insert_character: i16 = -1,
-        insert_line: i16 = -1,
-        insert_padding: i16 = -1,
-        key_backspace: i16 = -1,
-        key_catab: i16 = -1,
-        key_clear: i16 = -1,
-        key_ctab: i16 = -1,
-        key_dc: i16 = -1,
-        key_dl: i16 = -1,
-        key_down: i16 = -1,
-        key_eic: i16 = -1,
-        key_eol: i16 = -1,
-        key_eos: i16 = -1,
-        key_f0: i16 = -1,
-        key_f1: i16 = -1,
-        key_f10: i16 = -1,
-        key_f2: i16 = -1,
-        key_f3: i16 = -1,
-        key_f4: i16 = -1,
-        key_f5: i16 = -1,
-        key_f6: i16 = -1,
-        key_f7: i16 = -1,
-        key_f8: i16 = -1,
-        key_f9: i16 = -1,
-        key_home: i16 = -1,
-        key_ic: i16 = -1,
-        key_il: i16 = -1,
-        key_left: i16 = -1,
-        key_ll: i16 = -1,
-        key_npage: i16 = -1,
-        key_ppage: i16 = -1,
-        key_right: i16 = -1,
-        key_sf: i16 = -1,
-        key_sr: i16 = -1,
-        key_stab: i16 = -1,
-        key_up: i16 = -1,
-        keypad_local: i16 = -1,
-        keypad_xmit: i16 = -1,
-        lab_f0: i16 = -1,
-        lab_f1: i16 = -1,
-        lab_f10: i16 = -1,
-        lab_f2: i16 = -1,
-        lab_f3: i16 = -1,
-        lab_f4: i16 = -1,
-        lab_f5: i16 = -1,
-        lab_f6: i16 = -1,
-        lab_f7: i16 = -1,
-        lab_f8: i16 = -1,
-        lab_f9: i16 = -1,
-        meta_off: i16 = -1,
-        meta_on: i16 = -1,
-        newline: i16 = -1,
-        pad_char: i16 = -1,
-        parm_dch: i16 = -1,
-        parm_delete_line: i16 = -1,
-        parm_down_cursor: i16 = -1,
-        parm_ich: i16 = -1,
-        parm_index: i16 = -1,
-        parm_insert_line: i16 = -1,
-        parm_left_cursor: i16 = -1,
-        parm_right_cursor: i16 = -1,
-        parm_rindex: i16 = -1,
-        parm_up_cursor: i16 = -1,
-        pkey_key: i16 = -1,
-        pkey_local: i16 = -1,
-        pkey_xmit: i16 = -1,
-        print_screen: i16 = -1,
-        prtr_off: i16 = -1,
-        prtr_on: i16 = -1,
-        repeat_char: i16 = -1,
-        reset_1string: i16 = -1,
-        reset_2string: i16 = -1,
-        reset_3string: i16 = -1,
-        reset_file: i16 = -1,
-        restore_cursor: i16 = -1,
-        row_address: i16 = -1,
-        save_cursor: i16 = -1,
-        scroll_forward: i16 = -1,
-        scroll_reverse: i16 = -1,
-        set_attributes: i16 = -1,
-        set_tab: i16 = -1,
-        set_window: i16 = -1,
-        tab: i16 = -1,
-        to_status_line: i16 = -1,
-        underline_char: i16 = -1,
-        up_half_line: i16 = -1,
-        init_prog: i16 = -1,
-        key_a1: i16 = -1,
-        key_a3: i16 = -1,
-        key_b2: i16 = -1,
-        key_c1: i16 = -1,
-        key_c3: i16 = -1,
-        prtr_non: i16 = -1,
-        char_padding: i16 = -1,
-        acs_chars: i16 = -1,
-        plab_norm: i16 = -1,
-        key_btab: i16 = -1,
-        enter_xon_mode: i16 = -1,
-        exit_xon_mode: i16 = -1,
-        enter_am_mode: i16 = -1,
-        exit_am_mode: i16 = -1,
-        xon_character: i16 = -1,
-        xoff_character: i16 = -1,
-        ena_acs: i16 = -1,
-        label_on: i16 = -1,
-        label_off: i16 = -1,
-        key_beg: i16 = -1,
-        key_cancel: i16 = -1,
-        key_close: i16 = -1,
-        key_command: i16 = -1,
-        key_copy: i16 = -1,
-        key_create: i16 = -1,
-        key_end: i16 = -1,
-        key_enter: i16 = -1,
-        key_exit: i16 = -1,
-        key_find: i16 = -1,
-        key_help: i16 = -1,
-        key_mark: i16 = -1,
-        key_message: i16 = -1,
-        key_move: i16 = -1,
-        key_next: i16 = -1,
-        key_open: i16 = -1,
-        key_options: i16 = -1,
-        key_previous: i16 = -1,
-        key_print: i16 = -1,
-        key_redo: i16 = -1,
-        key_reference: i16 = -1,
-        key_refresh: i16 = -1,
-        key_replace: i16 = -1,
-        key_restart: i16 = -1,
-        key_resume: i16 = -1,
-        key_save: i16 = -1,
-        key_suspend: i16 = -1,
-        key_undo: i16 = -1,
-        key_sbeg: i16 = -1,
-        key_scancel: i16 = -1,
-        key_scommand: i16 = -1,
-        key_scopy: i16 = -1,
-        key_screate: i16 = -1,
-        key_sdc: i16 = -1,
-        key_sdl: i16 = -1,
-        key_select: i16 = -1,
-        key_send: i16 = -1,
-        key_seol: i16 = -1,
-        key_sexit: i16 = -1,
-        key_sfind: i16 = -1,
-        key_shelp: i16 = -1,
-        key_shome: i16 = -1,
-        key_sic: i16 = -1,
-        key_sleft: i16 = -1,
-        key_smessage: i16 = -1,
-        key_smove: i16 = -1,
-        key_snext: i16 = -1,
-        key_soptions: i16 = -1,
-        key_sprevious: i16 = -1,
-        key_sprint: i16 = -1,
-        key_sredo: i16 = -1,
-        key_sreplace: i16 = -1,
-        key_sright: i16 = -1,
-        key_srsume: i16 = -1,
-        key_ssave: i16 = -1,
-        key_ssuspend: i16 = -1,
-        key_sundo: i16 = -1,
-        req_for_input: i16 = -1,
-        key_f11: i16 = -1,
-        key_f12: i16 = -1,
-        key_f13: i16 = -1,
-        key_f14: i16 = -1,
-        key_f15: i16 = -1,
-        key_f16: i16 = -1,
-        key_f17: i16 = -1,
-        key_f18: i16 = -1,
-        key_f19: i16 = -1,
-        key_f20: i16 = -1,
-        key_f21: i16 = -1,
-        key_f22: i16 = -1,
-        key_f23: i16 = -1,
-        key_f24: i16 = -1,
-        key_f25: i16 = -1,
-        key_f26: i16 = -1,
-        key_f27: i16 = -1,
-        key_f28: i16 = -1,
-        key_f29: i16 = -1,
-        key_f30: i16 = -1,
-        key_f31: i16 = -1,
-        key_f32: i16 = -1,
-        key_f33: i16 = -1,
-        key_f34: i16 = -1,
-        key_f35: i16 = -1,
-        key_f36: i16 = -1,
-        key_f37: i16 = -1,
-        key_f38: i16 = -1,
-        key_f39: i16 = -1,
-        key_f40: i16 = -1,
-        key_f41: i16 = -1,
-        key_f42: i16 = -1,
-        key_f43: i16 = -1,
-        key_f44: i16 = -1,
-        key_f45: i16 = -1,
-        key_f46: i16 = -1,
-        key_f47: i16 = -1,
-        key_f48: i16 = -1,
-        key_f49: i16 = -1,
-        key_f50: i16 = -1,
-        key_f51: i16 = -1,
-        key_f52: i16 = -1,
-        key_f53: i16 = -1,
-        key_f54: i16 = -1,
-        key_f55: i16 = -1,
-        key_f56: i16 = -1,
-        key_f57: i16 = -1,
-        key_f58: i16 = -1,
-        key_f59: i16 = -1,
-        key_f60: i16 = -1,
-        key_f61: i16 = -1,
-        key_f62: i16 = -1,
-        key_f63: i16 = -1,
-        clr_bol: i16 = -1,
-        clear_margins: i16 = -1,
-        set_left_margin: i16 = -1,
-        set_right_margin: i16 = -1,
-        label_format: i16 = -1,
-        set_clock: i16 = -1,
-        display_clock: i16 = -1,
-        remove_clock: i16 = -1,
-        create_window: i16 = -1,
-        goto_window: i16 = -1,
-        hangup: i16 = -1,
-        dial_phone: i16 = -1,
-        quick_dial: i16 = -1,
-        tone: i16 = -1,
-        pulse: i16 = -1,
-        flash_hook: i16 = -1,
-        fixed_pause: i16 = -1,
-        wait_tone: i16 = -1,
-        user0: i16 = -1,
-        user1: i16 = -1,
-        user2: i16 = -1,
-        user3: i16 = -1,
-        user4: i16 = -1,
-        user5: i16 = -1,
-        user6: i16 = -1,
-        user7: i16 = -1,
-        user8: i16 = -1,
-        user9: i16 = -1,
-        orig_pair: i16 = -1,
-        orig_colors: i16 = -1,
-        initialize_color: i16 = -1,
-        initialize_pair: i16 = -1,
-        set_color_pair: i16 = -1,
-        set_foreground: i16 = -1,
-        set_background: i16 = -1,
-        change_char_pitch: i16 = -1,
-        change_line_pitch: i16 = -1,
-        change_res_horz: i16 = -1,
-        change_res_vert: i16 = -1,
-        define_char: i16 = -1,
-        enter_doublewide_mode: i16 = -1,
-        enter_draft_quality: i16 = -1,
-        enter_italics_mode: i16 = -1,
-        enter_leftward_mode: i16 = -1,
-        enter_micro_mode: i16 = -1,
-        enter_near_letter_quality: i16 = -1,
-        enter_normal_quality: i16 = -1,
-        enter_shadow_mode: i16 = -1,
-        enter_subscript_mode: i16 = -1,
-        enter_superscript_mode: i16 = -1,
-        enter_upward_mode: i16 = -1,
-        exit_doublewide_mode: i16 = -1,
-        exit_italics_mode: i16 = -1,
-        exit_leftward_mode: i16 = -1,
-        exit_micro_mode: i16 = -1,
-        exit_shadow_mode: i16 = -1,
-        exit_subscript_mode: i16 = -1,
-        exit_superscript_mode: i16 = -1,
-        exit_upward_mode: i16 = -1,
-        micro_column_address: i16 = -1,
-        micro_down: i16 = -1,
-        micro_left: i16 = -1,
-        micro_right: i16 = -1,
-        micro_row_address: i16 = -1,
-        micro_up: i16 = -1,
-        order_of_pins: i16 = -1,
-        parm_down_micro: i16 = -1,
-        parm_left_micro: i16 = -1,
-        parm_right_micro: i16 = -1,
-        parm_up_micro: i16 = -1,
-        select_char_set: i16 = -1,
-        set_bottom_margin: i16 = -1,
-        set_bottom_margin_parm: i16 = -1,
-        set_left_margin_parm: i16 = -1,
-        set_right_margin_parm: i16 = -1,
-        set_top_margin: i16 = -1,
-        set_top_margin_parm: i16 = -1,
-        start_bit_image: i16 = -1,
-        start_char_set_def: i16 = -1,
-        stop_bit_image: i16 = -1,
-        stop_char_set_def: i16 = -1,
-        subscript_characters: i16 = -1,
-        superscript_characters: i16 = -1,
-        these_cause_cr: i16 = -1,
-        zero_motion: i16 = -1,
-        char_set_names: i16 = -1,
-        key_mouse: i16 = -1,
-        mouse_info: i16 = -1,
-        req_mouse_pos: i16 = -1,
-        get_mouse: i16 = -1,
-        set_a_foreground: i16 = -1,
-        set_a_background: i16 = -1,
-        pkey_plab: i16 = -1,
-        device_type: i16 = -1,
-        code_set_init: i16 = -1,
-        set0_des_seq: i16 = -1,
-        set1_des_seq: i16 = -1,
-        set2_des_seq: i16 = -1,
-        set3_des_seq: i16 = -1,
-        set_lr_margin: i16 = -1,
-        set_tb_margin: i16 = -1,
-        bit_image_repeat: i16 = -1,
-        bit_image_newline: i16 = -1,
-        bit_image_carriage_return: i16 = -1,
-        color_names: i16 = -1,
-        define_bit_image_region: i16 = -1,
-        end_bit_image_region: i16 = -1,
-        set_color_band: i16 = -1,
-        set_page_length: i16 = -1,
-        display_pc_char: i16 = -1,
-        enter_pc_charset_mode: i16 = -1,
-        exit_pc_charset_mode: i16 = -1,
-        enter_scancode_mode: i16 = -1,
-        exit_scancode_mode: i16 = -1,
-        pc_term_options: i16 = -1,
-        scancode_escape: i16 = -1,
-        alt_scancode_esc: i16 = -1,
-        enter_horizontal_hl_mode: i16 = -1,
-        enter_left_hl_mode: i16 = -1,
-        enter_low_hl_mode: i16 = -1,
-        enter_right_hl_mode: i16 = -1,
-        enter_top_hl_mode: i16 = -1,
-        enter_vertical_hl_mode: i16 = -1,
-        set_a_attributes: i16 = -1,
-        set_pglen_inch: i16 = -1,
-    };
+pub const Flags = extern struct {
+    auto_left_margin: bool = false,
+    auto_right_margin: bool = false,
+    no_esc_ctlc: bool = false,
+    ceol_standout_glitch: bool = false,
+    eat_newline_glitch: bool = false,
+    erase_overstrike: bool = false,
+    generic_type: bool = false,
+    hard_copy: bool = false,
+    has_meta_key: bool = false,
+    has_status_line: bool = false,
+    insert_null_glitch: bool = false,
+    memory_above: bool = false,
+    memory_below: bool = false,
+    move_insert_mode: bool = false,
+    move_standout_mode: bool = false,
+    over_strike: bool = false,
+    status_line_esc_ok: bool = false,
+    dest_tabs_magic_smso: bool = false,
+    tilde_glitch: bool = false,
+    transparent_underline: bool = false,
+    xon_xoff: bool = false,
+    needs_xon_xoff: bool = false,
+    prtr_silent: bool = false,
+    hard_cursor: bool = false,
+    non_rev_rmcup: bool = false,
+    no_pad_char: bool = false,
+    non_dest_scroll_region: bool = false,
+    can_change: bool = false,
+    back_color_erase: bool = false,
+    hue_lightness_saturation: bool = false,
+    col_addr_glitch: bool = false,
+    cr_cancels_micro_mode: bool = false,
+    has_print_wheel: bool = false,
+    row_addr_glitch: bool = false,
+    semi_auto_right_margin: bool = false,
+    cpi_changes_res: bool = false,
+    lpi_changes_res: bool = false,
+};
+
+pub const Numbers = extern struct {
+    columns: i32 = -1,
+    init_tabs: i32 = -1,
+    lines: i32 = -1,
+    lines_of_memory: i32 = -1,
+    magic_cookie_glitch: i32 = -1,
+    padding_baud_rate: i32 = -1,
+    virtual_terminal: i32 = -1,
+    width_status_line: i32 = -1,
+    num_labels: i32 = -1,
+    label_height: i32 = -1,
+    label_width: i32 = -1,
+    max_attributes: i32 = -1,
+    maximum_windows: i32 = -1,
+    max_colors: i32 = -1,
+    max_pairs: i32 = -1,
+    no_color_video: i32 = -1,
+    buffer_capacity: i32 = -1,
+    dot_vert_spacing: i32 = -1,
+    dot_horz_spacing: i32 = -1,
+    max_micro_address: i32 = -1,
+    max_micro_jump: i32 = -1,
+    micro_col_size: i32 = -1,
+    micro_line_size: i32 = -1,
+    number_of_pins: i32 = -1,
+    output_res_char: i32 = -1,
+    output_res_line: i32 = -1,
+    output_res_horz_inch: i32 = -1,
+    output_res_vert_inch: i32 = -1,
+    print_rate: i32 = -1,
+    wide_char_size: i32 = -1,
+    buttons: i32 = -1,
+    bit_image_entwining: i32 = -1,
+    bit_image_type: i32 = -1,
+};
+
+pub const Strings = extern struct {
+    back_tab: i16 = -1,
+    bell: i16 = -1,
+    carriage_return: i16 = -1,
+    change_scroll_region: i16 = -1,
+    clear_all_tabs: i16 = -1,
+    clear_screen: i16 = -1,
+    clr_eol: i16 = -1,
+    clr_eos: i16 = -1,
+    column_address: i16 = -1,
+    command_character: i16 = -1,
+    cursor_address: i16 = -1,
+    cursor_down: i16 = -1,
+    cursor_home: i16 = -1,
+    cursor_invisible: i16 = -1,
+    cursor_left: i16 = -1,
+    cursor_mem_address: i16 = -1,
+    cursor_normal: i16 = -1,
+    cursor_right: i16 = -1,
+    cursor_to_ll: i16 = -1,
+    cursor_up: i16 = -1,
+    cursor_visible: i16 = -1,
+    delete_character: i16 = -1,
+    delete_line: i16 = -1,
+    dis_status_line: i16 = -1,
+    down_half_line: i16 = -1,
+    enter_alt_charset_mode: i16 = -1,
+    enter_blink_mode: i16 = -1,
+    enter_bold_mode: i16 = -1,
+    enter_ca_mode: i16 = -1,
+    enter_delete_mode: i16 = -1,
+    enter_dim_mode: i16 = -1,
+    enter_insert_mode: i16 = -1,
+    enter_secure_mode: i16 = -1,
+    enter_protected_mode: i16 = -1,
+    enter_reverse_mode: i16 = -1,
+    enter_standout_mode: i16 = -1,
+    enter_underline_mode: i16 = -1,
+    erase_chars: i16 = -1,
+    exit_alt_charset_mode: i16 = -1,
+    exit_attribute_mode: i16 = -1,
+    exit_ca_mode: i16 = -1,
+    exit_delete_mode: i16 = -1,
+    exit_insert_mode: i16 = -1,
+    exit_standout_mode: i16 = -1,
+    exit_underline_mode: i16 = -1,
+    flash_screen: i16 = -1,
+    form_feed: i16 = -1,
+    from_status_line: i16 = -1,
+    init_1string: i16 = -1,
+    init_2string: i16 = -1,
+    init_3string: i16 = -1,
+    init_file: i16 = -1,
+    insert_character: i16 = -1,
+    insert_line: i16 = -1,
+    insert_padding: i16 = -1,
+    key_backspace: i16 = -1,
+    key_catab: i16 = -1,
+    key_clear: i16 = -1,
+    key_ctab: i16 = -1,
+    key_dc: i16 = -1,
+    key_dl: i16 = -1,
+    key_down: i16 = -1,
+    key_eic: i16 = -1,
+    key_eol: i16 = -1,
+    key_eos: i16 = -1,
+    key_f0: i16 = -1,
+    key_f1: i16 = -1,
+    key_f10: i16 = -1,
+    key_f2: i16 = -1,
+    key_f3: i16 = -1,
+    key_f4: i16 = -1,
+    key_f5: i16 = -1,
+    key_f6: i16 = -1,
+    key_f7: i16 = -1,
+    key_f8: i16 = -1,
+    key_f9: i16 = -1,
+    key_home: i16 = -1,
+    key_ic: i16 = -1,
+    key_il: i16 = -1,
+    key_left: i16 = -1,
+    key_ll: i16 = -1,
+    key_npage: i16 = -1,
+    key_ppage: i16 = -1,
+    key_right: i16 = -1,
+    key_sf: i16 = -1,
+    key_sr: i16 = -1,
+    key_stab: i16 = -1,
+    key_up: i16 = -1,
+    keypad_local: i16 = -1,
+    keypad_xmit: i16 = -1,
+    lab_f0: i16 = -1,
+    lab_f1: i16 = -1,
+    lab_f10: i16 = -1,
+    lab_f2: i16 = -1,
+    lab_f3: i16 = -1,
+    lab_f4: i16 = -1,
+    lab_f5: i16 = -1,
+    lab_f6: i16 = -1,
+    lab_f7: i16 = -1,
+    lab_f8: i16 = -1,
+    lab_f9: i16 = -1,
+    meta_off: i16 = -1,
+    meta_on: i16 = -1,
+    newline: i16 = -1,
+    pad_char: i16 = -1,
+    parm_dch: i16 = -1,
+    parm_delete_line: i16 = -1,
+    parm_down_cursor: i16 = -1,
+    parm_ich: i16 = -1,
+    parm_index: i16 = -1,
+    parm_insert_line: i16 = -1,
+    parm_left_cursor: i16 = -1,
+    parm_right_cursor: i16 = -1,
+    parm_rindex: i16 = -1,
+    parm_up_cursor: i16 = -1,
+    pkey_key: i16 = -1,
+    pkey_local: i16 = -1,
+    pkey_xmit: i16 = -1,
+    print_screen: i16 = -1,
+    prtr_off: i16 = -1,
+    prtr_on: i16 = -1,
+    repeat_char: i16 = -1,
+    reset_1string: i16 = -1,
+    reset_2string: i16 = -1,
+    reset_3string: i16 = -1,
+    reset_file: i16 = -1,
+    restore_cursor: i16 = -1,
+    row_address: i16 = -1,
+    save_cursor: i16 = -1,
+    scroll_forward: i16 = -1,
+    scroll_reverse: i16 = -1,
+    set_attributes: i16 = -1,
+    set_tab: i16 = -1,
+    set_window: i16 = -1,
+    tab: i16 = -1,
+    to_status_line: i16 = -1,
+    underline_char: i16 = -1,
+    up_half_line: i16 = -1,
+    init_prog: i16 = -1,
+    key_a1: i16 = -1,
+    key_a3: i16 = -1,
+    key_b2: i16 = -1,
+    key_c1: i16 = -1,
+    key_c3: i16 = -1,
+    prtr_non: i16 = -1,
+    char_padding: i16 = -1,
+    acs_chars: i16 = -1,
+    plab_norm: i16 = -1,
+    key_btab: i16 = -1,
+    enter_xon_mode: i16 = -1,
+    exit_xon_mode: i16 = -1,
+    enter_am_mode: i16 = -1,
+    exit_am_mode: i16 = -1,
+    xon_character: i16 = -1,
+    xoff_character: i16 = -1,
+    ena_acs: i16 = -1,
+    label_on: i16 = -1,
+    label_off: i16 = -1,
+    key_beg: i16 = -1,
+    key_cancel: i16 = -1,
+    key_close: i16 = -1,
+    key_command: i16 = -1,
+    key_copy: i16 = -1,
+    key_create: i16 = -1,
+    key_end: i16 = -1,
+    key_enter: i16 = -1,
+    key_exit: i16 = -1,
+    key_find: i16 = -1,
+    key_help: i16 = -1,
+    key_mark: i16 = -1,
+    key_message: i16 = -1,
+    key_move: i16 = -1,
+    key_next: i16 = -1,
+    key_open: i16 = -1,
+    key_options: i16 = -1,
+    key_previous: i16 = -1,
+    key_print: i16 = -1,
+    key_redo: i16 = -1,
+    key_reference: i16 = -1,
+    key_refresh: i16 = -1,
+    key_replace: i16 = -1,
+    key_restart: i16 = -1,
+    key_resume: i16 = -1,
+    key_save: i16 = -1,
+    key_suspend: i16 = -1,
+    key_undo: i16 = -1,
+    key_sbeg: i16 = -1,
+    key_scancel: i16 = -1,
+    key_scommand: i16 = -1,
+    key_scopy: i16 = -1,
+    key_screate: i16 = -1,
+    key_sdc: i16 = -1,
+    key_sdl: i16 = -1,
+    key_select: i16 = -1,
+    key_send: i16 = -1,
+    key_seol: i16 = -1,
+    key_sexit: i16 = -1,
+    key_sfind: i16 = -1,
+    key_shelp: i16 = -1,
+    key_shome: i16 = -1,
+    key_sic: i16 = -1,
+    key_sleft: i16 = -1,
+    key_smessage: i16 = -1,
+    key_smove: i16 = -1,
+    key_snext: i16 = -1,
+    key_soptions: i16 = -1,
+    key_sprevious: i16 = -1,
+    key_sprint: i16 = -1,
+    key_sredo: i16 = -1,
+    key_sreplace: i16 = -1,
+    key_sright: i16 = -1,
+    key_srsume: i16 = -1,
+    key_ssave: i16 = -1,
+    key_ssuspend: i16 = -1,
+    key_sundo: i16 = -1,
+    req_for_input: i16 = -1,
+    key_f11: i16 = -1,
+    key_f12: i16 = -1,
+    key_f13: i16 = -1,
+    key_f14: i16 = -1,
+    key_f15: i16 = -1,
+    key_f16: i16 = -1,
+    key_f17: i16 = -1,
+    key_f18: i16 = -1,
+    key_f19: i16 = -1,
+    key_f20: i16 = -1,
+    key_f21: i16 = -1,
+    key_f22: i16 = -1,
+    key_f23: i16 = -1,
+    key_f24: i16 = -1,
+    key_f25: i16 = -1,
+    key_f26: i16 = -1,
+    key_f27: i16 = -1,
+    key_f28: i16 = -1,
+    key_f29: i16 = -1,
+    key_f30: i16 = -1,
+    key_f31: i16 = -1,
+    key_f32: i16 = -1,
+    key_f33: i16 = -1,
+    key_f34: i16 = -1,
+    key_f35: i16 = -1,
+    key_f36: i16 = -1,
+    key_f37: i16 = -1,
+    key_f38: i16 = -1,
+    key_f39: i16 = -1,
+    key_f40: i16 = -1,
+    key_f41: i16 = -1,
+    key_f42: i16 = -1,
+    key_f43: i16 = -1,
+    key_f44: i16 = -1,
+    key_f45: i16 = -1,
+    key_f46: i16 = -1,
+    key_f47: i16 = -1,
+    key_f48: i16 = -1,
+    key_f49: i16 = -1,
+    key_f50: i16 = -1,
+    key_f51: i16 = -1,
+    key_f52: i16 = -1,
+    key_f53: i16 = -1,
+    key_f54: i16 = -1,
+    key_f55: i16 = -1,
+    key_f56: i16 = -1,
+    key_f57: i16 = -1,
+    key_f58: i16 = -1,
+    key_f59: i16 = -1,
+    key_f60: i16 = -1,
+    key_f61: i16 = -1,
+    key_f62: i16 = -1,
+    key_f63: i16 = -1,
+    clr_bol: i16 = -1,
+    clear_margins: i16 = -1,
+    set_left_margin: i16 = -1,
+    set_right_margin: i16 = -1,
+    label_format: i16 = -1,
+    set_clock: i16 = -1,
+    display_clock: i16 = -1,
+    remove_clock: i16 = -1,
+    create_window: i16 = -1,
+    goto_window: i16 = -1,
+    hangup: i16 = -1,
+    dial_phone: i16 = -1,
+    quick_dial: i16 = -1,
+    tone: i16 = -1,
+    pulse: i16 = -1,
+    flash_hook: i16 = -1,
+    fixed_pause: i16 = -1,
+    wait_tone: i16 = -1,
+    user0: i16 = -1,
+    user1: i16 = -1,
+    user2: i16 = -1,
+    user3: i16 = -1,
+    user4: i16 = -1,
+    user5: i16 = -1,
+    user6: i16 = -1,
+    user7: i16 = -1,
+    user8: i16 = -1,
+    user9: i16 = -1,
+    orig_pair: i16 = -1,
+    orig_colors: i16 = -1,
+    initialize_color: i16 = -1,
+    initialize_pair: i16 = -1,
+    set_color_pair: i16 = -1,
+    set_foreground: i16 = -1,
+    set_background: i16 = -1,
+    change_char_pitch: i16 = -1,
+    change_line_pitch: i16 = -1,
+    change_res_horz: i16 = -1,
+    change_res_vert: i16 = -1,
+    define_char: i16 = -1,
+    enter_doublewide_mode: i16 = -1,
+    enter_draft_quality: i16 = -1,
+    enter_italics_mode: i16 = -1,
+    enter_leftward_mode: i16 = -1,
+    enter_micro_mode: i16 = -1,
+    enter_near_letter_quality: i16 = -1,
+    enter_normal_quality: i16 = -1,
+    enter_shadow_mode: i16 = -1,
+    enter_subscript_mode: i16 = -1,
+    enter_superscript_mode: i16 = -1,
+    enter_upward_mode: i16 = -1,
+    exit_doublewide_mode: i16 = -1,
+    exit_italics_mode: i16 = -1,
+    exit_leftward_mode: i16 = -1,
+    exit_micro_mode: i16 = -1,
+    exit_shadow_mode: i16 = -1,
+    exit_subscript_mode: i16 = -1,
+    exit_superscript_mode: i16 = -1,
+    exit_upward_mode: i16 = -1,
+    micro_column_address: i16 = -1,
+    micro_down: i16 = -1,
+    micro_left: i16 = -1,
+    micro_right: i16 = -1,
+    micro_row_address: i16 = -1,
+    micro_up: i16 = -1,
+    order_of_pins: i16 = -1,
+    parm_down_micro: i16 = -1,
+    parm_left_micro: i16 = -1,
+    parm_right_micro: i16 = -1,
+    parm_up_micro: i16 = -1,
+    select_char_set: i16 = -1,
+    set_bottom_margin: i16 = -1,
+    set_bottom_margin_parm: i16 = -1,
+    set_left_margin_parm: i16 = -1,
+    set_right_margin_parm: i16 = -1,
+    set_top_margin: i16 = -1,
+    set_top_margin_parm: i16 = -1,
+    start_bit_image: i16 = -1,
+    start_char_set_def: i16 = -1,
+    stop_bit_image: i16 = -1,
+    stop_char_set_def: i16 = -1,
+    subscript_characters: i16 = -1,
+    superscript_characters: i16 = -1,
+    these_cause_cr: i16 = -1,
+    zero_motion: i16 = -1,
+    char_set_names: i16 = -1,
+    key_mouse: i16 = -1,
+    mouse_info: i16 = -1,
+    req_mouse_pos: i16 = -1,
+    get_mouse: i16 = -1,
+    set_a_foreground: i16 = -1,
+    set_a_background: i16 = -1,
+    pkey_plab: i16 = -1,
+    device_type: i16 = -1,
+    code_set_init: i16 = -1,
+    set0_des_seq: i16 = -1,
+    set1_des_seq: i16 = -1,
+    set2_des_seq: i16 = -1,
+    set3_des_seq: i16 = -1,
+    set_lr_margin: i16 = -1,
+    set_tb_margin: i16 = -1,
+    bit_image_repeat: i16 = -1,
+    bit_image_newline: i16 = -1,
+    bit_image_carriage_return: i16 = -1,
+    color_names: i16 = -1,
+    define_bit_image_region: i16 = -1,
+    end_bit_image_region: i16 = -1,
+    set_color_band: i16 = -1,
+    set_page_length: i16 = -1,
+    display_pc_char: i16 = -1,
+    enter_pc_charset_mode: i16 = -1,
+    exit_pc_charset_mode: i16 = -1,
+    enter_scancode_mode: i16 = -1,
+    exit_scancode_mode: i16 = -1,
+    pc_term_options: i16 = -1,
+    scancode_escape: i16 = -1,
+    alt_scancode_esc: i16 = -1,
+    enter_horizontal_hl_mode: i16 = -1,
+    enter_left_hl_mode: i16 = -1,
+    enter_low_hl_mode: i16 = -1,
+    enter_right_hl_mode: i16 = -1,
+    enter_top_hl_mode: i16 = -1,
+    enter_vertical_hl_mode: i16 = -1,
+    set_a_attributes: i16 = -1,
+    set_pglen_inch: i16 = -1,
 };
 
 const t = std.testing;
-const terminfo = @embedFile("st-256color");
+const ta = t.allocator;
+const terminfo = @embedFile("st-256color").*;
 
 test "Invalid" {
-    try t.expectError(error.InvalidFormat, parse(""));
-    try t.expectError(error.InvalidFormat, parse("some invalid text"));
-    var buf = terminfo.*;
-    _ = try parse(&buf);
+    try t.expectError(error.InvalidFormat, parse(ta, ""));
+    try t.expectError(error.InvalidFormat, parse(ta, "some invalid text"));
+    var buf = terminfo;
+    const p = try parse(ta, &buf);
+    p.destroy(ta);
     buf[0] = 10;
-    try t.expectError(error.InvalidFormat, parse(&buf));
+    try t.expectError(error.InvalidFormat, parse(ta, &buf));
 }
 
 test "Boolean capabilities" {
-    const res = try parse(terminfo);
+    const res = try parse(ta, &terminfo);
+    defer res.destroy(ta);
     try t.expectEqual(false, res.flags.auto_left_margin);
     try t.expectEqual(true, res.flags.auto_right_margin);
     try t.expectEqual(false, res.flags.no_esc_ctlc);
@@ -877,7 +907,8 @@ fn expectNumber32(expected: u32, actual: i32) !void {
 }
 
 test "Number capabilities" {
-    const res = try parse(terminfo);
+    const res = try parse(ta, &terminfo);
+    defer res.destroy(ta);
 
     // Hex values taken from running `hexdump -C` on the terminfo file
     try expectNumber32(0x0050, res.numbers.columns);
@@ -918,7 +949,8 @@ test "Number capabilities" {
 }
 
 test "String capabilities" {
-    const res = try parse(terminfo);
+    const res = try parse(ta, &terminfo);
+    defer res.destroy(ta);
 
     // Hex values taken from running `hexdump -C` on the terminfo file
     try expectNumber(0x0000, res.strings.back_tab);
@@ -950,9 +982,9 @@ test "String capabilities" {
 }
 
 fn expectStringCapability(
-    capabilities: Capabilities,
+    capabilities: *Self,
     expected: []const u8,
-    comptime e: Capabilities.StringTag,
+    comptime e: StringTag,
 ) !void {
     try t.expectEqualStrings(
         expected,
@@ -961,11 +993,25 @@ fn expectStringCapability(
 }
 
 test "getCapability" {
-    const res = try parse(terminfo);
+    const file = openTermInfoFile("st-256color") orelse return error.Fug;
+    defer file.close();
+
+    const buf = try file.readToEndAlloc(t.allocator, 32768);
+    defer t.allocator.free(buf);
+
+    const res = try parse(ta, buf);
+    defer res.destroy(ta);
+
     try expectStringCapability(res, "\x1b[%p1%dC", .parm_right_cursor);
     try expectStringCapability(res, "\x1b[%p1%dD", .parm_left_cursor);
     try expectStringCapability(res, "\x1b[%p1%dB", .parm_down_cursor);
     try expectStringCapability(res, "\x1b[%p1%dA", .parm_up_cursor);
+    try expectStringCapability(res, "\x1b[1K", .clr_bol);
+    // t.expectEqual(@as(?[:0]const u8, null), res.getStringCapability(.clr_bol)) catch |err| {
+    //     std.debug.print("\nINDEX: {d}\n", .{res.strings.clr_bol});
+    //     std.debug.print("STRING TABLE START: {x}\n", .{res.string_table[0..5]});
+    //     return err;
+    // };
 
     const init_tabs = res.getNumberCapability(.init_tabs) orelse return error.InvalidCapabilityName;
     try t.expectEqual(@as(u31, 8), init_tabs);
@@ -979,12 +1025,13 @@ test "getCapability" {
 test "xterm" {
     const x = @embedFile("xterm-256color");
     const header = try parseHeader(x);
-    const res = try parse(x);
+    const res = try parse(ta, x);
+    defer res.destroy(ta);
 
     try t.expectEqual(@as(u16, 0x0025), header.terminal_names_size);
-    try t.expectEqual(@as(u16, 0x0026), header.boolean_flags_size);
-    try t.expectEqual(@as(u16, 0x000f), header.numbers_shorts);
-    try t.expectEqual(@as(u16, 0x019d), header.strings_shorts);
+    try t.expectEqual(@as(u16, 0x0026), header.flag_count);
+    try t.expectEqual(@as(u16, 0x000f), header.number_count);
+    try t.expectEqual(@as(u16, 0x019d), header.string_count);
     try t.expectEqual(@as(u16, 0x065a), header.string_table_size);
 
     try expectNumber32(0x00000050, res.numbers.columns);
@@ -1005,8 +1052,9 @@ test "findTermInfoPath" {
 
         const buf = try file.readToEndAlloc(std.testing.allocator, 32768);
         defer std.testing.allocator.free(buf);
-        const res = try parse(buf);
-        try t.expectEqualStrings("st-256color| simpleterm with 256 colors", std.mem.span(res.names));
+        const res = try parse(ta, buf);
+        defer res.destroy(ta);
+        try t.expectEqualStrings("st-256color| simpleterm with 256 colors", res.names);
     }
 
     {
@@ -1015,8 +1063,9 @@ test "findTermInfoPath" {
 
         const buf = try file.readToEndAlloc(std.testing.allocator, 32768);
         defer std.testing.allocator.free(buf);
-        const res = try parse(buf);
-        try t.expectEqualStrings("xterm-256color|xterm with 256 colors", std.mem.span(res.names));
+        const res = try parse(ta, buf);
+        defer res.destroy(ta);
+        try t.expectEqualStrings("xterm-256color|xterm with 256 colors", res.names);
     }
 
     try t.expectEqual(@as(?std.fs.File, null), openTermInfoFile(""));

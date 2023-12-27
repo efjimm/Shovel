@@ -32,4 +32,5 @@ test {
     _ = @import("input_description.zig");
     _ = @import("colour_description.zig");
     _ = @import("restricted_padding_writer.zig");
+    _ = @import("terminfo_parser.zig");
 }

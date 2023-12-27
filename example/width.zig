@@ -2,8 +2,11 @@ const std = @import("std");
 const spoon = @import("spoon");
 
 pub fn main() !void {
-    var term = try spoon.Term.init(.{});
-    defer term.deinit();
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    defer _ = gpa.deinit();
+
+    var term = try spoon.Term.init(gpa.allocator(), .{});
+    defer term.deinit(gpa.allocator());
 
     try term.uncook(.{});
     try term.fetchSize();

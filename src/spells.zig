@@ -13,6 +13,9 @@
 //
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+// These escape sequences are used when terminfo capabilities are not available.
+
 const std = @import("std");
 
 pub const hide_cursor = "\x1B[?25l";
@@ -79,6 +82,7 @@ pub const reset_auto_wrap = "\x1B[?7l";
 pub const reset_auto_repeat = "\x1B[?8l";
 pub const reset_auto_interlace = "\x1B[?9l";
 
+// TODO: Derive these from extended terminfo capabilities
 pub const start_sync = "\x1BP=1s\x1B\\";
 pub const end_sync = "\x1BP=2s\x1B\\";
 

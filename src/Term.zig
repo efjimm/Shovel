@@ -26,6 +26,7 @@ const os = std.os;
 const unicode = std.unicode;
 const debug = std.debug;
 const math = std.math;
+const assert = debug.assert;
 
 // Workaround for bad libc integration of zigs std.
 const constants = if (builtin.link_libc and builtin.os.tag == .linux) os.linux else os.system;
@@ -33,7 +34,7 @@ const constants = if (builtin.link_libc and builtin.os.tag == .linux) os.linux e
 const Style = @import("Style.zig");
 const spells = @import("spells.zig");
 const rpw = @import("restricted_padding_writer.zig");
-const terminfo = @import("terminfo_parser.zig");
+const TermInfo = @import("terminfo_parser.zig");
 
 const Term = @This();
 
@@ -66,7 +67,7 @@ cursor_shape: CursorShape = .unknown,
 codepoint: [4]u8 = undefined,
 codepoint_len: u3 = 0,
 
-capabilities: terminfo.Capabilities,
+terminfo: ?*TermInfo = null,
 
 pub const CursorShape = spells.CursorShape;
 
@@ -108,7 +109,28 @@ pub const InitError = error{
     Unexpected,
 };
 
-pub fn init(term_config: TermConfig) InitError!Term {
+pub fn init(allocator: Allocator, term_config: TermConfig) (InitError || Allocator.Error)!Term {
+    var ret = try initInternal(term_config);
+    errdefer ret.deinit(allocator);
+
+    ret.terminfo = getTermInfo(allocator) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        error.NoTermInfo => blk: {
+            log.warn("Proceeding without terminfo definitions", .{});
+            break :blk null;
+        },
+    };
+
+    return ret;
+}
+
+pub fn initNoTermInfo(term_config: TermConfig) InitError!Term {
+    const ret = try initInternal(term_config);
+    log.info("spoon initialized without terminfo definitions", .{});
+    return ret;
+}
+
+fn initInternal(term_config: TermConfig) InitError!Term {
     const ret = Term{
         .tty = os.open(term_config.tty_name, constants.O.RDWR, 0) catch |err| switch (err) {
             // None of these are reachable with the flags we pass to os.open
@@ -138,7 +160,7 @@ pub fn init(term_config: TermConfig) InitError!Term {
             error.Unexpected,
             => |new_err| return new_err,
         },
-        .capabilities = getCapabilities() catch .{},
+        .terminfo = null,
     };
     errdefer os.close(ret.tty);
 
@@ -148,27 +170,34 @@ pub fn init(term_config: TermConfig) InitError!Term {
     return ret;
 }
 
-fn getCapabilities() !terminfo.Capabilities {
+fn getTermInfo(allocator: Allocator) !*TermInfo {
     const term_var = std.os.getenv("TERM") orelse {
         log.info("No TERM variable defined", .{});
         return error.NoTermInfo;
     };
 
-    var buf: [terminfo.max_file_length]u8 = undefined;
+    var buf: [TermInfo.max_file_length]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const allocator = fba.allocator();
 
-    var iter: terminfo.FileIter = .{ .term = term_var };
+    var iter: TermInfo.FileIter = .{ .term = term_var };
     while (iter.next()) |file| {
         defer file.close();
 
-        const bytes = file.readToEndAlloc(allocator, terminfo.max_file_length) catch |err| {
-            log.info("{} when reading terminfo file, skipping", .{err});
-            continue;
+        fba.reset();
+        const bytes = file.readToEndAlloc(fba.allocator(), TermInfo.max_file_length) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            else => {
+                log.info("{} when reading terminfo file, skipping", .{err});
+                continue;
+            },
         };
-        return terminfo.parse(bytes) catch |err| {
-            log.info("Could not parse terminfo file, skipping {}", .{err});
-            continue;
+
+        return TermInfo.parse(allocator, bytes) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            else => {
+                log.info("Could not parse terminfo file, skipping {}", .{err});
+                continue;
+            },
         };
     }
 
@@ -176,12 +205,15 @@ fn getCapabilities() !terminfo.Capabilities {
     return error.NoTermInfo;
 }
 
-pub fn deinit(self: *Term) void {
-    debug.assert(!self.currently_rendering);
+pub fn deinit(self: *Term, allocator: Allocator) void {
+    assert(!self.currently_rendering);
 
     // It's probably a good idea to cook the terminal on exit.
     if (!self.isCooked())
         self.cook() catch {};
+
+    if (self.terminfo) |ti|
+        ti.destroy(allocator);
 
     os.close(self.tty);
     self.* = undefined;
@@ -209,9 +241,9 @@ pub fn setBlockingRead(self: Term, enabled: bool) SetBlockingReadError!void {
 
 // Reads from stdin to the supplied buffer. Asserts that `buf.len >= 8`.
 pub fn readInput(self: *Term, buf: []u8) ![]u8 {
-    debug.assert(buf.len >= 8); // Ensures that at least one full escape sequence can be handled
-    debug.assert(!self.currently_rendering);
-    debug.assert(!self.isCooked());
+    assert(buf.len >= 8); // Ensures that at least one full escape sequence can be handled
+    assert(!self.currently_rendering);
+    assert(!self.isCooked());
 
     // If we have a partial codepoint from the last read, append it to the buffer
     const buffer = blk: {
@@ -267,7 +299,17 @@ pub fn readInput(self: *Term, buf: []u8) ![]u8 {
     return slice;
 }
 
-pub inline fn isCooked(self: Term) bool {
+pub fn getStringCapability(
+    self: *const Term,
+    comptime tag: TermInfo.StringTag,
+) ?[:0]const u8 {
+    return if (self.terminfo) |ti|
+        ti.getStringCapability(tag)
+    else
+        null;
+}
+
+pub inline fn isCooked(self: *const Term) bool {
     return self.cooked_termios == null;
 }
 
@@ -334,16 +376,14 @@ pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
 
     var buffered_writer = self.bufferedWriter(256);
     const _writer = buffered_writer.writer();
-    try _writer.writeAll(
-        spells.save_cursor_position ++
-            spells.save_cursor_position ++
-            spells.enter_alt_buffer ++
-            spells.overwrite_mode ++
-            spells.reset_auto_wrap ++
-            spells.reset_auto_repeat ++
-            spells.reset_auto_interlace ++
-            spells.hide_cursor,
-    );
+    inline for (.{
+        self.getStringCapability(.save_cursor) orelse spells.save_cursor_position,
+        self.getStringCapability(.enter_ca_mode) orelse spells.enter_alt_buffer,
+        self.getStringCapability(.exit_insert_mode) orelse spells.overwrite_mode,
+        self.getStringCapability(.exit_am_mode) orelse spells.reset_auto_wrap,
+        self.getStringCapability(.cursor_invisible) orelse spells.hide_cursor,
+    }) |str| try _writer.writeAll(str);
+
     if (options.request_kitty_keyboard_protocol) {
         try _writer.writeAll(spells.enable_kitty_keyboard);
     }
@@ -360,25 +400,20 @@ pub fn cook(self: *Term) CookError!void {
     if (self.isCooked())
         return;
 
-    var buffered_writer = self.bufferedWriter(128);
-    const _writer = buffered_writer.writer();
-    try _writer.writeAll(
-        // Even if we did not request the kitty keyboard protocol or mouse
-        // tracking, asking the terminal to disable it should have no effect.
-        spells.disable_kitty_keyboard ++
-            spells.disable_mouse_tracking ++
-            spells.clear ++
-            spells.leave_alt_buffer ++
-            spells.restore_screen ++
-            spells.restore_cursor_position ++
-            spells.show_cursor ++
-            spells.reset_attributes ++
-            spells.reset_attributes,
-    );
-    try buffered_writer.flush();
-
     try os.tcsetattr(self.tty, .FLUSH, self.cooked_termios.?);
     self.cooked_termios = null;
+
+    var buffered_writer = self.bufferedWriter(128);
+    const _writer = buffered_writer.writer();
+    inline for (.{
+        spells.disable_kitty_keyboard,
+        spells.disable_mouse_tracking,
+        self.getStringCapability(.clear_screen) orelse spells.clear,
+        self.getStringCapability(.exit_ca_mode) orelse spells.leave_alt_buffer,
+        self.getStringCapability(.cursor_visible) orelse spells.show_cursor,
+        self.getStringCapability(.exit_attribute_mode) orelse spells.reset_attributes,
+    }) |str| try _writer.writeAll(str);
+    try buffered_writer.flush();
 }
 
 pub fn fetchSize(self: *Term) os.UnexpectedError!void {
@@ -396,7 +431,7 @@ pub fn fetchSize(self: *Term) os.UnexpectedError!void {
 
 /// Set window title using OSC 2. Shall not be called while rendering.
 pub fn setWindowTitle(self: *Term, comptime fmt: []const u8, args: anytype) WriteError!void {
-    debug.assert(!self.currently_rendering);
+    assert(!self.currently_rendering);
     const _writer = self.writer();
     try _writer.print("\x1b]2;" ++ fmt ++ "\x1b\\", args);
 }
@@ -418,7 +453,7 @@ pub fn getRenderContextSafe(
 
     const _writer = rc.buffer.writer();
     try _writer.writeAll(spells.start_sync);
-    try _writer.writeAll(spells.reset_attributes);
+    try _writer.writeAll(self.getStringCapability(.exit_attribute_mode) orelse spells.reset_attributes);
 
     return rc;
 }
@@ -427,8 +462,8 @@ pub fn getRenderContext(
     self: *Term,
     comptime buffer_size: usize,
 ) WriteError!RenderContext(buffer_size) {
-    debug.assert(!self.currently_rendering);
-    debug.assert(!self.isCooked());
+    assert(!self.currently_rendering);
+    assert(!self.isCooked());
     return (try self.getRenderContextSafe(buffer_size)) orelse unreachable;
 }
 
@@ -444,8 +479,8 @@ pub fn RenderContext(comptime buffer_size: usize) type {
         /// Finishes the render operation. The render context may not be used any
         /// further.
         pub fn done(rc: *Self) WriteError!void {
-            debug.assert(rc.term.currently_rendering);
-            debug.assert(!rc.term.isCooked());
+            assert(rc.term.currently_rendering);
+            assert(!rc.term.isCooked());
             defer rc.term.currently_rendering = false;
             const _writer = rc.buffer.writer();
             try _writer.writeAll(spells.end_sync);
@@ -456,49 +491,42 @@ pub fn RenderContext(comptime buffer_size: usize) type {
         /// cause flicker on some terminals (such as the Linux tty). Prefer more granular clearing
         /// functions like `clearToEol` and `clearToBot`.
         pub fn clear(rc: *Self) WriteError!void {
-            debug.assert(rc.term.currently_rendering);
+            assert(rc.term.currently_rendering);
             const _writer = rc.buffer.writer();
-            try _writer.writeAll(spells.clear);
+            try _writer.writeAll(rc.term.getStringCapability(.clear_screen) orelse spells.clear);
         }
 
         /// Clears the screen from the current line to the bottom.
         pub fn clearToBot(rc: *Self) WriteError!void {
-            debug.assert(rc.term.curerntly_rendering);
+            assert(rc.term.curerntly_rendering);
             const _writer = rc.buffer.writer();
-            try _writer.writeAll(spells.clear_to_bot);
-        }
-
-        /// Clears the screen from the current line to the top.
-        pub fn clearToTop(rc: *Self) WriteError!void {
-            debug.assert(rc.term.curerntly_rendering);
-            const _writer = rc.buffer.writer();
-            try _writer.writeAll(spells.clear_to_top);
+            try _writer.writeAll(rc.term.getStringCapability(.clr_eos) orelse spells.clear_to_bot);
         }
 
         /// Clears from the cursor position to the end of the line.
         pub fn clearToEol(rc: *Self) WriteError!void {
-            debug.assert(rc.term.currently_rendering);
+            assert(rc.term.currently_rendering);
             const _writer = rc.buffer.writer();
-            try _writer.writeAll(spells.clear_to_eol);
+            try _writer.writeAll(rc.term.getStringCapability(.clr_eol) orelse spells.clear_to_eol);
         }
 
         /// Clears the screen from the cursor to the beginning of the line.
         pub fn clearToBol(rc: *Self) WriteError!void {
-            debug.assert(rc.term.currently_rendering);
+            assert(rc.term.currently_rendering);
             const _writer = rc.buffer.writer();
-            try _writer.writeAll(spells.clear_to_bol);
+            try _writer.writeAll(rc.term.getStringCapability(.clr_bol) orelse spells.clear_to_bol);
         }
 
         /// Move the cursor to the specified cell.
         pub fn moveCursorTo(rc: *Self, row: u16, col: u16) WriteError!void {
-            debug.assert(rc.term.currently_rendering);
+            assert(rc.term.currently_rendering);
             const _writer = rc.buffer.writer();
             try _writer.print(spells.move_cursor_fmt, .{ row + 1, col + 1 });
         }
 
         /// Hide the cursor.
         pub fn hideCursor(rc: *Self) WriteError!void {
-            debug.assert(rc.term.currently_rendering);
+            assert(rc.term.currently_rendering);
             if (!rc.term.cursor_visible)
                 return;
             const _writer = rc.buffer.writer();
@@ -508,7 +536,7 @@ pub fn RenderContext(comptime buffer_size: usize) type {
 
         /// Show the cursor.
         pub fn showCursor(rc: *Self) WriteError!void {
-            debug.assert(rc.term.currently_rendering);
+            assert(rc.term.currently_rendering);
             if (rc.term.cursor_visible)
                 return;
             const _writer = rc.buffer.writer();
@@ -518,19 +546,19 @@ pub fn RenderContext(comptime buffer_size: usize) type {
 
         /// Set the text attributes for all following writes.
         pub fn setStyle(rc: *Self, attr: Style) WriteError!void {
-            debug.assert(rc.term.currently_rendering);
+            assert(rc.term.currently_rendering);
             const _writer = rc.buffer.writer();
             try attr.dump(_writer);
         }
 
         pub fn restrictedPaddingWriter(rc: *Self, width: u16) RestrictedPaddingWriter {
-            debug.assert(rc.term.currently_rendering);
+            assert(rc.term.currently_rendering);
             return rpw.restrictedPaddingWriter(rc.buffer.writer(), width);
         }
 
         /// Write all bytes, wrapping at the end of the line.
         pub fn writeAllWrapping(rc: *Self, bytes: []const u8) WriteError!void {
-            debug.assert(rc.term.currently_rendering);
+            assert(rc.term.currently_rendering);
             const _writer = rc.buffer.writer();
             try _writer.writeAll(spells.enable_auto_wrap);
             try _writer.writeAll(bytes);
@@ -538,7 +566,7 @@ pub fn RenderContext(comptime buffer_size: usize) type {
         }
 
         pub fn setCursorShape(rc: *Self, shape: CursorShape) WriteError!void {
-            debug.assert(rc.term.currently_rendering);
+            assert(rc.term.currently_rendering);
             if (rc.term.cursor_shape == shape) return;
             const _writer = rc.buffer.writer();
             try _writer.writeAll(spells.cursor_shapes.get(shape));

@@ -35,6 +35,7 @@ pub fn build(b: *Build) void {
         .target = target,
         .optimize = optimize,
     });
+    tests.addOptions("build_options", opts);
     tests.addModule("wcwidth", wcwidth);
 
     const run_tests = b.addRunArtifact(tests);

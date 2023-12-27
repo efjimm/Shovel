@@ -28,8 +28,11 @@ pub fn main() !void {
         break :blk false;
     };
 
-    term = try spoon.Term.init(.{});
-    defer term.deinit();
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    defer _ = gpa.deinit();
+
+    term = try spoon.Term.init(gpa.allocator(), .{});
+    defer term.deinit(gpa.allocator());
 
     try os.sigaction(os.SIG.WINCH, &os.Sigaction{
         .handler = .{ .handler = handleSigWinch },
