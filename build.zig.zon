@@ -13,8 +13,8 @@
     },
     .dependencies = .{
         .wcwidth = .{
-            .url = "https://github.com/efjimm/zig-wcwidth/archive/d665dfbbf687900b0a3ed31879bb1e2a7f8b236d.tar.gz",
-            .hash = "1220271f362ae1e02e524769a06a68a6cf4fe48218b82cae3823fb09940a537e61b1",
+            .url = "https://github.com/efjimm/zig-wcwidth/archive/79a3c702a2d7e7a0cccbf5e2b6f5c41f6c73d007.tar.gz",
+            .hash = "12200122cb36b0c8b4f02bfedd381c98a3e666d5112de25837e5a07cd26cf08fc97e",
         },
     },
 }

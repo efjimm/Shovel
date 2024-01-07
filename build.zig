@@ -7,7 +7,7 @@ fn example(
     opts: Build.ExecutableOptions,
 ) void {
     const exe = b.addExecutable(opts);
-    exe.addModule("spoon", spoon_module);
+    exe.root_module.addImport("spoon", spoon_module);
     b.installArtifact(exe);
 }
 
@@ -20,23 +20,20 @@ pub fn build(b: *Build) void {
     const enable_logging = b.option(bool, "logging", "Enable logging") orelse false;
     const opts = b.addOptions();
     opts.addOption(bool, "logging_enabled", enable_logging);
-    const opts_module = opts.createModule();
 
     const spoon_module = b.addModule("spoon", .{
-        .source_file = .{ .path = "src/main.zig" },
-        .dependencies = &.{
-            .{ .name = "wcwidth", .module = wcwidth },
-            .{ .name = "build_options", .module = opts_module },
-        },
+        .root_source_file = .{ .path = "src/main.zig" },
     });
+    spoon_module.addImport("wcwidth", wcwidth);
+    spoon_module.addImport("build_options", opts.createModule());
 
     const tests = b.addTest(.{
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
     });
-    tests.addOptions("build_options", opts);
-    tests.addModule("wcwidth", wcwidth);
+    tests.root_module.addImport("build_options", opts.createModule());
+    tests.root_module.addImport("wcwidth", wcwidth);
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run all tests");
