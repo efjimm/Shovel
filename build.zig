@@ -27,10 +27,13 @@ pub fn build(b: *Build) void {
     spoon_module.addImport("wcwidth", wcwidth);
     spoon_module.addImport("build_options", opts.createModule());
 
+    const filter = b.option([]const u8, "test-filter", "Filter string for tests");
+
     const tests = b.addTest(.{
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
+        .filter = filter,
     });
     tests.root_module.addImport("build_options", opts.createModule());
     tests.root_module.addImport("wcwidth", wcwidth);

@@ -5,7 +5,10 @@ const sep = std.fs.path.sep;
 const readInt = std.mem.readInt;
 const native_endian = @import("builtin").cpu.arch.endian();
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
+const util = @import("util.zig");
 
+// Maximum length of terminfo definition files
 pub const max_file_length = 32768;
 const Self = @This();
 
@@ -840,6 +843,450 @@ pub const Strings = extern struct {
     set_pglen_inch: i16 = -1,
 };
 
+const Parameter = union(enum) {
+    number: i32,
+    string: []const u8,
+};
+
+fn createParam(arg: anytype) Parameter {
+    const T = @TypeOf(arg);
+    return if (comptime util.isZigString(T))
+        .{ .string = arg }
+    else
+        .{ .number = arg };
+}
+
+pub const ParamSequenceError = error{
+    UnexpectedEndOfInput,
+    InvalidSpecifier,
+    UnpoppedStack,
+    PoppedEmptyStack,
+    NotEnoughParameters,
+    UnexpectedConditionTerminator,
+    MissingConditionTerminator,
+    Overflow,
+};
+
+/// Validates that the given parameterized escape sequence is correct.
+pub fn validateParamSequence(sequence: []const u8, param_count: usize) ParamSequenceError!void {
+    const sub = std.math.sub;
+
+    const s = sequence;
+    var i: usize = 0;
+    var stack_len: usize = 0;
+    var nesting: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] != '%') continue;
+        i += 1;
+        if (i >= s.len) return error.UnexpectedEndOfInput;
+        switch (s[i]) {
+            ':', '#', ' ', '.', '0'...'9', 'd', 'o', 'x', 'X', 's' => |c| {
+                if (c == ':') i += 1;
+                if (i >= s.len) return error.UnexpectedEndOfInput;
+
+                while (i < s.len) : (i += 1) {
+                    switch (s[i]) {
+                        '-', '+', '#', ' ' => {},
+                        else => break,
+                    }
+                } else return error.UnexpectedEndOfInput;
+
+                // Collect width
+                const width_start = i;
+                while (i < s.len) : (i += 1) {
+                    switch (s[i]) {
+                        '0'...'9' => {},
+                        else => break,
+                    }
+                } else return error.UnexpectedEndOfInput;
+
+                if (i > width_start) {
+                    _ = std.fmt.parseUnsigned(u31, s[width_start..i], 10) catch |err| switch (err) {
+                        error.InvalidCharacter => unreachable,
+                        else => |e| return e,
+                    };
+                }
+
+                // Collect precision
+                if (s[i] == '.') {
+                    i += 1;
+                    if (i >= s.len) return error.UnexpectedEndOfInput;
+
+                    // Negative precision is allowed, but acts as if 0.
+                    // see printf(3)
+                    if (s[i] == '-') i += 1;
+
+                    const precision_start = i;
+                    while (i < s.len) : (i += 1) {
+                        switch (s[i]) {
+                            '0'...'9' => {},
+                            else => break,
+                        }
+                    } else return error.UnexpectedEndOfInput;
+
+                    _ = std.fmt.parseUnsigned(u31, s[precision_start..i], 10) catch |err| switch (err) {
+                        error.InvalidCharacter => unreachable,
+                        else => |e| return e,
+                    };
+                }
+
+                if (stack_len < 1) return error.PoppedEmptyStack;
+                switch (s[i]) {
+                    'd', 'o', 'x', 'X', 's' => {},
+                    else => return error.InvalidSpecifier,
+                }
+                stack_len -= 1;
+            },
+            'c' => {
+                stack_len -= 1;
+            },
+            '%' => {},
+            'p' => {
+                i += 1;
+                if (i >= s.len) return error.UnexpectedEndOfInput;
+                switch (s[i]) {
+                    '1'...'9' => {},
+                    else => return error.InvalidSpecifier,
+                }
+                stack_len += 1;
+            },
+            inline 'P', 'g' => |c| {
+                i += 1;
+                if (i >= s.len) return error.UnexpectedEndOfInput;
+                switch (s[i]) {
+                    'a'...'z', 'A'...'Z' => {},
+                    else => return error.InvalidSpecifier,
+                }
+
+                switch (c) {
+                    'P' => stack_len = sub(usize, stack_len, 1) catch return error.PoppedEmptyStack,
+                    'g' => stack_len += 1,
+                    else => unreachable,
+                }
+            },
+            '\'' => {
+                i += 1;
+                if (i >= s.len) return error.UnexpectedEndOfInput;
+                i += 1;
+                if (i >= s.len) return error.UnexpectedEndOfInput;
+                if (s[i] != '\'') return error.InvalidSpecifier;
+                stack_len += 1;
+            },
+            '{' => {
+                i += 1;
+                if (i >= s.len) return error.UnexpectedEndOfInput;
+
+                const start = i;
+                if (s[i] == '-') i += 1;
+
+                while (i < s.len) : (i += 1) {
+                    switch (s[i]) {
+                        '0'...'9' => {},
+                        else => break,
+                    }
+                } else return error.UnexpectedEndOfInput;
+                if (start + @intFromBool(s[start] == '-') == i) return error.InvalidSpecifier;
+                _ = std.fmt.parseInt(i32, s[start..i], 10) catch |err| switch (err) {
+                    error.InvalidCharacter => unreachable,
+                    else => |e| return e,
+                };
+                if (i >= s.len) return error.UnexpectedEndOfInput;
+                if (s[i] != '}') return error.InvalidSpecifier;
+                stack_len += 1;
+            },
+            'l' => {
+                if (stack_len == 0) return error.PoppedEmptyStack;
+            },
+            '+', '-', '*', '/', 'm', '&', '|', '^', '=', '>', '<' => {
+                if (stack_len < 2) return error.PoppedEmptyStack;
+                stack_len -= 1;
+            },
+            '!', '~' => {
+                if (stack_len < 1) return error.PoppedEmptyStack;
+            },
+            'i' => {
+                if (param_count < 2) return error.NotEnoughParameters;
+            },
+            '?' => {},
+            't' => {
+                if (stack_len < 1) return error.PoppedEmptyStack;
+                nesting += 1;
+                stack_len -= 1;
+            },
+            'e' => {},
+            ';' => nesting = sub(usize, nesting, 1) catch return error.UnexpectedConditionTerminator,
+            else => return error.InvalidSpecifier,
+        }
+    }
+    if (nesting != 0) return error.MissingConditionTerminator;
+}
+
+/// Writes a paramterized escape sequence to the given writer, with the specified arguments. This
+/// function does no error checking. It is recommended to first validate parameterized sequences by
+/// calling `validateParamSequence`.
+pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void {
+    const PrintFlags = packed struct(u4) {
+        minus: bool = false,
+        plus: bool = false,
+        hash: bool = false,
+        space: bool = false,
+    };
+
+    var params = blk: {
+        var params: [args.len]Parameter = undefined;
+        inline for (args, &params) |arg, *p| {
+            p.* = createParam(arg);
+        }
+        break :blk params;
+    };
+
+    var stack: std.BoundedArray(Parameter, 123) = .{};
+    var dynamic_variables: [26]Parameter = .{.{ .number = 0 }} ** 26;
+    var static_variables: [26]Parameter = .{.{ .number = 0 }} ** 26;
+
+    var i: usize = 0;
+    while (i < str.len) : (i += 1) {
+        if (str[i] != '%') {
+            try writer.writeByte(str[i]);
+            continue;
+        }
+        i += 1;
+        if (i >= str.len) break;
+
+        switch (str[i]) {
+            '%' => try writer.writeByte('%'),
+            'p' => {
+                if (args.len > 0) {
+                    i += 1;
+                    const index = str[i] - '1';
+                    stack.appendAssumeCapacity(params[index]);
+                }
+            },
+            // Set dynamic/static variable to pop()
+            'P' => {
+                i += 1;
+                const value = stack.pop();
+                switch (str[i]) {
+                    'a'...'z' => dynamic_variables[str[i] - 'a'] = value,
+                    'A'...'Z' => static_variables[str[i] - 'A'] = value,
+                    else => unreachable,
+                }
+            },
+            'g' => {
+                i += 1;
+                const value = switch (str[i]) {
+                    'a'...'z' => dynamic_variables[str[i] - 'a'],
+                    'A'...'Z' => static_variables[str[i] - 'A'],
+                    else => unreachable,
+                };
+                stack.appendAssumeCapacity(value);
+            },
+            'c' => {
+                const arg = stack.pop();
+                const char: u8 = switch (arg) {
+                    .number => |int| @intCast(int),
+                    .string => |s| s[0],
+                };
+                try writer.print("{c}", .{char});
+            },
+            ':', '#', ' ', '.', '0'...'9', 'd', 'o', 'x', 'X', 's' => |c| {
+                if (c == ':') i += 1;
+                var flags: PrintFlags = .{};
+
+                // Collect flags
+                while (i < str.len) : (i += 1) {
+                    switch (str[i]) {
+                        '-' => flags.minus = true,
+                        '+' => flags.plus = true,
+                        '#' => flags.hash = true,
+                        ' ' => flags.space = true,
+                        else => break,
+                    }
+                } else unreachable;
+
+                // Collect width
+                const width_start = i;
+                while (i < str.len) : (i += 1) {
+                    switch (str[i]) {
+                        '0'...'9' => {},
+                        else => break,
+                    }
+                } else unreachable;
+
+                const width: ?i32 = if (i > width_start)
+                    std.fmt.parseInt(u31, str[width_start..i], 10) catch unreachable
+                else
+                    null;
+
+                // Collect precision
+                const precision: ?i32 = blk: {
+                    if (str[i] != '.') break :blk null;
+                    i += 1;
+                    const prec_start = i;
+                    while (i < str.len) : (i += 1) {
+                        switch (str[i]) {
+                            '0'...'9' => {},
+                            else => break,
+                        }
+                    } else unreachable;
+                    break :blk std.fmt.parseInt(i32, str[prec_start..i], 10) catch unreachable;
+                };
+
+                const fmt_opts: util.FormatOptions = .{
+                    .precision = std.math.cast(usize, precision orelse -1),
+
+                    .width = if (width) |w|
+                        if (w < 0) blk: {
+                            flags.minus = true;
+                            break :blk @abs(w);
+                        } else @intCast(w)
+                    else
+                        null,
+
+                    .alignment = if (flags.minus) .left else .right,
+                    .plus = flags.plus,
+                    .space = flags.space,
+                };
+
+                switch (str[i]) {
+                    inline 'd', 'o', 'x', 'X' => |f| {
+                        const value: Parameter = stack.pop();
+                        assert(value == .number);
+                        const base, const case = switch (f) {
+                            'd' => .{ 10, .lower },
+                            'o' => .{ 8, .lower },
+                            'x' => .{ 16, .lower },
+                            'X' => .{ 16, .upper },
+                            else => unreachable,
+                        };
+                        try util.formatInt(value.number, base, case, fmt_opts, writer);
+                    },
+                    's' => switch (stack.pop()) {
+                        .number => |int| try util.formatInt(int, 10, .lower, fmt_opts, writer),
+                        .string => |s| try std.fmt.formatBuf(s, .{
+                            .precision = fmt_opts.precision,
+                            .width = fmt_opts.width,
+                            .alignment = fmt_opts.alignment,
+                            .fill = ' ',
+                        }, writer),
+                    },
+                    else => unreachable,
+                }
+            },
+            '\'' => {
+                i += 1;
+                const char = str[i];
+                i += 1;
+                assert(str[i] == '\'');
+
+                stack.appendAssumeCapacity(.{ .number = char });
+            },
+            '{' => {
+                i += 1;
+                const start = i;
+                if (str[i] == '-') i += 1;
+                while (i < str.len) : (i += 1) {
+                    switch (str[i]) {
+                        '0'...'9' => {},
+                        else => break,
+                    }
+                } else unreachable;
+                assert(i > start);
+                assert(str[i] == '}');
+                const int_value = std.fmt.parseInt(i32, str[start..i], 10) catch unreachable;
+                stack.appendAssumeCapacity(.{ .number = int_value });
+            },
+            'l' => {
+                const value = stack.pop();
+                const len: i32 = switch (value) {
+                    .number => |int| if (int == 0)
+                        1
+                    else
+                        std.math.log10_int(@abs(int)) + 1 + @intFromBool(int < 0),
+                    .string => |s| @intCast(s.len),
+                };
+                stack.appendAssumeCapacity(.{ .number = len });
+            },
+            inline '+', '-', '*', '/', 'm', '&', '|', '^', '=', '>', '<' => |op| {
+                const lhs = stack.pop().number;
+                const rhs = stack.pop().number;
+                const value: i32 = switch (op) {
+                    '+' => lhs +% rhs,
+                    '-' => lhs -% rhs,
+                    '*' => lhs *% rhs,
+                    '/' => @divTrunc(lhs, rhs),
+                    'm' => @rem(lhs, rhs),
+                    '&' => lhs & rhs,
+                    '|' => lhs | rhs,
+                    '^' => lhs ^ rhs,
+                    '=' => @intFromBool(lhs == rhs),
+                    '>' => @intFromBool(lhs > rhs),
+                    '<' => @intFromBool(lhs < rhs),
+                    'A' => @intFromBool(lhs != 0 and rhs != 0),
+                    'O' => @intFromBool(lhs != 0 or rhs != 0),
+                    else => unreachable,
+                };
+                stack.appendAssumeCapacity(.{ .number = value });
+            },
+            inline '!', '~' => |op| {
+                const operand = stack.pop().number;
+                const value: i32 = switch (op) {
+                    '!' => @intFromBool(operand == 0),
+                    '~' => ~operand,
+                    else => unreachable,
+                };
+                stack.appendAssumeCapacity(.{ .number = value });
+            },
+            'i' => {
+                if (comptime params.len >= 2) {
+                    const n1 = params[0].number +% 1;
+                    const n2 = params[1].number +% 1;
+                    params[0] = .{ .number = n1 };
+                    params[1] = .{ .number = n2 };
+                }
+            },
+            '?' => {},
+            // 't' and 'e' implementation based on unibilium
+            't' => if (stack.pop().number == 0) {
+                // Condition was false, skip until the end of contion or 'else.'
+                var nesting: usize = 0;
+                while (i < str.len) : (i += 1) {
+                    if (str[i] != '%') continue;
+                    i += 1;
+                    switch (str[i]) {
+                        '?' => nesting += 1,
+                        ';' => {
+                            if (nesting == 0) break;
+                            nesting -= 1;
+                        },
+                        'e' => if (nesting == 0) break,
+                        else => {},
+                    }
+                }
+            },
+            'e' => {
+                // This code is only reachable if the condition was true, and as such we skip this
+                // block. The condition being false is handled in 't'
+                var nesting: usize = 0;
+                while (i < str.len) : (i += 1) {
+                    if (str[i] != '%') continue;
+                    i += 1;
+                    switch (str[i]) {
+                        '?' => nesting += 1,
+                        ';' => {
+                            if (nesting == 0) break;
+                            nesting -= 1;
+                        },
+                        else => {},
+                    }
+                }
+            },
+            ';' => {},
+            else => unreachable,
+        }
+    }
+}
+
 const t = std.testing;
 const ta = t.allocator;
 const terminfo = @embedFile("st-256color").*;
@@ -1007,11 +1454,6 @@ test "getCapability" {
     try expectStringCapability(res, "\x1b[%p1%dB", .parm_down_cursor);
     try expectStringCapability(res, "\x1b[%p1%dA", .parm_up_cursor);
     try expectStringCapability(res, "\x1b[1K", .clr_bol);
-    // t.expectEqual(@as(?[:0]const u8, null), res.getStringCapability(.clr_bol)) catch |err| {
-    //     std.debug.print("\nINDEX: {d}\n", .{res.strings.clr_bol});
-    //     std.debug.print("STRING TABLE START: {x}\n", .{res.string_table[0..5]});
-    //     return err;
-    // };
 
     const init_tabs = res.getNumberCapability(.init_tabs) orelse return error.InvalidCapabilityName;
     try t.expectEqual(@as(u31, 8), init_tabs);
@@ -1070,4 +1512,237 @@ test "findTermInfoPath" {
 
     try t.expectEqual(@as(?std.fs.File, null), openTermInfoFile(""));
     try t.expectEqual(@as(?std.fs.File, null), openTermInfoFile("Non-extant-terminal :)"));
+}
+
+const ParamTestContext = struct {
+    list: std.ArrayList(u8) = std.ArrayList(u8).init(t.allocator),
+
+    fn testParam(ctx: *ParamTestContext, expected: anytype, sequence: []const u8, args: anytype) !void {
+        ctx.list.clearRetainingCapacity();
+        const res = validateParamSequence(sequence, args.len);
+        if (comptime util.isZigString(@TypeOf(expected))) {
+            try res;
+            try writeParamSequence(sequence, ctx.list.writer(), args);
+            try t.expectEqualStrings(expected, ctx.list.items);
+        } else {
+            try t.expectError(expected, res);
+        }
+    }
+};
+
+test "param string" {
+    var list = std.ArrayList(u8).init(std.testing.allocator);
+    defer list.deinit();
+
+    try validateParamSequence("", 9);
+    try validateParamSequence("%p1%4d", 1);
+    try t.expectError(error.UnpoppedStack, validateParamSequence("%p1", 1));
+    try t.expectError(error.InvalidSpecifier, validateParamSequence("%pp", 1));
+    try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%p", 1));
+    try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%P", 1));
+    try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%g", 1));
+    try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%:", 1));
+    try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%:-", 1));
+    try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%:+", 1));
+    try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%:+#", 1));
+    try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%:+#1", 1));
+    try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%:+#1.", 1));
+    try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%:+#1.", 1));
+    try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%#1", 1));
+    try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%#1", 1));
+}
+
+test "Param sequence: non-formatted printing" {
+    var c: ParamTestContext = .{};
+    defer c.list.deinit();
+
+    try c.testParam("", "", .{});
+    try c.testParam("this is epic", "this is epic", .{});
+    try c.testParam("% this is epic %", "%% this is epic %%", .{});
+}
+
+test "Param sequence: number literals" {
+    var c: ParamTestContext = .{};
+    defer c.list.deinit();
+
+    try c.testParam("10", "%{10}%d", .{});
+    try c.testParam("5", "%{5}%d", .{});
+    try c.testParam("-1", "%{-1}%d", .{});
+    try c.testParam("0", "%{0}%d", .{});
+    try c.testParam("100000", "%{100000}%d", .{});
+    try c.testParam(error.InvalidSpecifier, "%{}%d", .{});
+    try c.testParam(error.InvalidSpecifier, "%{-}%d", .{});
+    try c.testParam(error.InvalidSpecifier, "%{abc}%d", .{});
+    try c.testParam(error.Overflow, "%{10000000000}%d", .{});
+    try c.testParam(error.Overflow, "%{-10000000000}%d", .{});
+}
+
+test "Param sequence: character literals" {
+    var c: ParamTestContext = .{};
+    defer c.list.deinit();
+
+    try c.testParam(" ", "%' '%c", .{});
+    try c.testParam("x", "%'x'%c", .{});
+    try c.testParam("65", "%'A'%d", .{});
+    try c.testParam("32", "%' '%d", .{});
+    try c.testParam(error.InvalidSpecifier, "%'ab'%c", .{});
+    try c.testParam(error.InvalidSpecifier, "%''%c", .{});
+}
+
+test "Param sequence: push positional" {
+    var c: ParamTestContext = .{};
+    defer c.list.deinit();
+
+    try c.testParam("39", "%p1%d", .{39});
+    try c.testParam("-1", "%p1%d", .{-1});
+    try c.testParam("10", "%p2%d", .{ -1, 10 });
+    try c.testParam("17", "%p9%d", .{ 1, 3, 5, 7, 9, 11, 13, 15, 17 });
+
+    // Interpreted as %p1 followed by a literal 0,
+    // as only 1-9 are allowed following %p
+    try c.testParam("0-1", "%p10%d", .{ -1, 5 });
+}
+
+test "Param sequence: set/get dynamic variables" {
+    var c: ParamTestContext = .{};
+    defer c.list.deinit();
+
+    for ('a'..'z') |i| {
+        const ch: u8 = @intCast(i);
+        try c.testParam("10101", "%p1%P" ++ .{ch} ++ "%g" ++ .{ch} ++ "%d", .{10101});
+        // Make sure unset variables are zeroed
+        try c.testParam("0", "%ga%d", .{10101});
+    }
+}
+
+test "Param sequence: set/get static variables" {
+    var c: ParamTestContext = .{};
+    defer c.list.deinit();
+
+    for ('A'..'Z') |i| {
+        const ch: u8 = @intCast(i);
+        try c.testParam("10101", "%p1%P" ++ .{ch} ++ "%g" ++ .{ch} ++ "%d", .{10101});
+        // Make sure unset variables are zeroed
+        try c.testParam("0", "%gA%d", .{10101});
+    }
+}
+
+test "Param sequence: hexadecimal" {
+    var c: ParamTestContext = .{};
+    defer c.list.deinit();
+
+    try c.testParam("0", "%p1%x", .{0x0});
+    try c.testParam("0", "%p1%X", .{0x0});
+
+    try c.testParam("dab", "%p1%x", .{0xdab});
+    try c.testParam("DAB", "%p1%X", .{0xDAB});
+
+    try c.testParam("f", "%p1%x", .{0xf});
+    try c.testParam("F", "%p1%X", .{0xF});
+
+    try c.testParam("10", "%p1%x", .{0x10});
+    try c.testParam("10", "%p1%X", .{0x10});
+}
+
+test "Param sequence: octal" {
+    var c: ParamTestContext = .{};
+    defer c.list.deinit();
+
+    try c.testParam("0", "%p1%o", .{0o0});
+    try c.testParam("1", "%p1%o", .{0o1});
+    try c.testParam("7", "%p1%o", .{0o7});
+    try c.testParam("10", "%p1%o", .{0o10});
+    try c.testParam("11111", "%p1%o", .{0o11111});
+}
+
+test "Param sequence: width & flags" {
+    var c: ParamTestContext = .{};
+    defer c.list.deinit();
+
+    try c.testParam("100", "%{100}%0d", .{});
+    try c.testParam("100", "%{100}%1d", .{});
+    try c.testParam("100", "%{100}%2d", .{});
+    try c.testParam("100", "%{100}%3d", .{});
+    try c.testParam(" 100", "%{100}%4d", .{});
+    try c.testParam("  100", "%{100}%5d", .{});
+    try c.testParam("   100", "%{100}%6d", .{});
+
+    try c.testParam("  -100", "%{-100}%6d", .{});
+    try c.testParam("  +100", "%{100}%:+6d", .{});
+
+    try c.testParam("+100  ", "%{100}%:-+6d", .{});
+    try c.testParam("-100  ", "%{-100}%:-+6d", .{});
+
+    try c.testParam(" 100  ", "%{100}%:- 6d", .{});
+    try c.testParam("-100  ", "%{-100}%:- 6d", .{});
+
+    try c.testParam(" 100", "%{100}% d", .{});
+    try c.testParam("-100", "%{-100}% d", .{});
+
+    try c.testParam("100", "%{100}%.1d", .{});
+    try c.testParam("-100", "%{-100}%.1d", .{});
+    try c.testParam("100", "%{100}%.3d", .{});
+    try c.testParam("-100", "%{-100}%.3d", .{});
+    try c.testParam("00100", "%{100}%.5d", .{});
+    try c.testParam("-00100", "%{-100}%.5d", .{});
+}
+
+test "Param sequence: strings" {
+    var c: ParamTestContext = .{};
+    defer c.list.deinit();
+
+    try c.testParam("100", "%p1%s", .{100});
+    try c.testParam("abc", "%p1%s", .{"abc"});
+    try c.testParam("  abc", "%p1%5s", .{"abc"});
+    try c.testParam("abc  ", "%p1%:-5s", .{"abc"});
+
+    // Check for inoring of sign, space and precision
+    try c.testParam("abc  ", "%p1%:-+ 5.10s", .{"abc"});
+}
+
+test "Param sequence: arithmetic" {
+    var c: ParamTestContext = .{};
+    defer c.list.deinit();
+
+    // Binary operators are 'push(pop() op pop())', so %p1%p2%- would be push(p2 - p1)
+
+    try c.testParam("10", "%p1%p2%+%d", .{ 3, 7 });
+    try c.testParam("-20", "%p1%p2%+%d", .{ 10, -30 });
+
+    try c.testParam("-40", "%p1%p2%-%d", .{ 10, -30 });
+    try c.testParam("-20", "%p1%p2%-%d", .{ -10, -30 });
+
+    try c.testParam("300", "%p1%p2%*%d", .{ 10, 30 });
+    try c.testParam("-300", "%p1%p2%*%d", .{ 10, -30 });
+
+    try c.testParam("3", "%p1%p2%/%d", .{ 10, 30 });
+    try c.testParam("-3", "%p1%p2%/%d", .{ 10, -30 });
+    try c.testParam("0", "%p1%p2%/%d", .{ 30, 10 });
+
+    try c.testParam("2", "%p1%p2%m%d", .{ 3, 5 });
+    try c.testParam("-2", "%p1%p2%m%d", .{ 3, -5 });
+}
+
+test "Param sequence: strlen" {
+    var c: ParamTestContext = .{};
+    defer c.list.deinit();
+
+    try c.testParam("3", "%p1%l%d", .{100});
+    try c.testParam("4", "%p1%l%d", .{-100});
+    try c.testParam("1", "%p1%l%d", .{0});
+    try c.testParam("0", "%p1%l%s", .{""});
+    try c.testParam("8", "%p1%l%s", .{"abcdefgh"});
+    try c.testParam("4", "%p1%l%s", .{"what"});
+}
+
+test "Param sequence: if-then-else" {
+    var c: ParamTestContext = .{};
+    defer c.list.deinit();
+
+    try c.testParam("100", "%?%{1}%t%{100}%d%;", .{});
+    try c.testParam("100", "%?%{1}%t%{100}%e%{-1}%;%d", .{});
+    try c.testParam("-1", "%?%{0}%t%{100}%e%{-1}%;%d", .{});
+
+    try c.testParam(error.MissingConditionTerminator, "%?%{1}%t%{100}%d", .{});
+    try c.testParam(error.UnexpectedConditionTerminator, "%?%{1}%t%{100}%d%;%;", .{});
 }
