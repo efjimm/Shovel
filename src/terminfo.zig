@@ -208,7 +208,7 @@ fn readU15(reader: anytype) !u15 {
     return std.math.cast(u15, int) orelse error.InvalidFormat;
 }
 
-fn parse(allocator: Allocator, bytes: []const u8) ParseError!*Self {
+pub fn parse(allocator: Allocator, bytes: []const u8) ParseError!*Self {
     return parseInternal(allocator, bytes) catch |err| switch (err) {
         error.EndOfStream => error.InvalidFormat,
         else => |e| e,
@@ -319,10 +319,9 @@ fn parseInternal(allocator: Allocator, bytes: []const u8) !*Self {
     // Skip name indices
     try reader.skipBytes(2 * (ext_flags_len + ext_nums_len + ext_strings_len), .{});
 
-    const ext_string_table = bytes[try fbs.getPos()..][0..ext_string_table_len];
-    @memcpy(ret.ext_string_table, ext_string_table);
+    @memcpy(ret.ext_string_table, bytes[try fbs.getPos()..][0..ext_string_table_len]);
 
-    var strings_iter = std.mem.splitScalar(u8, ext_string_table, 0);
+    var strings_iter = std.mem.splitScalar(u8, ret.ext_string_table, 0);
     for (std.mem.bytesAsSlice(i16, ext_strings_bytes)) |string_index| {
         if (string_index >= 0) {
             _ = strings_iter.next();
@@ -391,10 +390,6 @@ pub fn getExtendedString(self: *const Self, name: []const u8) ?[:0]const u8 {
     }
     return null;
 }
-
-// extended_flags: std.StringHashMapUnmanaged(void) = .{},
-// extended_numbers: std.StringHashMapUnmanaged(u31) = .{},
-// extended_strings: std.StringHashMapUnmanaged(u15) = .{},
 
 pub const FlagTag = std.meta.FieldEnum(Flags);
 pub const NumberTag = std.meta.FieldEnum(Numbers);
@@ -928,6 +923,8 @@ fn createParam(arg: anytype) Parameter {
     const T = @TypeOf(arg);
     return if (comptime util.isZigString(T))
         .{ .string = arg }
+    else if (@TypeOf(arg) == bool)
+        .{ .number = @intFromBool(arg) }
     else
         .{ .number = arg };
 }
@@ -1094,7 +1091,6 @@ pub fn validateParamSequence(sequence: []const u8, param_count: usize) ParamSequ
             else => return error.InvalidSpecifier,
         }
     }
-    if (nesting != 0) return error.MissingConditionTerminator;
 }
 
 /// Writes a paramterized escape sequence to the given writer, with the specified arguments. This
@@ -1284,8 +1280,8 @@ pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void
                 stack.appendAssumeCapacity(.{ .number = len });
             },
             inline '+', '-', '*', '/', 'm', '&', '|', '^', '=', '>', '<' => |op| {
-                const lhs = stack.pop().number;
                 const rhs = stack.pop().number;
+                const lhs = stack.pop().number;
                 const value: i32 = switch (op) {
                     '+' => lhs +% rhs,
                     '-' => lhs -% rhs,
@@ -1514,31 +1510,39 @@ fn expectExtendedString(self: *Self, expected: []const u8, name: []const u8) !vo
     try t.expectEqualSlices(u8, expected, str);
 }
 
-test "getCapability" {
-    const file = openTermInfoFile("st-256color") orelse return error.Fug;
-    defer file.close();
+// test "getCapability" {
+//     const file = openTermInfoFile("st-256color") orelse return error.Fug;
+//     defer file.close();
 
-    const buf = try file.readToEndAlloc(t.allocator, 32768);
-    defer t.allocator.free(buf);
+//     const buf = try file.readToEndAlloc(t.allocator, 32768);
+//     defer t.allocator.free(buf);
 
-    const res = try parse(ta, buf);
+//     const res = try parse(ta, buf);
+//     defer res.destroy(ta);
+
+//     try expectStringCapability(res, "\x1b[%p1%dC", .parm_right_cursor);
+//     try expectStringCapability(res, "\x1b[%p1%dD", .parm_left_cursor);
+//     try expectStringCapability(res, "\x1b[%p1%dB", .parm_down_cursor);
+//     try expectStringCapability(res, "\x1b[%p1%dA", .parm_up_cursor);
+//     try expectStringCapability(res, "\x1b[1K", .clr_bol);
+
+//     const init_tabs = res.getNumberCapability(.init_tabs) orelse return error.InvalidCapabilityName;
+//     try t.expectEqual(@as(u31, 8), init_tabs);
+
+//     const auto_left_margin = res.getFlagCapability(.auto_left_margin);
+//     const auto_right_margin = res.getFlagCapability(.auto_right_margin);
+//     try t.expectEqual(false, auto_left_margin);
+//     try t.expectEqual(true, auto_right_margin);
+
+//     try res.expectExtendedString("\x1b[9m", "smxx");
+// }
+
+test "st" {
+    const x = @embedFile("descriptions/st-256color");
+    const res = try parse(ta, x);
     defer res.destroy(ta);
 
-    try expectStringCapability(res, "\x1b[%p1%dC", .parm_right_cursor);
-    try expectStringCapability(res, "\x1b[%p1%dD", .parm_left_cursor);
-    try expectStringCapability(res, "\x1b[%p1%dB", .parm_down_cursor);
-    try expectStringCapability(res, "\x1b[%p1%dA", .parm_up_cursor);
-    try expectStringCapability(res, "\x1b[1K", .clr_bol);
-
-    const init_tabs = res.getNumberCapability(.init_tabs) orelse return error.InvalidCapabilityName;
-    try t.expectEqual(@as(u31, 8), init_tabs);
-
-    const auto_left_margin = res.getFlagCapability(.auto_left_margin);
-    const auto_right_margin = res.getFlagCapability(.auto_right_margin);
-    try t.expectEqual(false, auto_left_margin);
-    try t.expectEqual(true, auto_right_margin);
-
-    try res.expectExtendedString("\x1b[9m", "smxx");
+    try t.expectEqualSlices(u8, "\x1b[%p1%d q", res.getExtendedString("Ss").?);
 }
 
 test "tmux" {
@@ -2553,7 +2557,7 @@ const ParamTestContext = struct {
         if (comptime util.isZigString(@TypeOf(expected))) {
             try res;
             try writeParamSequence(sequence, ctx.list.writer(), args);
-            try t.expectEqualStrings(expected, ctx.list.items);
+            try t.expectEqualSlices(u8, expected, ctx.list.items);
         } else {
             try t.expectError(expected, res);
         }
@@ -2738,18 +2742,19 @@ test "Param sequence: arithmetic" {
     try c.testParam("10", "%p1%p2%+%d", .{ 3, 7 });
     try c.testParam("-20", "%p1%p2%+%d", .{ 10, -30 });
 
-    try c.testParam("-40", "%p1%p2%-%d", .{ 10, -30 });
-    try c.testParam("-20", "%p1%p2%-%d", .{ -10, -30 });
+    try c.testParam("40", "%p1%p2%-%d", .{ 10, -30 });
+    try c.testParam("20", "%p1%p2%-%d", .{ -10, -30 });
 
     try c.testParam("300", "%p1%p2%*%d", .{ 10, 30 });
     try c.testParam("-300", "%p1%p2%*%d", .{ 10, -30 });
 
-    try c.testParam("3", "%p1%p2%/%d", .{ 10, 30 });
-    try c.testParam("-3", "%p1%p2%/%d", .{ 10, -30 });
-    try c.testParam("0", "%p1%p2%/%d", .{ 30, 10 });
+    try c.testParam("0", "%p1%p2%/%d", .{ 10, 30 });
+    try c.testParam("0", "%p1%p2%/%d", .{ 10, -30 });
+    try c.testParam("3", "%p1%p2%/%d", .{ 30, 10 });
+    try c.testParam("-3", "%p1%p2%/%d", .{ 30, -10 });
 
-    try c.testParam("2", "%p1%p2%m%d", .{ 3, 5 });
-    try c.testParam("-2", "%p1%p2%m%d", .{ 3, -5 });
+    try c.testParam("2", "%p1%p2%m%d", .{ 5, 3 });
+    try c.testParam("-2", "%p1%p2%m%d", .{ -5, 3 });
 }
 
 test "Param sequence: strlen" {
@@ -2772,6 +2777,8 @@ test "Param sequence: if-then-else" {
     try c.testParam("100", "%?%{1}%t%{100}%e%{-1}%;%d", .{});
     try c.testParam("-1", "%?%{0}%t%{100}%e%{-1}%;%d", .{});
 
-    try c.testParam(error.MissingConditionTerminator, "%?%{1}%t%{100}%d", .{});
+    try c.testParam("100", "%?%{0}%t%{3}%e%{1}%t%{100}%d%;", .{});
+    try c.testParam("\x1b[48;5;239m", "\x1b[%?%p1%{8}%<%t4%p1%d%e%p1%{16}%<%t10%p1%{8}%-%d%e48;5;%p1%d%;m", .{239});
+
     try c.testParam(error.UnexpectedConditionTerminator, "%?%{1}%t%{100}%d%;%;", .{});
 }

@@ -9,23 +9,29 @@ const title = spoon.Style{ .fg = title_colour, .attrs = .{ .bold = true } };
 const reset = spoon.Style{};
 
 pub fn main() !void {
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    defer _ = gpa.deinit();
+
+    var term = try spoon.Term.init(gpa.allocator(), .{});
+    defer term.deinit(gpa.allocator());
+
     const writer = io.getStdOut().writer();
 
     var colour: u8 = 0;
     var column: usize = 0;
 
-    try writeTitle(writer, "Standard colours (0 to 15)");
+    try writeTitle(term.terminfo, writer, "Standard colours (0 to 15)");
     while (colour < 16) : (colour += 1) {
         const attr = spoon.Style{ .bg = .{ .@"256" = colour } };
 
-        try attr.dump(writer);
+        try attr.dump(term.terminfo, writer);
         try writer.writeAll("    ");
-        try reset.dump(writer);
+        try reset.dump(term.terminfo, writer);
 
         column += 1;
     }
 
-    try writeTitle(writer, "\n6x6x6 cubic palette (16 to 231)");
+    try writeTitle(term.terminfo, writer, "\n6x6x6 cubic palette (16 to 231)");
     column = 0;
     while (colour < 232) : (colour += 1) {
         const attr = spoon.Style{ .bg = .{ .@"256" = colour } };
@@ -35,14 +41,14 @@ pub fn main() !void {
             try writer.writeByte('\n');
         }
 
-        try attr.dump(writer);
+        try attr.dump(term.terminfo, writer);
         try writer.writeAll("    ");
-        try reset.dump(writer);
+        try reset.dump(term.terminfo, writer);
 
         column += 1;
     }
 
-    try writeTitle(writer, "\nGrayscale (232 to 255)");
+    try writeTitle(term.terminfo, writer, "\nGrayscale (232 to 255)");
     column = 0;
     while (colour < 256) : (colour += 1) {
         const attr = spoon.Style{ .bg = .{ .@"256" = colour } };
@@ -52,9 +58,9 @@ pub fn main() !void {
             try writer.writeByte('\n');
         }
 
-        try attr.dump(writer);
+        try attr.dump(term.terminfo, writer);
         try writer.writeAll("    ");
-        try reset.dump(writer);
+        try reset.dump(term.terminfo, writer);
 
         column += 1;
 
@@ -64,10 +70,10 @@ pub fn main() !void {
     try writer.writeByte('\n');
 }
 
-fn writeTitle(writer: anytype, bytes: []const u8) !void {
-    try title.dump(writer);
+fn writeTitle(ti: ?*spoon.TermInfo, writer: anytype, bytes: []const u8) !void {
+    try title.dump(ti, writer);
     try writer.writeByte('\n');
     try writer.writeAll(bytes);
     try writer.writeByte('\n');
-    try reset.dump(writer);
+    try reset.dump(ti, writer);
 }

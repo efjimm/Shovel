@@ -18,16 +18,16 @@ const reset = spoon.Style{};
 pub fn main() !void {
     const writer = io.getStdOut().writer();
 
-    try red.dump(writer);
+    try red.dumpRaw(writer);
     try writer.writeAll("foo ");
-    try green.dump(writer);
+    try green.dumpRaw(writer);
     try writer.writeAll("bar ");
-    try blue.dump(writer);
+    try blue.dumpRaw(writer);
     try writer.writeAll("baz ");
-    try magenta.dump(writer);
+    try magenta.dumpRaw(writer);
     try writer.writeAll("zig ");
-    try cyan.dump(writer);
+    try cyan.dumpRaw(writer);
     try writer.writeAll("spoon\n");
 
-    try reset.dump(writer);
+    try reset.dumpRaw(writer);
 }

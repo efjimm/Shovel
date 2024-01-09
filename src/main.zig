@@ -26,11 +26,12 @@ pub const InputContent = @import("input.zig").InputContent;
 
 pub const restrictedPaddingWriter = @import("restricted_padding_writer.zig").restrictedPaddingWriter;
 pub const RestrictedPaddingWriter = @import("restricted_padding_writer.zig").RestrictedPaddingWriter;
+pub const TermInfo = @import("terminfo.zig");
 
 test {
     _ = @import("input.zig");
     _ = @import("input_description.zig");
     _ = @import("colour_description.zig");
     _ = @import("restricted_padding_writer.zig");
-    _ = @import("terminfo_parser.zig");
+    _ = @import("terminfo.zig");
 }

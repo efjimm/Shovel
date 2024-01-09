@@ -34,7 +34,7 @@ const constants = if (builtin.link_libc and builtin.os.tag == .linux) os.linux e
 const Style = @import("Style.zig");
 const spells = @import("spells.zig");
 const rpw = @import("restricted_padding_writer.zig");
-const TermInfo = @import("terminfo_parser.zig");
+const TermInfo = @import("terminfo.zig");
 
 const Term = @This();
 
@@ -299,6 +299,47 @@ pub fn readInput(self: *Term, buf: []u8) ![]u8 {
     return slice;
 }
 
+pub fn getExtendedFlag(self: *const Term, name: []const u8) bool {
+    return if (self.terminfo) |ti|
+        ti.getExtendedFlag(name)
+    else
+        null;
+}
+
+pub fn getExtendedNumber(self: *const Term, name: []const u8) ?u31 {
+    return if (self.terminfo) |ti|
+        ti.getExtendedNumber(name)
+    else
+        null;
+}
+
+pub fn getExtendedString(self: *const Term, name: []const u8) ?[:0]const u8 {
+    return if (self.terminfo) |ti|
+        ti.getExtendedString(name)
+    else
+        null;
+}
+
+pub fn getFlagCapability(
+    self: *const Term,
+    comptime tag: TermInfo.FlagTag,
+) bool {
+    return if (self.terminfo) |ti|
+        ti.getFlagCapability(tag)
+    else
+        null;
+}
+
+pub fn getNumberCapability(
+    self: *const Term,
+    comptime tag: TermInfo.NumberTag,
+) ?u31 {
+    return if (self.terminfo) |ti|
+        ti.getNumberCapability(tag)
+    else
+        null;
+}
+
 pub fn getStringCapability(
     self: *const Term,
     comptime tag: TermInfo.StringTag,
@@ -408,10 +449,10 @@ pub fn cook(self: *Term) CookError!void {
     inline for (.{
         spells.disable_kitty_keyboard,
         spells.disable_mouse_tracking,
-        self.getStringCapability(.clear_screen) orelse spells.clear,
-        self.getStringCapability(.exit_ca_mode) orelse spells.leave_alt_buffer,
-        self.getStringCapability(.cursor_visible) orelse spells.show_cursor,
-        self.getStringCapability(.exit_attribute_mode) orelse spells.reset_attributes,
+        self.getStringCapability(.clear_screen) orelse "",
+        self.getStringCapability(.exit_ca_mode) orelse "",
+        self.getStringCapability(.cursor_visible) orelse "",
+        self.getStringCapability(.exit_attribute_mode) orelse "",
     }) |str| try _writer.writeAll(str);
     try buffered_writer.flush();
 }
@@ -452,8 +493,11 @@ pub fn getRenderContextSafe(
     };
 
     const _writer = rc.buffer.writer();
-    try _writer.writeAll(spells.start_sync);
-    try _writer.writeAll(self.getStringCapability(.exit_attribute_mode) orelse spells.reset_attributes);
+    if (rc.term.getExtendedString("Sync")) |sync| {
+        try TermInfo.writeParamSequence(sync, _writer, .{1});
+    }
+    if (self.getStringCapability(.exit_attribute_mode)) |srg0|
+        try _writer.writeAll(srg0);
 
     return rc;
 }
@@ -483,7 +527,9 @@ pub fn RenderContext(comptime buffer_size: usize) type {
             assert(!rc.term.isCooked());
             defer rc.term.currently_rendering = false;
             const _writer = rc.buffer.writer();
-            try _writer.writeAll(spells.end_sync);
+            if (rc.term.getExtendedString("Sync")) |sync| {
+                try TermInfo.writeParamSequence(sync, _writer, .{2});
+            }
             try rc.buffer.flush();
         }
 
@@ -507,40 +553,43 @@ pub fn RenderContext(comptime buffer_size: usize) type {
         pub fn clearToEol(rc: *Self) WriteError!void {
             assert(rc.term.currently_rendering);
             const _writer = rc.buffer.writer();
-            try _writer.writeAll(rc.term.getStringCapability(.clr_eol) orelse spells.clear_to_eol);
+            const spell = rc.term.getStringCapability(.clr_eol) orelse spells.clear_to_eol;
+            try _writer.writeAll(spell);
         }
 
         /// Clears the screen from the cursor to the beginning of the line.
         pub fn clearToBol(rc: *Self) WriteError!void {
             assert(rc.term.currently_rendering);
             const _writer = rc.buffer.writer();
-            try _writer.writeAll(rc.term.getStringCapability(.clr_bol) orelse spells.clear_to_bol);
+            const spell = rc.term.getStringCapability(.clr_bol) orelse spells.clear_to_bol;
+            try _writer.writeAll(spell);
         }
 
         /// Move the cursor to the specified cell.
         pub fn moveCursorTo(rc: *Self, row: u16, col: u16) WriteError!void {
             assert(rc.term.currently_rendering);
             const _writer = rc.buffer.writer();
-            try _writer.print(spells.move_cursor_fmt, .{ row + 1, col + 1 });
+            const spell = rc.term.getStringCapability(.cursor_address) orelse spells.move_cursor_fmt;
+            try TermInfo.writeParamSequence(spell, _writer, .{ row, col });
         }
 
         /// Hide the cursor.
         pub fn hideCursor(rc: *Self) WriteError!void {
             assert(rc.term.currently_rendering);
-            if (!rc.term.cursor_visible)
-                return;
+            if (!rc.term.cursor_visible) return;
             const _writer = rc.buffer.writer();
-            try _writer.writeAll(spells.hide_cursor);
+            const spell = rc.term.getStringCapability(.cursor_invisible) orelse spells.hide_cursor;
+            try _writer.writeAll(spell);
             rc.term.cursor_visible = false;
         }
 
         /// Show the cursor.
         pub fn showCursor(rc: *Self) WriteError!void {
             assert(rc.term.currently_rendering);
-            if (rc.term.cursor_visible)
-                return;
+            if (rc.term.cursor_visible) return;
             const _writer = rc.buffer.writer();
-            try _writer.writeAll(spells.show_cursor);
+            const spell = rc.term.getStringCapability(.cursor_normal) orelse spells.show_cursor;
+            try _writer.writeAll(spell);
             rc.term.cursor_visible = true;
         }
 
@@ -548,7 +597,7 @@ pub fn RenderContext(comptime buffer_size: usize) type {
         pub fn setStyle(rc: *Self, attr: Style) WriteError!void {
             assert(rc.term.currently_rendering);
             const _writer = rc.buffer.writer();
-            try attr.dump(_writer);
+            try attr.dump(rc.term.terminfo, _writer);
         }
 
         pub fn restrictedPaddingWriter(rc: *Self, width: u16) RestrictedPaddingWriter {
@@ -560,16 +609,23 @@ pub fn RenderContext(comptime buffer_size: usize) type {
         pub fn writeAllWrapping(rc: *Self, bytes: []const u8) WriteError!void {
             assert(rc.term.currently_rendering);
             const _writer = rc.buffer.writer();
-            try _writer.writeAll(spells.enable_auto_wrap);
+            const enable = rc.term.getStringCapability(.enter_am_mode) orelse spells.enable_auto_wrap;
+            const disable = rc.term.getStringCapability(.exit_am_mode) orelse spells.reset_auto_wrap;
+            try _writer.writeAll(enable);
             try _writer.writeAll(bytes);
-            try _writer.writeAll(spells.reset_auto_wrap);
+            try _writer.writeAll(disable);
         }
 
         pub fn setCursorShape(rc: *Self, shape: CursorShape) WriteError!void {
             assert(rc.term.currently_rendering);
+            assert(shape != .unknown);
+
             if (rc.term.cursor_shape == shape) return;
             const _writer = rc.buffer.writer();
-            try _writer.writeAll(spells.cursor_shapes.get(shape));
+
+            if (rc.term.terminfo.?.getExtendedString("Ss")) |ss| {
+                try TermInfo.writeParamSequence(ss, _writer, .{@intFromEnum(shape)});
+            }
             rc.term.cursor_shape = shape;
         }
     };
