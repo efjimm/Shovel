@@ -12,80 +12,17 @@ const util = @import("util.zig");
 pub const max_file_length = 32768;
 const Self = @This();
 
-const Header = extern struct {
-    format: Format,
-    terminal_names_size: u16,
-    flag_count: u16,
-    number_count: u16,
-    string_count: u16,
-    string_table_size: u16,
+names: [:0]const u8 = "",
+string_table: []const u8 = "",
+ext_string_table: []u8 = "",
 
-    const Format = enum(i16) {
-        legacy = 0o0432,
-        extended = 0o1036,
-    };
+flags: Flags = .{},
+numbers: Numbers = .{},
+strings: Strings = .{},
 
-    fn numberCapabilitySize(header: Header) u3 {
-        return switch (header.format) {
-            .legacy => 2,
-            .extended => 4,
-        };
-    }
-
-    fn names(header: Header, bytes: []const u8) [:0]const u8 {
-        return if (header.terminal_names_size == 0)
-            ""
-        else
-            bytes[@sizeOf(Header)..][0 .. header.terminal_names_size - 1 :0];
-    }
-
-    fn flags(header: Header, bytes: []const u8) []const bool {
-        return @ptrCast(
-            bytes[@sizeOf(Header) + header.terminal_names_size ..][0..header.flag_count],
-        );
-    }
-
-    fn Number(comptime format: Format) type {
-        return switch (format) {
-            .legacy => i16,
-            .extended => i32,
-        };
-    }
-
-    fn numSize(header: Header) u4 {
-        return switch (header.format) {
-            .legacy => 2,
-            .extended => 4,
-        };
-    }
-
-    fn numbers(header: Header, bytes: []const u8, comptime format: Format) []align(1) const Number(format) {
-        std.debug.assert(header.format == format);
-        const off = @sizeOf(Header) +
-            header.terminal_names_size +
-            header.flag_count;
-        const start: [*]align(1) const Number(format) = @ptrCast(bytes[off + off % 2 ..]);
-        return start[0..header.number_count];
-    }
-
-    fn strings(header: Header, bytes: []const u8) []align(1) const i16 {
-        const off = @sizeOf(Header) +
-            header.terminal_names_size +
-            header.flag_count +
-            header.number_count * header.numSize();
-        const start: [*]align(1) const i16 = @ptrCast(bytes[off + off % 2 ..]);
-        return start[0..header.string_count];
-    }
-
-    fn stringTable(header: Header, bytes: []const u8) []const u8 {
-        const off = @sizeOf(Header) +
-            header.terminal_names_size +
-            header.flag_count +
-            header.number_count * header.numSize() +
-            header.string_count * 2;
-        return bytes[off + off % 2 ..][0..header.string_table_size];
-    }
-};
+ext_flags: std.StringHashMapUnmanaged(void) = .{},
+ext_nums: std.StringHashMapUnmanaged(u31) = .{},
+ext_strs: std.StringHashMapUnmanaged(u15) = .{},
 
 fn searchTermInfoDirectory(term: []const u8) ?std.fs.File {
     std.debug.assert(term.len > 0);
@@ -252,41 +189,13 @@ fn readNonNegative(src: *const [2]u8) ParseError!u15 {
     return std.math.cast(u15, readInt(i16, src, .little)) orelse error.InvalidFormat;
 }
 
-fn parseHeader(bytes: []const u8) ParseError!Header {
-    if (bytes.len < @sizeOf(Header))
-        return error.InvalidFormat;
-
-    const magic = std.meta.intToEnum(Header.Format, readInt(i16, bytes[0..2], .little));
-
-    const ret: Header = .{
-        .format = magic catch return error.InvalidFormat,
-        .terminal_names_size = try readNonNegative(bytes[2..4]),
-        .flag_count = try readNonNegative(bytes[4..6]),
-        .number_count = try readNonNegative(bytes[6..8]),
-        .string_count = try readNonNegative(bytes[8..10]),
-        .string_table_size = try readNonNegative(bytes[10..12]),
-    };
-
-    const total_size = @sizeOf(Header) +
-        ret.terminal_names_size +
-        ret.flag_count +
-        ret.number_count * ret.numberCapabilitySize() +
-        ret.string_count * @sizeOf(i16) +
-        ret.string_table_size;
-
-    if (bytes.len < total_size)
-        return error.InvalidFormat;
-
-    // Make sure terminal names is zero terminated
-    if (ret.terminal_names_size > 0 and bytes[@sizeOf(Header) + ret.terminal_names_size] != 0)
-        return error.InvalidFormat;
-
-    return ret;
-}
-
 pub fn destroy(self: *Self, allocator: Allocator) void {
     allocator.free(self.names);
     allocator.free(self.string_table);
+    allocator.free(self.ext_string_table);
+    self.ext_flags.deinit(allocator);
+    self.ext_nums.deinit(allocator);
+    self.ext_strs.deinit(allocator);
     allocator.destroy(self);
 }
 
@@ -294,42 +203,159 @@ pub const ParseError = error{
     InvalidFormat,
 } || Allocator.Error;
 
-pub fn parse(allocator: Allocator, bytes: []const u8) ParseError!*Self {
-    const header = try parseHeader(bytes);
+fn readU15(reader: anytype) !u15 {
+    const int = reader.readInt(i16, .little) catch return error.InvalidFormat;
+    return std.math.cast(u15, int) orelse error.InvalidFormat;
+}
 
-    const num_flags: u15 = @min(total_flags, header.flag_count);
-    const num_nums: u15 = @min(total_numbers, header.number_count);
-    const num_strs: u15 = @min(total_strings, header.string_count);
+fn parse(allocator: Allocator, bytes: []const u8) ParseError!*Self {
+    return parseInternal(allocator, bytes) catch |err| switch (err) {
+        error.EndOfStream => error.InvalidFormat,
+        else => |e| e,
+    };
+}
+
+const Format = enum(i16) {
+    legacy = 0o0432,
+    extended = 0o1036,
+};
+
+fn parseInternal(allocator: Allocator, bytes: []const u8) !*Self {
+    var fbs = std.io.fixedBufferStream(bytes);
+    const reader = fbs.reader();
 
     const ret = try allocator.create(Self);
     errdefer allocator.destroy(ret);
+    ret.* = .{};
 
-    ret.names = try allocator.dupeZ(u8, header.names(bytes));
+    const format = std.meta.intToEnum(Format, try readU15(reader)) catch
+        return error.InvalidFormat;
+    const names_len = try readU15(reader);
+    const flags_len = try readU15(reader);
+    const nums_len = try readU15(reader);
+    const strings_len = try readU15(reader);
+    const string_table_len = try readU15(reader);
+
+    const names = bytes[try fbs.getPos()..][0 .. names_len - 1];
+    ret.names = try allocator.dupeZ(u8, names);
     errdefer allocator.free(ret.names);
 
-    ret.string_table = try allocator.dupe(u8, header.stringTable(bytes));
-    errdefer allocator.free(ret.string_table);
+    try reader.skipBytes(names_len, .{});
 
-    const flags_dest: *[total_flags]bool = @ptrCast(&ret.flags);
-    @memcpy(flags_dest[0..num_flags], header.flags(bytes)[0..num_flags]);
-    @memset(flags_dest[num_flags..total_flags], false);
+    const flags_dest: *[Flags.count]bool = @ptrCast(&ret.flags);
+    for (flags_dest[0..flags_len]) |*flag| {
+        // Convert byte to bool
+        flag.* = 0 != try reader.readByte();
+    }
 
-    switch (header.format) {
-        inline else => |format| {
-            const T = Header.Number(format);
-            const nums_dest: *[total_numbers]i32 = @ptrCast(&ret.numbers);
-            for (nums_dest[0..num_nums], header.numbers(bytes, format)[0..]) |*d, s| {
-                d.* = std.mem.littleToNative(T, s);
+    try reader.skipBytes((names_len + flags_len) % 2, .{});
+    assert(try fbs.getPos() % 2 == 0);
+
+    switch (format) {
+        inline else => |tag| {
+            const T = switch (tag) {
+                .legacy => i16,
+                .extended => i32,
+            };
+            const nums_dest: *[Numbers.count]i32 = @ptrCast(&ret.numbers);
+            for (nums_dest[0..nums_len]) |*num| {
+                num.* = try reader.readInt(T, .little);
             }
-            @memset(nums_dest[num_nums..total_numbers], -1);
         },
     }
 
-    const strings_dest: *[total_strings]i16 = @ptrCast(&ret.strings);
-    for (strings_dest[0..num_strs], header.strings(bytes)[0..num_strs]) |*d, s| {
-        d.* = std.mem.littleToNative(i16, s);
+    const strings_dest: *[Strings.count]i16 = @ptrCast(&ret.strings);
+    for (strings_dest[0..strings_len]) |*string_index| {
+        string_index.* = try reader.readInt(i16, .little);
     }
-    @memset(strings_dest[num_strs..total_strings], -1);
+
+    ret.string_table = try allocator.dupe(u8, bytes[try fbs.getPos()..][0..string_table_len]);
+    errdefer allocator.free(ret.string_table);
+
+    try reader.skipBytes(string_table_len, .{});
+
+    if (try fbs.getEndPos() - try fbs.getPos() < 10)
+        return ret;
+
+    // Have more bytes, continue parsing extended format
+
+    try reader.skipBytes(string_table_len % 2, .{});
+
+    const ext_flags_len = try readU15(reader);
+    const ext_nums_len = try readU15(reader);
+    const ext_strings_len = try readU15(reader);
+    const ext_string_table_count = try readU15(reader);
+    const ext_string_table_len = try readU15(reader);
+
+    if (ext_string_table_count != ext_flags_len + ext_nums_len + ext_strings_len * 2)
+        return error.InvalidFormat;
+
+    try ret.ext_flags.ensureTotalCapacity(allocator, ext_flags_len);
+    errdefer ret.ext_flags.deinit(allocator);
+
+    try ret.ext_nums.ensureTotalCapacity(allocator, ext_nums_len);
+    errdefer ret.ext_nums.deinit(allocator);
+
+    try ret.ext_strs.ensureTotalCapacity(allocator, ext_strings_len);
+    errdefer ret.ext_strs.deinit(allocator);
+
+    ret.ext_string_table = try allocator.alloc(u8, ext_string_table_len);
+    errdefer allocator.free(ret.ext_string_table);
+
+    const num_size: u8 = switch (format) {
+        .legacy => 2,
+        .extended => 4,
+    };
+
+    const ext_flags: []const bool = @ptrCast(bytes[try fbs.getPos()..][0..ext_flags_len]);
+    try reader.skipBytes(ext_flags_len + ext_flags_len % 2, .{});
+
+    const ext_nums_bytes = bytes[try fbs.getPos()..][0 .. ext_nums_len * num_size];
+    try reader.skipBytes(ext_nums_len * num_size, .{});
+
+    const ext_strings_bytes = bytes[try fbs.getPos()..][0 .. ext_strings_len * 2];
+    try reader.skipBytes(ext_strings_len * 2, .{});
+
+    // Skip name indices
+    try reader.skipBytes(2 * (ext_flags_len + ext_nums_len + ext_strings_len), .{});
+
+    const ext_string_table = bytes[try fbs.getPos()..][0..ext_string_table_len];
+    @memcpy(ret.ext_string_table, ext_string_table);
+
+    var strings_iter = std.mem.splitScalar(u8, ext_string_table, 0);
+    for (std.mem.bytesAsSlice(i16, ext_strings_bytes)) |string_index| {
+        if (string_index >= 0) {
+            _ = strings_iter.next();
+        }
+    }
+
+    for (ext_flags) |_| {
+        const name = strings_iter.next() orelse break;
+        ret.ext_flags.putAssumeCapacity(name, {});
+    }
+
+    switch (format) {
+        inline else => |tag| {
+            const S, const T = switch (tag) {
+                .legacy => .{ i16, u15 },
+                .extended => .{ i32, u31 },
+            };
+
+            for (std.mem.bytesAsSlice(S, ext_nums_bytes)) |num| {
+                const name = strings_iter.next() orelse break;
+                if (std.math.cast(T, num)) |n| {
+                    ret.ext_nums.putAssumeCapacity(name, n);
+                }
+            }
+        },
+    }
+
+    for (std.mem.bytesAsSlice(i16, ext_strings_bytes)) |string_index| {
+        const name = strings_iter.next() orelse break;
+        if (std.math.cast(u15, string_index)) |index| {
+            ret.ext_strs.putAssumeCapacity(name, index);
+        }
+    }
 
     return ret;
 }
@@ -351,12 +377,20 @@ pub fn getStringCapability(self: *const Self, tag: StringTag) ?[:0]const u8 {
     return std.mem.span(@as([*:0]const u8, @ptrCast(self.string_table[v..].ptr)));
 }
 
-names: [:0]const u8 = "",
-string_table: []const u8 = "",
+pub fn getExtendedFlag(self: *const Self, name: []const u8) bool {
+    return self.ext_flags.contains(name);
+}
 
-flags: Flags = .{},
-numbers: Numbers = .{},
-strings: Strings = .{},
+pub fn getExtendedNumber(self: *const Self, name: []const u8) ?u31 {
+    return self.ext_nums.get(name);
+}
+
+pub fn getExtendedString(self: *const Self, name: []const u8) ?[:0]const u8 {
+    if (self.ext_strs.get(name)) |index| {
+        return std.mem.span(@as([*:0]const u8, @ptrCast(self.ext_string_table[index..].ptr)));
+    }
+    return null;
+}
 
 // extended_flags: std.StringHashMapUnmanaged(void) = .{},
 // extended_numbers: std.StringHashMapUnmanaged(u31) = .{},
@@ -371,6 +405,8 @@ const total_numbers: comptime_int = @typeInfo(Numbers).Struct.fields.len;
 const total_strings: comptime_int = @typeInfo(Strings).Struct.fields.len;
 
 pub const Flags = extern struct {
+    pub const count = 44;
+
     auto_left_margin: bool = false,
     auto_right_margin: bool = false,
     no_esc_ctlc: bool = false,
@@ -408,9 +444,19 @@ pub const Flags = extern struct {
     semi_auto_right_margin: bool = false,
     cpi_changes_res: bool = false,
     lpi_changes_res: bool = false,
+
+    backspaces_with_bs: bool = false,
+    crt_no_scrolling: bool = false,
+    no_correctly_working_cr: bool = false,
+    gnu_has_meta_key: bool = false,
+    linefeed_is_newline: bool = false,
+    has_hardware_tabs: bool = false,
+    return_does_clr_eol: bool = false,
 };
 
 pub const Numbers = extern struct {
+    pub const count = 39;
+
     columns: i32 = -1,
     init_tabs: i32 = -1,
     lines: i32 = -1,
@@ -444,9 +490,18 @@ pub const Numbers = extern struct {
     buttons: i32 = -1,
     bit_image_entwining: i32 = -1,
     bit_image_type: i32 = -1,
+
+    magic_cookie_glitch_ul: i32 = -1,
+    carriage_return_delay: i32 = -1,
+    new_line_delay: i32 = -1,
+    backspace_delay: i32 = -1,
+    horizontal_tab_delay: i32 = -1,
+    number_of_function_keys: i32 = -1,
 };
 
 pub const Strings = extern struct {
+    pub const count = 414;
+
     back_tab: i16 = -1,
     bell: i16 = -1,
     carriage_return: i16 = -1,
@@ -841,6 +896,27 @@ pub const Strings = extern struct {
     enter_vertical_hl_mode: i16 = -1,
     set_a_attributes: i16 = -1,
     set_pglen_inch: i16 = -1,
+
+    termcap_init2: i16 = -1,
+    termcap_reset: i16 = -1,
+    linefeed_if_not_lf: i16 = -1,
+    backspace_if_not_bs: i16 = -1,
+    other_non_function_keys: i16 = -1,
+    arrow_key_map: i16 = -1,
+    acs_ulcorner: i16 = -1,
+    acs_llcorner: i16 = -1,
+    acs_urcorner: i16 = -1,
+    acs_lrcorner: i16 = -1,
+    acs_ltee: i16 = -1,
+    acs_rtee: i16 = -1,
+    acs_btee: i16 = -1,
+    acs_ttee: i16 = -1,
+    acs_hline: i16 = -1,
+    acs_vline: i16 = -1,
+    acs_plus: i16 = -1,
+    memory_lock: i16 = -1,
+    memory_unlock: i16 = -1,
+    box_chars_1: i16 = -1,
 };
 
 const Parameter = union(enum) {
@@ -1289,7 +1365,7 @@ pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void
 
 const t = std.testing;
 const ta = t.allocator;
-const terminfo = @embedFile("st-256color").*;
+const terminfo = @embedFile("descriptions/st-256color").*;
 
 test "Invalid" {
     try t.expectError(error.InvalidFormat, parse(ta, ""));
@@ -1428,15 +1504,14 @@ test "String capabilities" {
     try expectNumber(0x007d, res.strings.enter_alt_charset_mode);
 }
 
-fn expectStringCapability(
-    capabilities: *Self,
-    expected: []const u8,
-    comptime e: StringTag,
-) !void {
-    try t.expectEqualStrings(
-        expected,
-        capabilities.getStringCapability(e) orelse return error.InvalidCapabilityName,
-    );
+fn expectStringCapability(self: *Self, expected: []const u8, comptime e: StringTag) !void {
+    const str = self.getStringCapability(e) orelse return error.InvalidCapabilityName;
+    try t.expectEqualSlices(u8, expected, str);
+}
+
+fn expectExtendedString(self: *Self, expected: []const u8, name: []const u8) !void {
+    const str = self.getExtendedString(name) orelse return error.InvalidCapabilityName;
+    try t.expectEqualSlices(u8, expected, str);
 }
 
 test "getCapability" {
@@ -1462,57 +1537,1012 @@ test "getCapability" {
     const auto_right_margin = res.getFlagCapability(.auto_right_margin);
     try t.expectEqual(false, auto_left_margin);
     try t.expectEqual(true, auto_right_margin);
+
+    try res.expectExtendedString("\x1b[9m", "smxx");
 }
 
-test "xterm" {
-    const x = @embedFile("xterm-256color");
-    const header = try parseHeader(x);
+test "tmux" {
+    const x = @embedFile("descriptions/tmux");
     const res = try parse(ta, x);
     defer res.destroy(ta);
 
-    try t.expectEqual(@as(u16, 0x0025), header.terminal_names_size);
-    try t.expectEqual(@as(u16, 0x0026), header.flag_count);
-    try t.expectEqual(@as(u16, 0x000f), header.number_count);
-    try t.expectEqual(@as(u16, 0x019d), header.string_count);
-    try t.expectEqual(@as(u16, 0x065a), header.string_table_size);
+    try t.expectEqualStrings("tmux|tmux terminal multiplexer", res.names);
 
-    try expectNumber32(0x00000050, res.numbers.columns);
+    try t.expectEqual(false, res.getFlagCapability(.auto_left_margin));
+    try t.expectEqual(true, res.getFlagCapability(.auto_right_margin));
+    try t.expectEqual(false, res.getFlagCapability(.no_esc_ctlc));
+    try t.expectEqual(false, res.getFlagCapability(.ceol_standout_glitch));
+    try t.expectEqual(true, res.getFlagCapability(.eat_newline_glitch));
+    try t.expectEqual(false, res.getFlagCapability(.erase_overstrike));
+    try t.expectEqual(false, res.getFlagCapability(.generic_type));
+    try t.expectEqual(false, res.getFlagCapability(.hard_copy));
+    try t.expectEqual(true, res.getFlagCapability(.has_meta_key));
+    try t.expectEqual(true, res.getFlagCapability(.has_status_line));
+    try t.expectEqual(false, res.getFlagCapability(.insert_null_glitch));
+    try t.expectEqual(false, res.getFlagCapability(.memory_above));
+    try t.expectEqual(false, res.getFlagCapability(.memory_below));
+    try t.expectEqual(true, res.getFlagCapability(.move_insert_mode));
+    try t.expectEqual(true, res.getFlagCapability(.move_standout_mode));
+    try t.expectEqual(false, res.getFlagCapability(.over_strike));
+    try t.expectEqual(false, res.getFlagCapability(.status_line_esc_ok));
+    try t.expectEqual(false, res.getFlagCapability(.dest_tabs_magic_smso));
+    try t.expectEqual(false, res.getFlagCapability(.tilde_glitch));
+    try t.expectEqual(false, res.getFlagCapability(.transparent_underline));
+    try t.expectEqual(false, res.getFlagCapability(.xon_xoff));
+    try t.expectEqual(false, res.getFlagCapability(.needs_xon_xoff));
+    try t.expectEqual(false, res.getFlagCapability(.prtr_silent));
+    try t.expectEqual(false, res.getFlagCapability(.hard_cursor));
+    try t.expectEqual(false, res.getFlagCapability(.non_rev_rmcup));
+    try t.expectEqual(false, res.getFlagCapability(.no_pad_char));
+    try t.expectEqual(false, res.getFlagCapability(.non_dest_scroll_region));
+    try t.expectEqual(false, res.getFlagCapability(.can_change));
+    try t.expectEqual(false, res.getFlagCapability(.back_color_erase));
+    try t.expectEqual(false, res.getFlagCapability(.hue_lightness_saturation));
+    try t.expectEqual(false, res.getFlagCapability(.col_addr_glitch));
+    try t.expectEqual(false, res.getFlagCapability(.cr_cancels_micro_mode));
+    try t.expectEqual(false, res.getFlagCapability(.has_print_wheel));
+    try t.expectEqual(false, res.getFlagCapability(.row_addr_glitch));
+    try t.expectEqual(false, res.getFlagCapability(.semi_auto_right_margin));
+    try t.expectEqual(false, res.getFlagCapability(.cpi_changes_res));
+    try t.expectEqual(false, res.getFlagCapability(.lpi_changes_res));
+    try t.expectEqual(true, res.getFlagCapability(.backspaces_with_bs));
+    try t.expectEqual(false, res.getFlagCapability(.crt_no_scrolling));
+    try t.expectEqual(false, res.getFlagCapability(.no_correctly_working_cr));
+    try t.expectEqual(false, res.getFlagCapability(.gnu_has_meta_key));
+    try t.expectEqual(false, res.getFlagCapability(.linefeed_is_newline));
+    try t.expectEqual(true, res.getFlagCapability(.has_hardware_tabs));
+    try t.expectEqual(false, res.getFlagCapability(.return_does_clr_eol));
 
-    try expectNumber(0x0000, res.strings.back_tab);
-    try expectNumber(0x0004, res.strings.bell);
+    try t.expectEqual(@as(?u31, 80), res.getNumberCapability(.columns));
+    try t.expectEqual(@as(?u31, 8), res.getNumberCapability(.init_tabs));
+    try t.expectEqual(@as(?u31, 24), res.getNumberCapability(.lines));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.lines_of_memory));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.magic_cookie_glitch));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.padding_baud_rate));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.virtual_terminal));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.width_status_line));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.num_labels));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.label_height));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.label_width));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.max_attributes));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.maximum_windows));
+    try t.expectEqual(@as(?u31, 8), res.getNumberCapability(.max_colors));
+    try t.expectEqual(@as(?u31, 64), res.getNumberCapability(.max_pairs));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.no_color_video));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.buffer_capacity));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.dot_vert_spacing));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.dot_horz_spacing));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.max_micro_address));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.max_micro_jump));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.micro_col_size));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.micro_line_size));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.number_of_pins));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.output_res_char));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.output_res_line));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.output_res_horz_inch));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.output_res_vert_inch));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.print_rate));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.wide_char_size));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.buttons));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.bit_image_entwining));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.bit_image_type));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.magic_cookie_glitch_ul));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.carriage_return_delay));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.new_line_delay));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.backspace_delay));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.horizontal_tab_delay));
+    try t.expectEqual(@as(?u31, null), res.getNumberCapability(.number_of_function_keys));
 
-    try expectStringCapability(res, "\x1b[%p1%dC", .parm_right_cursor);
-    try expectStringCapability(res, "\x1b[%p1%dD", .parm_left_cursor);
-    try expectStringCapability(res, "\x1b[%p1%dB", .parm_down_cursor);
-    try expectStringCapability(res, "\x1b[%p1%dA", .parm_up_cursor);
+    try t.expectEqualSlices(u8, "++,,--..00``aaffgghhiijjkkllmmnnooppqqrrssttuuvvwwxxyyzz{{||}}~~", res.getStringCapability(.acs_chars).?);
+    try t.expectEqualSlices(u8, "\x1b[Z", res.getStringCapability(.back_tab).?);
+    try t.expectEqualSlices(u8, "\x07", res.getStringCapability(.bell).?);
+    try t.expectEqualSlices(u8, "\x0d", res.getStringCapability(.carriage_return).?);
+    try t.expectEqualSlices(u8, "\x1b[%i%p1%d;%p2%dr", res.getStringCapability(.change_scroll_region).?);
+    try t.expectEqualSlices(u8, "\x1b[3g", res.getStringCapability(.clear_all_tabs).?);
+    try t.expectEqualSlices(u8, "\x1b[H\x1b[J", res.getStringCapability(.clear_screen).?);
+    try t.expectEqualSlices(u8, "\x1b[1K", res.getStringCapability(.clr_bol).?);
+    try t.expectEqualSlices(u8, "\x1b[K", res.getStringCapability(.clr_eol).?);
+    try t.expectEqualSlices(u8, "\x1b[J", res.getStringCapability(.clr_eos).?);
+    try t.expectEqualSlices(u8, "\x1b[%i%p1%dG", res.getStringCapability(.column_address).?);
+    try t.expectEqualSlices(u8, "\x1b[%i%p1%d;%p2%dH", res.getStringCapability(.cursor_address).?);
+    try t.expectEqualSlices(u8, "\x0a", res.getStringCapability(.cursor_down).?);
+    try t.expectEqualSlices(u8, "\x1b[H", res.getStringCapability(.cursor_home).?);
+    try t.expectEqualSlices(u8, "\x1b[?25l", res.getStringCapability(.cursor_invisible).?);
+    try t.expectEqualSlices(u8, "\x08", res.getStringCapability(.cursor_left).?);
+    try t.expectEqualSlices(u8, "\x1b[34h\x1b[?25h", res.getStringCapability(.cursor_normal).?);
+    try t.expectEqualSlices(u8, "\x1b[C", res.getStringCapability(.cursor_right).?);
+    try t.expectEqualSlices(u8, "\x1bM", res.getStringCapability(.cursor_up).?);
+    try t.expectEqualSlices(u8, "\x1b[34l", res.getStringCapability(.cursor_visible).?);
+    try t.expectEqualSlices(u8, "\x1b[P", res.getStringCapability(.delete_character).?);
+    try t.expectEqualSlices(u8, "\x1b[M", res.getStringCapability(.delete_line).?);
+    try t.expectEqualSlices(u8, "\x1b]0;\x07", res.getStringCapability(.dis_status_line).?);
+    try t.expectEqualSlices(u8, "\x1b(B\x1b)0", res.getStringCapability(.ena_acs).?);
+    try t.expectEqualSlices(u8, "\x0e", res.getStringCapability(.enter_alt_charset_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[5m", res.getStringCapability(.enter_blink_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[1m", res.getStringCapability(.enter_bold_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[?1049h", res.getStringCapability(.enter_ca_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[2m", res.getStringCapability(.enter_dim_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[4h", res.getStringCapability(.enter_insert_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[3m", res.getStringCapability(.enter_italics_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[7m", res.getStringCapability(.enter_reverse_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[8m", res.getStringCapability(.enter_secure_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[7m", res.getStringCapability(.enter_standout_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[4m", res.getStringCapability(.enter_underline_mode).?);
+    try t.expectEqualSlices(u8, "\x0f", res.getStringCapability(.exit_alt_charset_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[m\x0f", res.getStringCapability(.exit_attribute_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[?1049l", res.getStringCapability(.exit_ca_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[4l", res.getStringCapability(.exit_insert_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[23m", res.getStringCapability(.exit_italics_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[27m", res.getStringCapability(.exit_standout_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[24m", res.getStringCapability(.exit_underline_mode).?);
+    try t.expectEqualSlices(u8, "\x1bg", res.getStringCapability(.flash_screen).?);
+    try t.expectEqualSlices(u8, "\x07", res.getStringCapability(.from_status_line).?);
+    try t.expectEqualSlices(u8, "\x1b)0", res.getStringCapability(.init_2string).?);
+    try t.expectEqualSlices(u8, "\x1b[L", res.getStringCapability(.insert_line).?);
+    try t.expectEqualSlices(u8, "\x08", res.getStringCapability(.key_backspace).?);
+    try t.expectEqualSlices(u8, "\x1b[Z", res.getStringCapability(.key_btab).?);
+    try t.expectEqualSlices(u8, "\x1b[3~", res.getStringCapability(.key_dc).?);
+    try t.expectEqualSlices(u8, "\x1bOB", res.getStringCapability(.key_down).?);
+    try t.expectEqualSlices(u8, "\x1b[4~", res.getStringCapability(.key_end).?);
+    try t.expectEqualSlices(u8, "\x1bOP", res.getStringCapability(.key_f1).?);
+    try t.expectEqualSlices(u8, "\x1b[21~", res.getStringCapability(.key_f10).?);
+    try t.expectEqualSlices(u8, "\x1b[23~", res.getStringCapability(.key_f11).?);
+    try t.expectEqualSlices(u8, "\x1b[24~", res.getStringCapability(.key_f12).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2P", res.getStringCapability(.key_f13).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2Q", res.getStringCapability(.key_f14).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2R", res.getStringCapability(.key_f15).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2S", res.getStringCapability(.key_f16).?);
+    try t.expectEqualSlices(u8, "\x1b[15;2~", res.getStringCapability(.key_f17).?);
+    try t.expectEqualSlices(u8, "\x1b[17;2~", res.getStringCapability(.key_f18).?);
+    try t.expectEqualSlices(u8, "\x1b[18;2~", res.getStringCapability(.key_f19).?);
+    try t.expectEqualSlices(u8, "\x1bOQ", res.getStringCapability(.key_f2).?);
+    try t.expectEqualSlices(u8, "\x1b[19;2~", res.getStringCapability(.key_f20).?);
+    try t.expectEqualSlices(u8, "\x1b[20;2~", res.getStringCapability(.key_f21).?);
+    try t.expectEqualSlices(u8, "\x1b[21;2~", res.getStringCapability(.key_f22).?);
+    try t.expectEqualSlices(u8, "\x1b[23;2~", res.getStringCapability(.key_f23).?);
+    try t.expectEqualSlices(u8, "\x1b[24;2~", res.getStringCapability(.key_f24).?);
+    try t.expectEqualSlices(u8, "\x1b[1;5P", res.getStringCapability(.key_f25).?);
+    try t.expectEqualSlices(u8, "\x1b[1;5Q", res.getStringCapability(.key_f26).?);
+    try t.expectEqualSlices(u8, "\x1b[1;5R", res.getStringCapability(.key_f27).?);
+    try t.expectEqualSlices(u8, "\x1b[1;5S", res.getStringCapability(.key_f28).?);
+    try t.expectEqualSlices(u8, "\x1b[15;5~", res.getStringCapability(.key_f29).?);
+    try t.expectEqualSlices(u8, "\x1bOR", res.getStringCapability(.key_f3).?);
+    try t.expectEqualSlices(u8, "\x1b[17;5~", res.getStringCapability(.key_f30).?);
+    try t.expectEqualSlices(u8, "\x1b[18;5~", res.getStringCapability(.key_f31).?);
+    try t.expectEqualSlices(u8, "\x1b[19;5~", res.getStringCapability(.key_f32).?);
+    try t.expectEqualSlices(u8, "\x1b[20;5~", res.getStringCapability(.key_f33).?);
+    try t.expectEqualSlices(u8, "\x1b[21;5~", res.getStringCapability(.key_f34).?);
+    try t.expectEqualSlices(u8, "\x1b[23;5~", res.getStringCapability(.key_f35).?);
+    try t.expectEqualSlices(u8, "\x1b[24;5~", res.getStringCapability(.key_f36).?);
+    try t.expectEqualSlices(u8, "\x1b[1;6P", res.getStringCapability(.key_f37).?);
+    try t.expectEqualSlices(u8, "\x1b[1;6Q", res.getStringCapability(.key_f38).?);
+    try t.expectEqualSlices(u8, "\x1b[1;6R", res.getStringCapability(.key_f39).?);
+    try t.expectEqualSlices(u8, "\x1bOS", res.getStringCapability(.key_f4).?);
+    try t.expectEqualSlices(u8, "\x1b[1;6S", res.getStringCapability(.key_f40).?);
+    try t.expectEqualSlices(u8, "\x1b[15;6~", res.getStringCapability(.key_f41).?);
+    try t.expectEqualSlices(u8, "\x1b[17;6~", res.getStringCapability(.key_f42).?);
+    try t.expectEqualSlices(u8, "\x1b[18;6~", res.getStringCapability(.key_f43).?);
+    try t.expectEqualSlices(u8, "\x1b[19;6~", res.getStringCapability(.key_f44).?);
+    try t.expectEqualSlices(u8, "\x1b[20;6~", res.getStringCapability(.key_f45).?);
+    try t.expectEqualSlices(u8, "\x1b[21;6~", res.getStringCapability(.key_f46).?);
+    try t.expectEqualSlices(u8, "\x1b[23;6~", res.getStringCapability(.key_f47).?);
+    try t.expectEqualSlices(u8, "\x1b[24;6~", res.getStringCapability(.key_f48).?);
+    try t.expectEqualSlices(u8, "\x1b[1;3P", res.getStringCapability(.key_f49).?);
+    try t.expectEqualSlices(u8, "\x1b[15~", res.getStringCapability(.key_f5).?);
+    try t.expectEqualSlices(u8, "\x1b[1;3Q", res.getStringCapability(.key_f50).?);
+    try t.expectEqualSlices(u8, "\x1b[1;3R", res.getStringCapability(.key_f51).?);
+    try t.expectEqualSlices(u8, "\x1b[1;3S", res.getStringCapability(.key_f52).?);
+    try t.expectEqualSlices(u8, "\x1b[15;3~", res.getStringCapability(.key_f53).?);
+    try t.expectEqualSlices(u8, "\x1b[17;3~", res.getStringCapability(.key_f54).?);
+    try t.expectEqualSlices(u8, "\x1b[18;3~", res.getStringCapability(.key_f55).?);
+    try t.expectEqualSlices(u8, "\x1b[19;3~", res.getStringCapability(.key_f56).?);
+    try t.expectEqualSlices(u8, "\x1b[20;3~", res.getStringCapability(.key_f57).?);
+    try t.expectEqualSlices(u8, "\x1b[21;3~", res.getStringCapability(.key_f58).?);
+    try t.expectEqualSlices(u8, "\x1b[23;3~", res.getStringCapability(.key_f59).?);
+    try t.expectEqualSlices(u8, "\x1b[17~", res.getStringCapability(.key_f6).?);
+    try t.expectEqualSlices(u8, "\x1b[24;3~", res.getStringCapability(.key_f60).?);
+    try t.expectEqualSlices(u8, "\x1b[1;4P", res.getStringCapability(.key_f61).?);
+    try t.expectEqualSlices(u8, "\x1b[1;4Q", res.getStringCapability(.key_f62).?);
+    try t.expectEqualSlices(u8, "\x1b[1;4R", res.getStringCapability(.key_f63).?);
+    try t.expectEqualSlices(u8, "\x1b[18~", res.getStringCapability(.key_f7).?);
+    try t.expectEqualSlices(u8, "\x1b[19~", res.getStringCapability(.key_f8).?);
+    try t.expectEqualSlices(u8, "\x1b[20~", res.getStringCapability(.key_f9).?);
+    try t.expectEqualSlices(u8, "\x1b[1~", res.getStringCapability(.key_home).?);
+    try t.expectEqualSlices(u8, "\x1b[2~", res.getStringCapability(.key_ic).?);
+    try t.expectEqualSlices(u8, "\x1bOD", res.getStringCapability(.key_left).?);
+    try t.expectEqualSlices(u8, "\x1b[M", res.getStringCapability(.key_mouse).?);
+    try t.expectEqualSlices(u8, "\x1b[6~", res.getStringCapability(.key_npage).?);
+    try t.expectEqualSlices(u8, "\x1b[5~", res.getStringCapability(.key_ppage).?);
+    try t.expectEqualSlices(u8, "\x1bOC", res.getStringCapability(.key_right).?);
+    try t.expectEqualSlices(u8, "\x1b[3;2~", res.getStringCapability(.key_sdc).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2F", res.getStringCapability(.key_send).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2B", res.getStringCapability(.key_sf).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2H", res.getStringCapability(.key_shome).?);
+    try t.expectEqualSlices(u8, "\x1b[2;2~", res.getStringCapability(.key_sic).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2D", res.getStringCapability(.key_sleft).?);
+    try t.expectEqualSlices(u8, "\x1b[6;2~", res.getStringCapability(.key_snext).?);
+    try t.expectEqualSlices(u8, "\x1b[5;2~", res.getStringCapability(.key_sprevious).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2A", res.getStringCapability(.key_sr).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2C", res.getStringCapability(.key_sright).?);
+    try t.expectEqualSlices(u8, "\x1bOA", res.getStringCapability(.key_up).?);
+    try t.expectEqualSlices(u8, "\x1b[?1l\x1b>", res.getStringCapability(.keypad_local).?);
+    try t.expectEqualSlices(u8, "\x1b[?1h\x1b=", res.getStringCapability(.keypad_xmit).?);
+    try t.expectEqualSlices(u8, "\x1bE", res.getStringCapability(.newline).?);
+    try t.expectEqualSlices(u8, "\x1b[39;49m", res.getStringCapability(.orig_pair).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dP", res.getStringCapability(.parm_dch).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dM", res.getStringCapability(.parm_delete_line).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dB", res.getStringCapability(.parm_down_cursor).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%d@", res.getStringCapability(.parm_ich).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dS", res.getStringCapability(.parm_index).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dL", res.getStringCapability(.parm_insert_line).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dD", res.getStringCapability(.parm_left_cursor).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dC", res.getStringCapability(.parm_right_cursor).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dA", res.getStringCapability(.parm_up_cursor).?);
+    try t.expectEqualSlices(u8, "\x1bc\x1b[?1000l\x1b[?25h", res.getStringCapability(.reset_2string).?);
+    try t.expectEqualSlices(u8, "\x1b8", res.getStringCapability(.restore_cursor).?);
+    try t.expectEqualSlices(u8, "\x1b[%i%p1%dd", res.getStringCapability(.row_address).?);
+    try t.expectEqualSlices(u8, "\x1b7", res.getStringCapability(.save_cursor).?);
+    try t.expectEqualSlices(u8, "\x0a", res.getStringCapability(.scroll_forward).?);
+    try t.expectEqualSlices(u8, "\x1bM", res.getStringCapability(.scroll_reverse).?);
+    try t.expectEqualSlices(u8, "\x1b[4%p1%dm", res.getStringCapability(.set_a_background).?);
+    try t.expectEqualSlices(u8, "\x1b[3%p1%dm", res.getStringCapability(.set_a_foreground).?);
+    try t.expectEqualSlices(u8, "\x1b[0%?%p6%t;1%;%?%p1%t;7%;%?%p2%t;4%;%?%p3%t;7%;%?%p4%t;            5%;%?%p5%t;2%;m%?%p9%t\x0e%e\x0f%;", res.getStringCapability(.set_attributes).?);
+    try t.expectEqualSlices(u8, "\x1bH", res.getStringCapability(.set_tab).?);
+    try t.expectEqualSlices(u8, "\x09", res.getStringCapability(.tab).?);
+    try t.expectEqualSlices(u8, "\x1b]0;", res.getStringCapability(.to_status_line).?);
+
+    try t.expectEqual(null, res.getStringCapability(.acs_btee));
+    try t.expectEqual(null, res.getStringCapability(.acs_hline));
+    try t.expectEqual(null, res.getStringCapability(.acs_llcorner));
+    try t.expectEqual(null, res.getStringCapability(.acs_lrcorner));
+    try t.expectEqual(null, res.getStringCapability(.acs_ltee));
+    try t.expectEqual(null, res.getStringCapability(.acs_plus));
+    try t.expectEqual(null, res.getStringCapability(.acs_rtee));
+    try t.expectEqual(null, res.getStringCapability(.acs_ttee));
+    try t.expectEqual(null, res.getStringCapability(.acs_ulcorner));
+    try t.expectEqual(null, res.getStringCapability(.acs_urcorner));
+    try t.expectEqual(null, res.getStringCapability(.acs_vline));
+    try t.expectEqual(null, res.getStringCapability(.alt_scancode_esc));
+    try t.expectEqual(null, res.getStringCapability(.arrow_key_map));
+    try t.expectEqual(null, res.getStringCapability(.backspace_if_not_bs));
+    try t.expectEqual(null, res.getStringCapability(.bit_image_carriage_return));
+    try t.expectEqual(null, res.getStringCapability(.bit_image_newline));
+    try t.expectEqual(null, res.getStringCapability(.bit_image_repeat));
+    try t.expectEqual(null, res.getStringCapability(.box_chars_1));
+    try t.expectEqual(null, res.getStringCapability(.change_char_pitch));
+    try t.expectEqual(null, res.getStringCapability(.change_line_pitch));
+    try t.expectEqual(null, res.getStringCapability(.change_res_horz));
+    try t.expectEqual(null, res.getStringCapability(.change_res_vert));
+    try t.expectEqual(null, res.getStringCapability(.char_padding));
+    try t.expectEqual(null, res.getStringCapability(.char_set_names));
+    try t.expectEqual(null, res.getStringCapability(.clear_margins));
+    try t.expectEqual(null, res.getStringCapability(.code_set_init));
+    try t.expectEqual(null, res.getStringCapability(.color_names));
+    try t.expectEqual(null, res.getStringCapability(.command_character));
+    try t.expectEqual(null, res.getStringCapability(.create_window));
+    try t.expectEqual(null, res.getStringCapability(.cursor_mem_address));
+    try t.expectEqual(null, res.getStringCapability(.cursor_to_ll));
+    try t.expectEqual(null, res.getStringCapability(.define_bit_image_region));
+    try t.expectEqual(null, res.getStringCapability(.define_char));
+    try t.expectEqual(null, res.getStringCapability(.device_type));
+    try t.expectEqual(null, res.getStringCapability(.dial_phone));
+    try t.expectEqual(null, res.getStringCapability(.display_clock));
+    try t.expectEqual(null, res.getStringCapability(.display_pc_char));
+    try t.expectEqual(null, res.getStringCapability(.down_half_line));
+    try t.expectEqual(null, res.getStringCapability(.end_bit_image_region));
+    try t.expectEqual(null, res.getStringCapability(.enter_am_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_delete_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_doublewide_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_draft_quality));
+    try t.expectEqual(null, res.getStringCapability(.enter_horizontal_hl_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_left_hl_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_leftward_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_low_hl_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_micro_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_near_letter_quality));
+    try t.expectEqual(null, res.getStringCapability(.enter_normal_quality));
+    try t.expectEqual(null, res.getStringCapability(.enter_pc_charset_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_protected_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_right_hl_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_scancode_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_shadow_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_subscript_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_superscript_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_top_hl_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_upward_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_vertical_hl_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_xon_mode));
+    try t.expectEqual(null, res.getStringCapability(.erase_chars));
+    try t.expectEqual(null, res.getStringCapability(.exit_am_mode));
+    try t.expectEqual(null, res.getStringCapability(.exit_delete_mode));
+    try t.expectEqual(null, res.getStringCapability(.exit_doublewide_mode));
+    try t.expectEqual(null, res.getStringCapability(.exit_leftward_mode));
+    try t.expectEqual(null, res.getStringCapability(.exit_micro_mode));
+    try t.expectEqual(null, res.getStringCapability(.exit_pc_charset_mode));
+    try t.expectEqual(null, res.getStringCapability(.exit_scancode_mode));
+    try t.expectEqual(null, res.getStringCapability(.exit_shadow_mode));
+    try t.expectEqual(null, res.getStringCapability(.exit_subscript_mode));
+    try t.expectEqual(null, res.getStringCapability(.exit_superscript_mode));
+    try t.expectEqual(null, res.getStringCapability(.exit_upward_mode));
+    try t.expectEqual(null, res.getStringCapability(.exit_xon_mode));
+    try t.expectEqual(null, res.getStringCapability(.fixed_pause));
+    try t.expectEqual(null, res.getStringCapability(.flash_hook));
+    try t.expectEqual(null, res.getStringCapability(.form_feed));
+    try t.expectEqual(null, res.getStringCapability(.get_mouse));
+    try t.expectEqual(null, res.getStringCapability(.goto_window));
+    try t.expectEqual(null, res.getStringCapability(.hangup));
+    try t.expectEqual(null, res.getStringCapability(.init_1string));
+    try t.expectEqual(null, res.getStringCapability(.init_3string));
+    try t.expectEqual(null, res.getStringCapability(.init_file));
+    try t.expectEqual(null, res.getStringCapability(.init_prog));
+    try t.expectEqual(null, res.getStringCapability(.initialize_color));
+    try t.expectEqual(null, res.getStringCapability(.initialize_pair));
+    try t.expectEqual(null, res.getStringCapability(.insert_character));
+    try t.expectEqual(null, res.getStringCapability(.insert_padding));
+    try t.expectEqual(null, res.getStringCapability(.key_a1));
+    try t.expectEqual(null, res.getStringCapability(.key_a3));
+    try t.expectEqual(null, res.getStringCapability(.key_b2));
+    try t.expectEqual(null, res.getStringCapability(.key_beg));
+    try t.expectEqual(null, res.getStringCapability(.key_c1));
+    try t.expectEqual(null, res.getStringCapability(.key_c3));
+    try t.expectEqual(null, res.getStringCapability(.key_cancel));
+    try t.expectEqual(null, res.getStringCapability(.key_catab));
+    try t.expectEqual(null, res.getStringCapability(.key_clear));
+    try t.expectEqual(null, res.getStringCapability(.key_close));
+    try t.expectEqual(null, res.getStringCapability(.key_command));
+    try t.expectEqual(null, res.getStringCapability(.key_copy));
+    try t.expectEqual(null, res.getStringCapability(.key_create));
+    try t.expectEqual(null, res.getStringCapability(.key_ctab));
+    try t.expectEqual(null, res.getStringCapability(.key_dl));
+    try t.expectEqual(null, res.getStringCapability(.key_eic));
+    try t.expectEqual(null, res.getStringCapability(.key_enter));
+    try t.expectEqual(null, res.getStringCapability(.key_eol));
+    try t.expectEqual(null, res.getStringCapability(.key_eos));
+    try t.expectEqual(null, res.getStringCapability(.key_exit));
+    try t.expectEqual(null, res.getStringCapability(.key_f0));
+    try t.expectEqual(null, res.getStringCapability(.key_find));
+    try t.expectEqual(null, res.getStringCapability(.key_help));
+    try t.expectEqual(null, res.getStringCapability(.key_il));
+    try t.expectEqual(null, res.getStringCapability(.key_ll));
+    try t.expectEqual(null, res.getStringCapability(.key_mark));
+    try t.expectEqual(null, res.getStringCapability(.key_message));
+    try t.expectEqual(null, res.getStringCapability(.key_move));
+    try t.expectEqual(null, res.getStringCapability(.key_next));
+    try t.expectEqual(null, res.getStringCapability(.key_open));
+    try t.expectEqual(null, res.getStringCapability(.key_options));
+    try t.expectEqual(null, res.getStringCapability(.key_previous));
+    try t.expectEqual(null, res.getStringCapability(.key_print));
+    try t.expectEqual(null, res.getStringCapability(.key_redo));
+    try t.expectEqual(null, res.getStringCapability(.key_reference));
+    try t.expectEqual(null, res.getStringCapability(.key_refresh));
+    try t.expectEqual(null, res.getStringCapability(.key_replace));
+    try t.expectEqual(null, res.getStringCapability(.key_restart));
+    try t.expectEqual(null, res.getStringCapability(.key_resume));
+    try t.expectEqual(null, res.getStringCapability(.key_save));
+    try t.expectEqual(null, res.getStringCapability(.key_sbeg));
+    try t.expectEqual(null, res.getStringCapability(.key_scancel));
+    try t.expectEqual(null, res.getStringCapability(.key_scommand));
+    try t.expectEqual(null, res.getStringCapability(.key_scopy));
+    try t.expectEqual(null, res.getStringCapability(.key_screate));
+    try t.expectEqual(null, res.getStringCapability(.key_sdl));
+    try t.expectEqual(null, res.getStringCapability(.key_select));
+    try t.expectEqual(null, res.getStringCapability(.key_seol));
+    try t.expectEqual(null, res.getStringCapability(.key_sexit));
+    try t.expectEqual(null, res.getStringCapability(.key_sfind));
+    try t.expectEqual(null, res.getStringCapability(.key_shelp));
+    try t.expectEqual(null, res.getStringCapability(.key_smessage));
+    try t.expectEqual(null, res.getStringCapability(.key_smove));
+    try t.expectEqual(null, res.getStringCapability(.key_soptions));
+    try t.expectEqual(null, res.getStringCapability(.key_sprint));
+    try t.expectEqual(null, res.getStringCapability(.key_sredo));
+    try t.expectEqual(null, res.getStringCapability(.key_sreplace));
+    try t.expectEqual(null, res.getStringCapability(.key_srsume));
+    try t.expectEqual(null, res.getStringCapability(.key_ssave));
+    try t.expectEqual(null, res.getStringCapability(.key_ssuspend));
+    try t.expectEqual(null, res.getStringCapability(.key_stab));
+    try t.expectEqual(null, res.getStringCapability(.key_sundo));
+    try t.expectEqual(null, res.getStringCapability(.key_suspend));
+    try t.expectEqual(null, res.getStringCapability(.key_undo));
+    try t.expectEqual(null, res.getStringCapability(.lab_f0));
+    try t.expectEqual(null, res.getStringCapability(.lab_f1));
+    try t.expectEqual(null, res.getStringCapability(.lab_f10));
+    try t.expectEqual(null, res.getStringCapability(.lab_f2));
+    try t.expectEqual(null, res.getStringCapability(.lab_f3));
+    try t.expectEqual(null, res.getStringCapability(.lab_f4));
+    try t.expectEqual(null, res.getStringCapability(.lab_f5));
+    try t.expectEqual(null, res.getStringCapability(.lab_f6));
+    try t.expectEqual(null, res.getStringCapability(.lab_f7));
+    try t.expectEqual(null, res.getStringCapability(.lab_f8));
+    try t.expectEqual(null, res.getStringCapability(.lab_f9));
+    try t.expectEqual(null, res.getStringCapability(.label_format));
+    try t.expectEqual(null, res.getStringCapability(.label_off));
+    try t.expectEqual(null, res.getStringCapability(.label_on));
+    try t.expectEqual(null, res.getStringCapability(.linefeed_if_not_lf));
+    try t.expectEqual(null, res.getStringCapability(.memory_lock));
+    try t.expectEqual(null, res.getStringCapability(.memory_unlock));
+    try t.expectEqual(null, res.getStringCapability(.meta_off));
+    try t.expectEqual(null, res.getStringCapability(.meta_on));
+    try t.expectEqual(null, res.getStringCapability(.micro_column_address));
+    try t.expectEqual(null, res.getStringCapability(.micro_down));
+    try t.expectEqual(null, res.getStringCapability(.micro_left));
+    try t.expectEqual(null, res.getStringCapability(.micro_right));
+    try t.expectEqual(null, res.getStringCapability(.micro_row_address));
+    try t.expectEqual(null, res.getStringCapability(.micro_up));
+    try t.expectEqual(null, res.getStringCapability(.mouse_info));
+    try t.expectEqual(null, res.getStringCapability(.order_of_pins));
+    try t.expectEqual(null, res.getStringCapability(.orig_colors));
+    try t.expectEqual(null, res.getStringCapability(.other_non_function_keys));
+    try t.expectEqual(null, res.getStringCapability(.pad_char));
+    try t.expectEqual(null, res.getStringCapability(.parm_down_micro));
+    try t.expectEqual(null, res.getStringCapability(.parm_left_micro));
+    try t.expectEqual(null, res.getStringCapability(.parm_right_micro));
+    try t.expectEqual(null, res.getStringCapability(.parm_rindex));
+    try t.expectEqual(null, res.getStringCapability(.parm_up_micro));
+    try t.expectEqual(null, res.getStringCapability(.pc_term_options));
+    try t.expectEqual(null, res.getStringCapability(.pkey_key));
+    try t.expectEqual(null, res.getStringCapability(.pkey_local));
+    try t.expectEqual(null, res.getStringCapability(.pkey_plab));
+    try t.expectEqual(null, res.getStringCapability(.pkey_xmit));
+    try t.expectEqual(null, res.getStringCapability(.plab_norm));
+    try t.expectEqual(null, res.getStringCapability(.print_screen));
+    try t.expectEqual(null, res.getStringCapability(.prtr_non));
+    try t.expectEqual(null, res.getStringCapability(.prtr_off));
+    try t.expectEqual(null, res.getStringCapability(.prtr_on));
+    try t.expectEqual(null, res.getStringCapability(.pulse));
+    try t.expectEqual(null, res.getStringCapability(.quick_dial));
+    try t.expectEqual(null, res.getStringCapability(.remove_clock));
+    try t.expectEqual(null, res.getStringCapability(.repeat_char));
+    try t.expectEqual(null, res.getStringCapability(.req_for_input));
+    try t.expectEqual(null, res.getStringCapability(.req_mouse_pos));
+    try t.expectEqual(null, res.getStringCapability(.reset_1string));
+    try t.expectEqual(null, res.getStringCapability(.reset_3string));
+    try t.expectEqual(null, res.getStringCapability(.reset_file));
+    try t.expectEqual(null, res.getStringCapability(.scancode_escape));
+    try t.expectEqual(null, res.getStringCapability(.select_char_set));
+    try t.expectEqual(null, res.getStringCapability(.set0_des_seq));
+    try t.expectEqual(null, res.getStringCapability(.set1_des_seq));
+    try t.expectEqual(null, res.getStringCapability(.set2_des_seq));
+    try t.expectEqual(null, res.getStringCapability(.set3_des_seq));
+    try t.expectEqual(null, res.getStringCapability(.set_a_attributes));
+    try t.expectEqual(null, res.getStringCapability(.set_background));
+    try t.expectEqual(null, res.getStringCapability(.set_bottom_margin));
+    try t.expectEqual(null, res.getStringCapability(.set_bottom_margin_parm));
+    try t.expectEqual(null, res.getStringCapability(.set_clock));
+    try t.expectEqual(null, res.getStringCapability(.set_color_band));
+    try t.expectEqual(null, res.getStringCapability(.set_color_pair));
+    try t.expectEqual(null, res.getStringCapability(.set_foreground));
+    try t.expectEqual(null, res.getStringCapability(.set_left_margin));
+    try t.expectEqual(null, res.getStringCapability(.set_left_margin_parm));
+    try t.expectEqual(null, res.getStringCapability(.set_lr_margin));
+    try t.expectEqual(null, res.getStringCapability(.set_page_length));
+    try t.expectEqual(null, res.getStringCapability(.set_pglen_inch));
+    try t.expectEqual(null, res.getStringCapability(.set_right_margin));
+    try t.expectEqual(null, res.getStringCapability(.set_right_margin_parm));
+    try t.expectEqual(null, res.getStringCapability(.set_tb_margin));
+    try t.expectEqual(null, res.getStringCapability(.set_top_margin));
+    try t.expectEqual(null, res.getStringCapability(.set_top_margin_parm));
+    try t.expectEqual(null, res.getStringCapability(.set_window));
+    try t.expectEqual(null, res.getStringCapability(.start_bit_image));
+    try t.expectEqual(null, res.getStringCapability(.start_char_set_def));
+    try t.expectEqual(null, res.getStringCapability(.stop_bit_image));
+    try t.expectEqual(null, res.getStringCapability(.stop_char_set_def));
+    try t.expectEqual(null, res.getStringCapability(.subscript_characters));
+    try t.expectEqual(null, res.getStringCapability(.superscript_characters));
+    try t.expectEqual(null, res.getStringCapability(.termcap_init2));
+    try t.expectEqual(null, res.getStringCapability(.termcap_reset));
+    try t.expectEqual(null, res.getStringCapability(.these_cause_cr));
+    try t.expectEqual(null, res.getStringCapability(.tone));
+    try t.expectEqual(null, res.getStringCapability(.underline_char));
+    try t.expectEqual(null, res.getStringCapability(.up_half_line));
+    try t.expectEqual(null, res.getStringCapability(.user0));
+    try t.expectEqual(null, res.getStringCapability(.user1));
+    try t.expectEqual(null, res.getStringCapability(.user2));
+    try t.expectEqual(null, res.getStringCapability(.user3));
+    try t.expectEqual(null, res.getStringCapability(.user4));
+    try t.expectEqual(null, res.getStringCapability(.user5));
+    try t.expectEqual(null, res.getStringCapability(.user6));
+    try t.expectEqual(null, res.getStringCapability(.user7));
+    try t.expectEqual(null, res.getStringCapability(.user8));
+    try t.expectEqual(null, res.getStringCapability(.user9));
+    try t.expectEqual(null, res.getStringCapability(.wait_tone));
+    try t.expectEqual(null, res.getStringCapability(.xoff_character));
+    try t.expectEqual(null, res.getStringCapability(.xon_character));
+    try t.expectEqual(null, res.getStringCapability(.zero_motion));
+
+    try t.expectEqual(3, res.ext_flags.size);
+    try t.expectEqual(true, res.getExtendedFlag("AX"));
+    try t.expectEqual(true, res.getExtendedFlag("G0"));
+    try t.expectEqual(true, res.getExtendedFlag("XT"));
+
+    try t.expectEqual(1, res.ext_nums.size);
+    try t.expectEqual(1, res.getExtendedNumber("U8"));
+
+    try t.expectEqual(63, res.ext_strs.size);
+
+    try t.expectEqualSlices(u8, "\x1b]112\x07", res.getExtendedString("Cr").?);
+    try t.expectEqualSlices(u8, "\x1b]12;%p1%s\x07", res.getExtendedString("Cs").?);
+    try t.expectEqualSlices(u8, "\x1b(B", res.getExtendedString("E0").?);
+    try t.expectEqualSlices(u8, "\x1b[3J", res.getExtendedString("E3").?);
+    try t.expectEqualSlices(u8, "\x1b]52;%p1%s;%p2%s\x07", res.getExtendedString("Ms").?);
+    try t.expectEqualSlices(u8, "\x1b(%p1%c", res.getExtendedString("S0").?);
+    try t.expectEqualSlices(u8, "\x1b[2 q", res.getExtendedString("Se").?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%d q", res.getExtendedString("Ss").?);
+    try t.expectEqualSlices(u8, "\x1b]0;", res.getExtendedString("TS").?);
+    try t.expectEqualSlices(u8, "\x1b[3;3~", res.getExtendedString("kDC3").?);
+    try t.expectEqualSlices(u8, "\x1b[3;4~", res.getExtendedString("kDC4").?);
+    try t.expectEqualSlices(u8, "\x1b[3;5~", res.getExtendedString("kDC5").?);
+    try t.expectEqualSlices(u8, "\x1b[3;6~", res.getExtendedString("kDC6").?);
+    try t.expectEqualSlices(u8, "\x1b[3;7~", res.getExtendedString("kDC7").?);
+    try t.expectEqualSlices(u8, "\x1b[1;2B", res.getExtendedString("kDN").?);
+    try t.expectEqualSlices(u8, "\x1b[1;3B", res.getExtendedString("kDN3").?);
+    try t.expectEqualSlices(u8, "\x1b[1;4B", res.getExtendedString("kDN4").?);
+    try t.expectEqualSlices(u8, "\x1b[1;5B", res.getExtendedString("kDN5").?);
+    try t.expectEqualSlices(u8, "\x1b[1;6B", res.getExtendedString("kDN6").?);
+    try t.expectEqualSlices(u8, "\x1b[1;7B", res.getExtendedString("kDN7").?);
+    try t.expectEqualSlices(u8, "\x1b[1;3F", res.getExtendedString("kEND3").?);
+    try t.expectEqualSlices(u8, "\x1b[1;4F", res.getExtendedString("kEND4").?);
+    try t.expectEqualSlices(u8, "\x1b[1;5F", res.getExtendedString("kEND5").?);
+    try t.expectEqualSlices(u8, "\x1b[1;6F", res.getExtendedString("kEND6").?);
+    try t.expectEqualSlices(u8, "\x1b[1;7F", res.getExtendedString("kEND7").?);
+    try t.expectEqualSlices(u8, "\x1b[1;3H", res.getExtendedString("kHOM3").?);
+    try t.expectEqualSlices(u8, "\x1b[1;4H", res.getExtendedString("kHOM4").?);
+    try t.expectEqualSlices(u8, "\x1b[1;5H", res.getExtendedString("kHOM5").?);
+    try t.expectEqualSlices(u8, "\x1b[1;6H", res.getExtendedString("kHOM6").?);
+    try t.expectEqualSlices(u8, "\x1b[1;7H", res.getExtendedString("kHOM7").?);
+    try t.expectEqualSlices(u8, "\x1b[2;3~", res.getExtendedString("kIC3").?);
+    try t.expectEqualSlices(u8, "\x1b[2;4~", res.getExtendedString("kIC4").?);
+    try t.expectEqualSlices(u8, "\x1b[2;5~", res.getExtendedString("kIC5").?);
+    try t.expectEqualSlices(u8, "\x1b[2;6~", res.getExtendedString("kIC6").?);
+    try t.expectEqualSlices(u8, "\x1b[2;7~", res.getExtendedString("kIC7").?);
+    try t.expectEqualSlices(u8, "\x1b[1;3D", res.getExtendedString("kLFT3").?);
+    try t.expectEqualSlices(u8, "\x1b[1;4D", res.getExtendedString("kLFT4").?);
+    try t.expectEqualSlices(u8, "\x1b[1;5D", res.getExtendedString("kLFT5").?);
+    try t.expectEqualSlices(u8, "\x1b[1;6D", res.getExtendedString("kLFT6").?);
+    try t.expectEqualSlices(u8, "\x1b[1;7D", res.getExtendedString("kLFT7").?);
+    try t.expectEqualSlices(u8, "\x1b[6;3~", res.getExtendedString("kNXT3").?);
+    try t.expectEqualSlices(u8, "\x1b[6;4~", res.getExtendedString("kNXT4").?);
+    try t.expectEqualSlices(u8, "\x1b[6;5~", res.getExtendedString("kNXT5").?);
+    try t.expectEqualSlices(u8, "\x1b[6;6~", res.getExtendedString("kNXT6").?);
+    try t.expectEqualSlices(u8, "\x1b[6;7~", res.getExtendedString("kNXT7").?);
+    try t.expectEqualSlices(u8, "\x1b[5;3~", res.getExtendedString("kPRV3").?);
+    try t.expectEqualSlices(u8, "\x1b[5;4~", res.getExtendedString("kPRV4").?);
+    try t.expectEqualSlices(u8, "\x1b[5;5~", res.getExtendedString("kPRV5").?);
+    try t.expectEqualSlices(u8, "\x1b[5;6~", res.getExtendedString("kPRV6").?);
+    try t.expectEqualSlices(u8, "\x1b[5;7~", res.getExtendedString("kPRV7").?);
+    try t.expectEqualSlices(u8, "\x1b[1;3C", res.getExtendedString("kRIT3").?);
+    try t.expectEqualSlices(u8, "\x1b[1;4C", res.getExtendedString("kRIT4").?);
+    try t.expectEqualSlices(u8, "\x1b[1;5C", res.getExtendedString("kRIT5").?);
+    try t.expectEqualSlices(u8, "\x1b[1;6C", res.getExtendedString("kRIT6").?);
+    try t.expectEqualSlices(u8, "\x1b[1;7C", res.getExtendedString("kRIT7").?);
+    try t.expectEqualSlices(u8, "\x1b[1;2A", res.getExtendedString("kUP").?);
+    try t.expectEqualSlices(u8, "\x1b[1;3A", res.getExtendedString("kUP3").?);
+    try t.expectEqualSlices(u8, "\x1b[1;4A", res.getExtendedString("kUP4").?);
+    try t.expectEqualSlices(u8, "\x1b[1;5A", res.getExtendedString("kUP5").?);
+    try t.expectEqualSlices(u8, "\x1b[1;6A", res.getExtendedString("kUP6").?);
+    try t.expectEqualSlices(u8, "\x1b[1;7A", res.getExtendedString("kUP7").?);
+    try t.expectEqualSlices(u8, "\x1b[29m", res.getExtendedString("rmxx").?);
+    try t.expectEqualSlices(u8, "\x1b[9m", res.getExtendedString("smxx").?);
 }
 
-test "findTermInfoPath" {
-    {
-        const file = openTermInfoFile("st-256color").?;
-        defer file.close();
+test "xterm" {
+    const x = @embedFile("descriptions/xterm");
+    const res = try parse(ta, x);
+    defer res.destroy(ta);
 
-        const buf = try file.readToEndAlloc(std.testing.allocator, 32768);
-        defer std.testing.allocator.free(buf);
-        const res = try parse(ta, buf);
-        defer res.destroy(ta);
-        try t.expectEqualStrings("st-256color| simpleterm with 256 colors", res.names);
-    }
+    try t.expectEqualStrings("xterm|xterm terminal emulator (X Window System)", res.names);
 
-    {
-        const file = openTermInfoFile("xterm-256color").?;
-        defer file.close();
+    try t.expectEqual(false, res.getFlagCapability(.auto_left_margin));
+    try t.expectEqual(true, res.getFlagCapability(.auto_right_margin));
+    try t.expectEqual(false, res.getFlagCapability(.no_esc_ctlc));
+    try t.expectEqual(false, res.getFlagCapability(.ceol_standout_glitch));
+    try t.expectEqual(true, res.getFlagCapability(.eat_newline_glitch));
+    try t.expectEqual(false, res.getFlagCapability(.erase_overstrike));
+    try t.expectEqual(false, res.getFlagCapability(.generic_type));
+    try t.expectEqual(false, res.getFlagCapability(.hard_copy));
+    try t.expectEqual(true, res.getFlagCapability(.has_meta_key));
+    try t.expectEqual(false, res.getFlagCapability(.has_status_line));
+    try t.expectEqual(false, res.getFlagCapability(.insert_null_glitch));
+    try t.expectEqual(false, res.getFlagCapability(.memory_above));
+    try t.expectEqual(false, res.getFlagCapability(.memory_below));
+    try t.expectEqual(true, res.getFlagCapability(.move_insert_mode));
+    try t.expectEqual(true, res.getFlagCapability(.move_standout_mode));
+    try t.expectEqual(false, res.getFlagCapability(.over_strike));
+    try t.expectEqual(false, res.getFlagCapability(.status_line_esc_ok));
+    try t.expectEqual(false, res.getFlagCapability(.dest_tabs_magic_smso));
+    try t.expectEqual(false, res.getFlagCapability(.tilde_glitch));
+    try t.expectEqual(false, res.getFlagCapability(.transparent_underline));
+    try t.expectEqual(false, res.getFlagCapability(.xon_xoff));
+    try t.expectEqual(false, res.getFlagCapability(.needs_xon_xoff));
+    try t.expectEqual(true, res.getFlagCapability(.prtr_silent));
+    try t.expectEqual(false, res.getFlagCapability(.hard_cursor));
+    try t.expectEqual(false, res.getFlagCapability(.non_rev_rmcup));
+    try t.expectEqual(true, res.getFlagCapability(.no_pad_char));
+    try t.expectEqual(false, res.getFlagCapability(.non_dest_scroll_region));
+    try t.expectEqual(false, res.getFlagCapability(.can_change));
+    try t.expectEqual(true, res.getFlagCapability(.back_color_erase));
+    try t.expectEqual(false, res.getFlagCapability(.hue_lightness_saturation));
+    try t.expectEqual(false, res.getFlagCapability(.col_addr_glitch));
+    try t.expectEqual(false, res.getFlagCapability(.cr_cancels_micro_mode));
+    try t.expectEqual(false, res.getFlagCapability(.has_print_wheel));
+    try t.expectEqual(false, res.getFlagCapability(.row_addr_glitch));
+    try t.expectEqual(false, res.getFlagCapability(.semi_auto_right_margin));
+    try t.expectEqual(false, res.getFlagCapability(.cpi_changes_res));
+    try t.expectEqual(false, res.getFlagCapability(.lpi_changes_res));
+    try t.expectEqual(true, res.getFlagCapability(.backspaces_with_bs));
+    try t.expectEqual(false, res.getFlagCapability(.crt_no_scrolling));
+    try t.expectEqual(false, res.getFlagCapability(.no_correctly_working_cr));
+    try t.expectEqual(false, res.getFlagCapability(.gnu_has_meta_key));
+    try t.expectEqual(false, res.getFlagCapability(.linefeed_is_newline));
+    try t.expectEqual(false, res.getFlagCapability(.has_hardware_tabs));
+    try t.expectEqual(false, res.getFlagCapability(.return_does_clr_eol));
 
-        const buf = try file.readToEndAlloc(std.testing.allocator, 32768);
-        defer std.testing.allocator.free(buf);
-        const res = try parse(ta, buf);
-        defer res.destroy(ta);
-        try t.expectEqualStrings("xterm-256color|xterm with 256 colors", res.names);
-    }
+    try t.expectEqual(80, res.getNumberCapability(.columns));
+    try t.expectEqual(8, res.getNumberCapability(.init_tabs));
+    try t.expectEqual(24, res.getNumberCapability(.lines));
+    try t.expectEqual(null, res.getNumberCapability(.lines_of_memory));
+    try t.expectEqual(null, res.getNumberCapability(.magic_cookie_glitch));
+    try t.expectEqual(null, res.getNumberCapability(.padding_baud_rate));
+    try t.expectEqual(null, res.getNumberCapability(.virtual_terminal));
+    try t.expectEqual(null, res.getNumberCapability(.width_status_line));
+    try t.expectEqual(null, res.getNumberCapability(.num_labels));
+    try t.expectEqual(null, res.getNumberCapability(.label_height));
+    try t.expectEqual(null, res.getNumberCapability(.label_width));
+    try t.expectEqual(null, res.getNumberCapability(.max_attributes));
+    try t.expectEqual(null, res.getNumberCapability(.maximum_windows));
+    try t.expectEqual(8, res.getNumberCapability(.max_colors));
+    try t.expectEqual(64, res.getNumberCapability(.max_pairs));
+    try t.expectEqual(null, res.getNumberCapability(.no_color_video));
+    try t.expectEqual(null, res.getNumberCapability(.buffer_capacity));
+    try t.expectEqual(null, res.getNumberCapability(.dot_vert_spacing));
+    try t.expectEqual(null, res.getNumberCapability(.dot_horz_spacing));
+    try t.expectEqual(null, res.getNumberCapability(.max_micro_address));
+    try t.expectEqual(null, res.getNumberCapability(.max_micro_jump));
+    try t.expectEqual(null, res.getNumberCapability(.micro_col_size));
+    try t.expectEqual(null, res.getNumberCapability(.micro_line_size));
+    try t.expectEqual(null, res.getNumberCapability(.number_of_pins));
+    try t.expectEqual(null, res.getNumberCapability(.output_res_char));
+    try t.expectEqual(null, res.getNumberCapability(.output_res_line));
+    try t.expectEqual(null, res.getNumberCapability(.output_res_horz_inch));
+    try t.expectEqual(null, res.getNumberCapability(.output_res_vert_inch));
+    try t.expectEqual(null, res.getNumberCapability(.print_rate));
+    try t.expectEqual(null, res.getNumberCapability(.wide_char_size));
+    try t.expectEqual(null, res.getNumberCapability(.buttons));
+    try t.expectEqual(null, res.getNumberCapability(.bit_image_entwining));
+    try t.expectEqual(null, res.getNumberCapability(.bit_image_type));
+    try t.expectEqual(null, res.getNumberCapability(.magic_cookie_glitch_ul));
+    try t.expectEqual(null, res.getNumberCapability(.carriage_return_delay));
+    try t.expectEqual(null, res.getNumberCapability(.new_line_delay));
+    try t.expectEqual(null, res.getNumberCapability(.backspace_delay));
+    try t.expectEqual(null, res.getNumberCapability(.horizontal_tab_delay));
+    try t.expectEqual(null, res.getNumberCapability(.number_of_function_keys));
 
-    try t.expectEqual(@as(?std.fs.File, null), openTermInfoFile(""));
-    try t.expectEqual(@as(?std.fs.File, null), openTermInfoFile("Non-extant-terminal :)"));
+    try t.expectEqualSlices(u8, "\x1b[Z", res.getStringCapability(.back_tab).?);
+    try t.expectEqualSlices(u8, "\x07", res.getStringCapability(.bell).?);
+    try t.expectEqualSlices(u8, "\x0d", res.getStringCapability(.carriage_return).?);
+    try t.expectEqualSlices(u8, "\x1b[%i%p1%d;%p2%dr", res.getStringCapability(.change_scroll_region).?);
+    try t.expectEqualSlices(u8, "\x1b[3g", res.getStringCapability(.clear_all_tabs).?);
+    try t.expectEqualSlices(u8, "\x1b[H\x1b[2J", res.getStringCapability(.clear_screen).?);
+    try t.expectEqualSlices(u8, "\x1b[K", res.getStringCapability(.clr_eol).?);
+    try t.expectEqualSlices(u8, "\x1b[J", res.getStringCapability(.clr_eos).?);
+    try t.expectEqualSlices(u8, "\x1b[%i%p1%dG", res.getStringCapability(.column_address).?);
+    try t.expectEqualSlices(u8, "\x1b[%i%p1%d;%p2%dH", res.getStringCapability(.cursor_address).?);
+    try t.expectEqualSlices(u8, "\x0a", res.getStringCapability(.cursor_down).?);
+    try t.expectEqualSlices(u8, "\x1b[H", res.getStringCapability(.cursor_home).?);
+    try t.expectEqualSlices(u8, "\x1b[?25l", res.getStringCapability(.cursor_invisible).?);
+    try t.expectEqualSlices(u8, "\x08", res.getStringCapability(.cursor_left).?);
+    try t.expectEqualSlices(u8, "\x1b[?12l\x1b[?25h", res.getStringCapability(.cursor_normal).?);
+    try t.expectEqualSlices(u8, "\x1b[C", res.getStringCapability(.cursor_right).?);
+    try t.expectEqualSlices(u8, "\x1b[A", res.getStringCapability(.cursor_up).?);
+    try t.expectEqualSlices(u8, "\x1b[?12;25h", res.getStringCapability(.cursor_visible).?);
+    try t.expectEqualSlices(u8, "\x1b[P", res.getStringCapability(.delete_character).?);
+    try t.expectEqualSlices(u8, "\x1b[M", res.getStringCapability(.delete_line).?);
+    try t.expectEqualSlices(u8, "\x1b(0", res.getStringCapability(.enter_alt_charset_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[5m", res.getStringCapability(.enter_blink_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[1m", res.getStringCapability(.enter_bold_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[?1049h\x1b[22;0;0t", res.getStringCapability(.enter_ca_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[2m", res.getStringCapability(.enter_dim_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[4h", res.getStringCapability(.enter_insert_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[8m", res.getStringCapability(.enter_secure_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[7m", res.getStringCapability(.enter_reverse_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[7m", res.getStringCapability(.enter_standout_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[4m", res.getStringCapability(.enter_underline_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dX", res.getStringCapability(.erase_chars).?);
+    try t.expectEqualSlices(u8, "\x1b(B", res.getStringCapability(.exit_alt_charset_mode).?);
+    try t.expectEqualSlices(u8, "\x1b(B\x1b[m", res.getStringCapability(.exit_attribute_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[?1049l\x1b[23;0;0t", res.getStringCapability(.exit_ca_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[4l", res.getStringCapability(.exit_insert_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[27m", res.getStringCapability(.exit_standout_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[24m", res.getStringCapability(.exit_underline_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[?5h$<100/>\x1b[?5l", res.getStringCapability(.flash_screen).?);
+    try t.expectEqualSlices(u8, "\x1b[!p\x1b[?3;4l\x1b[4l\x1b>", res.getStringCapability(.init_2string).?);
+    try t.expectEqualSlices(u8, "\x1b[L", res.getStringCapability(.insert_line).?);
+    try t.expectEqualSlices(u8, "\x08", res.getStringCapability(.key_backspace).?);
+    try t.expectEqualSlices(u8, "\x1b[3~", res.getStringCapability(.key_dc).?);
+    try t.expectEqualSlices(u8, "\x1bOB", res.getStringCapability(.key_down).?);
+    try t.expectEqualSlices(u8, "\x1bOP", res.getStringCapability(.key_f1).?);
+    try t.expectEqualSlices(u8, "\x1b[21~", res.getStringCapability(.key_f10).?);
+    try t.expectEqualSlices(u8, "\x1bOQ", res.getStringCapability(.key_f2).?);
+    try t.expectEqualSlices(u8, "\x1bOR", res.getStringCapability(.key_f3).?);
+    try t.expectEqualSlices(u8, "\x1bOS", res.getStringCapability(.key_f4).?);
+    try t.expectEqualSlices(u8, "\x1b[15~", res.getStringCapability(.key_f5).?);
+    try t.expectEqualSlices(u8, "\x1b[17~", res.getStringCapability(.key_f6).?);
+    try t.expectEqualSlices(u8, "\x1b[18~", res.getStringCapability(.key_f7).?);
+    try t.expectEqualSlices(u8, "\x1b[19~", res.getStringCapability(.key_f8).?);
+    try t.expectEqualSlices(u8, "\x1b[20~", res.getStringCapability(.key_f9).?);
+    try t.expectEqualSlices(u8, "\x1bOH", res.getStringCapability(.key_home).?);
+    try t.expectEqualSlices(u8, "\x1b[2~", res.getStringCapability(.key_ic).?);
+    try t.expectEqualSlices(u8, "\x1bOD", res.getStringCapability(.key_left).?);
+    try t.expectEqualSlices(u8, "\x1b[6~", res.getStringCapability(.key_npage).?);
+    try t.expectEqualSlices(u8, "\x1b[5~", res.getStringCapability(.key_ppage).?);
+    try t.expectEqualSlices(u8, "\x1bOC", res.getStringCapability(.key_right).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2B", res.getStringCapability(.key_sf).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2A", res.getStringCapability(.key_sr).?);
+    try t.expectEqualSlices(u8, "\x1bOA", res.getStringCapability(.key_up).?);
+    try t.expectEqualSlices(u8, "\x1b[?1l\x1b>", res.getStringCapability(.keypad_local).?);
+    try t.expectEqualSlices(u8, "\x1b[?1h\x1b=", res.getStringCapability(.keypad_xmit).?);
+    try t.expectEqualSlices(u8, "\x1b[?1034l", res.getStringCapability(.meta_off).?);
+    try t.expectEqualSlices(u8, "\x1b[?1034h", res.getStringCapability(.meta_on).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dP", res.getStringCapability(.parm_dch).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dM", res.getStringCapability(.parm_delete_line).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dB", res.getStringCapability(.parm_down_cursor).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%d@", res.getStringCapability(.parm_ich).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dS", res.getStringCapability(.parm_index).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dL", res.getStringCapability(.parm_insert_line).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dD", res.getStringCapability(.parm_left_cursor).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dC", res.getStringCapability(.parm_right_cursor).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dT", res.getStringCapability(.parm_rindex).?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%dA", res.getStringCapability(.parm_up_cursor).?);
+    try t.expectEqualSlices(u8, "\x1b[i", res.getStringCapability(.print_screen).?);
+    try t.expectEqualSlices(u8, "\x1b[4i", res.getStringCapability(.prtr_off).?);
+    try t.expectEqualSlices(u8, "\x1b[5i", res.getStringCapability(.prtr_on).?);
+    try t.expectEqualSlices(u8, "%p1%c\x1b[%p2%{1}%-%db", res.getStringCapability(.repeat_char).?);
+    try t.expectEqualSlices(u8, "\x1bc", res.getStringCapability(.reset_1string).?);
+    try t.expectEqualSlices(u8, "\x1b[!p\x1b[?3;4l\x1b[4l\x1b>", res.getStringCapability(.reset_2string).?);
+    try t.expectEqualSlices(u8, "\x1b8", res.getStringCapability(.restore_cursor).?);
+    try t.expectEqualSlices(u8, "\x1b[%i%p1%dd", res.getStringCapability(.row_address).?);
+    try t.expectEqualSlices(u8, "\x1b7", res.getStringCapability(.save_cursor).?);
+    try t.expectEqualSlices(u8, "\x0a", res.getStringCapability(.scroll_forward).?);
+    try t.expectEqualSlices(u8, "\x1bM", res.getStringCapability(.scroll_reverse).?);
+    try t.expectEqualSlices(u8, "%?%p9%t\x1b(0%e\x1b(B%;\x1b[0%?%p6%t;1%;%?%p5%t;2%;%?%p2%t;4%;%?%p1%p3%|%t;7%;%?%p4%t;5%;%?%p7%t;8%;m", res.getStringCapability(.set_attributes).?);
+    try t.expectEqualSlices(u8, "\x1bH", res.getStringCapability(.set_tab).?);
+    try t.expectEqualSlices(u8, "\x09", res.getStringCapability(.tab).?);
+    try t.expectEqualSlices(u8, "\x1bOE", res.getStringCapability(.key_b2).?);
+    try t.expectEqualSlices(u8, "``aaffggiijjkkllmmnnooppqqrrssttuuvvwwxxyyzz{{||}}~~", res.getStringCapability(.acs_chars).?);
+    try t.expectEqualSlices(u8, "\x1b[Z", res.getStringCapability(.key_btab).?);
+    try t.expectEqualSlices(u8, "\x1b[?7h", res.getStringCapability(.enter_am_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[?7l", res.getStringCapability(.exit_am_mode).?);
+    try t.expectEqualSlices(u8, "\x1bOF", res.getStringCapability(.key_end).?);
+    try t.expectEqualSlices(u8, "\x1bOM", res.getStringCapability(.key_enter).?);
+    try t.expectEqualSlices(u8, "\x1b[3;2~", res.getStringCapability(.key_sdc).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2F", res.getStringCapability(.key_send).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2H", res.getStringCapability(.key_shome).?);
+    try t.expectEqualSlices(u8, "\x1b[2;2~", res.getStringCapability(.key_sic).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2D", res.getStringCapability(.key_sleft).?);
+    try t.expectEqualSlices(u8, "\x1b[6;2~", res.getStringCapability(.key_snext).?);
+    try t.expectEqualSlices(u8, "\x1b[5;2~", res.getStringCapability(.key_sprevious).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2C", res.getStringCapability(.key_sright).?);
+    try t.expectEqualSlices(u8, "\x1b[23~", res.getStringCapability(.key_f11).?);
+    try t.expectEqualSlices(u8, "\x1b[24~", res.getStringCapability(.key_f12).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2P", res.getStringCapability(.key_f13).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2Q", res.getStringCapability(.key_f14).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2R", res.getStringCapability(.key_f15).?);
+    try t.expectEqualSlices(u8, "\x1b[1;2S", res.getStringCapability(.key_f16).?);
+    try t.expectEqualSlices(u8, "\x1b[15;2~", res.getStringCapability(.key_f17).?);
+    try t.expectEqualSlices(u8, "\x1b[17;2~", res.getStringCapability(.key_f18).?);
+    try t.expectEqualSlices(u8, "\x1b[18;2~", res.getStringCapability(.key_f19).?);
+    try t.expectEqualSlices(u8, "\x1b[19;2~", res.getStringCapability(.key_f20).?);
+    try t.expectEqualSlices(u8, "\x1b[20;2~", res.getStringCapability(.key_f21).?);
+    try t.expectEqualSlices(u8, "\x1b[21;2~", res.getStringCapability(.key_f22).?);
+    try t.expectEqualSlices(u8, "\x1b[23;2~", res.getStringCapability(.key_f23).?);
+    try t.expectEqualSlices(u8, "\x1b[24;2~", res.getStringCapability(.key_f24).?);
+    try t.expectEqualSlices(u8, "\x1b[1;5P", res.getStringCapability(.key_f25).?);
+    try t.expectEqualSlices(u8, "\x1b[1;5Q", res.getStringCapability(.key_f26).?);
+    try t.expectEqualSlices(u8, "\x1b[1;5R", res.getStringCapability(.key_f27).?);
+    try t.expectEqualSlices(u8, "\x1b[1;5S", res.getStringCapability(.key_f28).?);
+    try t.expectEqualSlices(u8, "\x1b[15;5~", res.getStringCapability(.key_f29).?);
+    try t.expectEqualSlices(u8, "\x1b[17;5~", res.getStringCapability(.key_f30).?);
+    try t.expectEqualSlices(u8, "\x1b[18;5~", res.getStringCapability(.key_f31).?);
+    try t.expectEqualSlices(u8, "\x1b[19;5~", res.getStringCapability(.key_f32).?);
+    try t.expectEqualSlices(u8, "\x1b[20;5~", res.getStringCapability(.key_f33).?);
+    try t.expectEqualSlices(u8, "\x1b[21;5~", res.getStringCapability(.key_f34).?);
+    try t.expectEqualSlices(u8, "\x1b[23;5~", res.getStringCapability(.key_f35).?);
+    try t.expectEqualSlices(u8, "\x1b[24;5~", res.getStringCapability(.key_f36).?);
+    try t.expectEqualSlices(u8, "\x1b[1;6P", res.getStringCapability(.key_f37).?);
+    try t.expectEqualSlices(u8, "\x1b[1;6Q", res.getStringCapability(.key_f38).?);
+    try t.expectEqualSlices(u8, "\x1b[1;6R", res.getStringCapability(.key_f39).?);
+    try t.expectEqualSlices(u8, "\x1b[1;6S", res.getStringCapability(.key_f40).?);
+    try t.expectEqualSlices(u8, "\x1b[15;6~", res.getStringCapability(.key_f41).?);
+    try t.expectEqualSlices(u8, "\x1b[17;6~", res.getStringCapability(.key_f42).?);
+    try t.expectEqualSlices(u8, "\x1b[18;6~", res.getStringCapability(.key_f43).?);
+    try t.expectEqualSlices(u8, "\x1b[19;6~", res.getStringCapability(.key_f44).?);
+    try t.expectEqualSlices(u8, "\x1b[20;6~", res.getStringCapability(.key_f45).?);
+    try t.expectEqualSlices(u8, "\x1b[21;6~", res.getStringCapability(.key_f46).?);
+    try t.expectEqualSlices(u8, "\x1b[23;6~", res.getStringCapability(.key_f47).?);
+    try t.expectEqualSlices(u8, "\x1b[24;6~", res.getStringCapability(.key_f48).?);
+    try t.expectEqualSlices(u8, "\x1b[1;3P", res.getStringCapability(.key_f49).?);
+    try t.expectEqualSlices(u8, "\x1b[1;3Q", res.getStringCapability(.key_f50).?);
+    try t.expectEqualSlices(u8, "\x1b[1;3R", res.getStringCapability(.key_f51).?);
+    try t.expectEqualSlices(u8, "\x1b[1;3S", res.getStringCapability(.key_f52).?);
+    try t.expectEqualSlices(u8, "\x1b[15;3~", res.getStringCapability(.key_f53).?);
+    try t.expectEqualSlices(u8, "\x1b[17;3~", res.getStringCapability(.key_f54).?);
+    try t.expectEqualSlices(u8, "\x1b[18;3~", res.getStringCapability(.key_f55).?);
+    try t.expectEqualSlices(u8, "\x1b[19;3~", res.getStringCapability(.key_f56).?);
+    try t.expectEqualSlices(u8, "\x1b[20;3~", res.getStringCapability(.key_f57).?);
+    try t.expectEqualSlices(u8, "\x1b[21;3~", res.getStringCapability(.key_f58).?);
+    try t.expectEqualSlices(u8, "\x1b[23;3~", res.getStringCapability(.key_f59).?);
+    try t.expectEqualSlices(u8, "\x1b[24;3~", res.getStringCapability(.key_f60).?);
+    try t.expectEqualSlices(u8, "\x1b[1;4P", res.getStringCapability(.key_f61).?);
+    try t.expectEqualSlices(u8, "\x1b[1;4Q", res.getStringCapability(.key_f62).?);
+    try t.expectEqualSlices(u8, "\x1b[1;4R", res.getStringCapability(.key_f63).?);
+    try t.expectEqualSlices(u8, "\x1b[1K", res.getStringCapability(.clr_bol).?);
+    try t.expectEqualSlices(u8, "\x1b[%i%d;%dR", res.getStringCapability(.user6).?);
+    try t.expectEqualSlices(u8, "\x1b[6n", res.getStringCapability(.user7).?);
+    try t.expectEqualSlices(u8, "\x1b[?%[;0123456789]c", res.getStringCapability(.user8).?);
+    try t.expectEqualSlices(u8, "\x1b[c", res.getStringCapability(.user9).?);
+    try t.expectEqualSlices(u8, "\x1b[39;49m", res.getStringCapability(.orig_pair).?);
+    try t.expectEqualSlices(u8, "\x1b[3%?%p1%{1}%=%t4%e%p1%{3}%=%t6%e%p1%{4}%=%t1%e%p1%{6}%=%t3%e%p1%d%;m", res.getStringCapability(.set_foreground).?);
+    try t.expectEqualSlices(u8, "\x1b[4%?%p1%{1}%=%t4%e%p1%{3}%=%t6%e%p1%{4}%=%t1%e%p1%{6}%=%t3%e%p1%d%;m", res.getStringCapability(.set_background).?);
+    try t.expectEqualSlices(u8, "\x1b[3m", res.getStringCapability(.enter_italics_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[23m", res.getStringCapability(.exit_italics_mode).?);
+    try t.expectEqualSlices(u8, "\x1b[<", res.getStringCapability(.key_mouse).?);
+    try t.expectEqualSlices(u8, "\x1b[3%p1%dm", res.getStringCapability(.set_a_foreground).?);
+    try t.expectEqualSlices(u8, "\x1b[4%p1%dm", res.getStringCapability(.set_a_background).?);
+    try t.expectEqualSlices(u8, "\x1bl", res.getStringCapability(.memory_lock).?);
+    try t.expectEqualSlices(u8, "\x1bm", res.getStringCapability(.memory_unlock).?);
+
+    try t.expectEqual(null, res.getStringCapability(.command_character));
+    try t.expectEqual(null, res.getStringCapability(.cursor_mem_address));
+    try t.expectEqual(null, res.getStringCapability(.cursor_to_ll));
+    try t.expectEqual(null, res.getStringCapability(.dis_status_line));
+    try t.expectEqual(null, res.getStringCapability(.enter_delete_mode));
+    try t.expectEqual(null, res.getStringCapability(.enter_protected_mode));
+    try t.expectEqual(null, res.getStringCapability(.exit_delete_mode));
+    try t.expectEqual(null, res.getStringCapability(.form_feed));
+    try t.expectEqual(null, res.getStringCapability(.init_3string));
+    try t.expectEqual(null, res.getStringCapability(.insert_padding));
+    try t.expectEqual(null, res.getStringCapability(.key_catab));
+    try t.expectEqual(null, res.getStringCapability(.key_dl));
+    try t.expectEqual(null, res.getStringCapability(.key_eic));
+    try t.expectEqual(null, res.getStringCapability(.key_il));
+    try t.expectEqual(null, res.getStringCapability(.key_ll));
+    try t.expectEqual(null, res.getStringCapability(.key_stab));
+    try t.expectEqual(null, res.getStringCapability(.lab_f0));
+    try t.expectEqual(null, res.getStringCapability(.newline));
+    try t.expectEqual(null, res.getStringCapability(.pkey_key));
+    try t.expectEqual(null, res.getStringCapability(.reset_3string));
+    try t.expectEqual(null, res.getStringCapability(.set_window));
+    try t.expectEqual(null, res.getStringCapability(.to_status_line));
+    try t.expectEqual(null, res.getStringCapability(.key_c1));
+    try t.expectEqual(null, res.getStringCapability(.plab_norm));
+    try t.expectEqual(null, res.getStringCapability(.enter_xon_mode));
+    try t.expectEqual(null, res.getStringCapability(.xon_character));
+    try t.expectEqual(null, res.getStringCapability(.key_exit));
+    try t.expectEqual(null, res.getStringCapability(.key_sdl));
+    try t.expectEqual(null, res.getStringCapability(.key_seol));
+    try t.expectEqual(null, res.getStringCapability(.key_smessage));
+    try t.expectEqual(null, res.getStringCapability(.key_soptions));
+    try t.expectEqual(null, res.getStringCapability(.key_sprint));
+    try t.expectEqual(null, res.getStringCapability(.key_srsume));
+    try t.expectEqual(null, res.getStringCapability(.clear_margins));
+    try t.expectEqual(null, res.getStringCapability(.orig_colors));
+    try t.expectEqual(null, res.getStringCapability(.change_char_pitch));
+    try t.expectEqual(null, res.getStringCapability(.enter_leftward_mode));
+    try t.expectEqual(null, res.getStringCapability(.exit_leftward_mode));
+    try t.expectEqual(null, res.getStringCapability(.mouse_info));
+    try t.expectEqual(null, res.getStringCapability(.pkey_plab));
+    try t.expectEqual(null, res.getStringCapability(.box_chars_1));
+
+    try t.expectEqual(3, res.ext_flags.size);
+    try t.expectEqual(true, res.getExtendedFlag("AX"));
+    try t.expectEqual(true, res.getExtendedFlag("G0"));
+    try t.expectEqual(true, res.getExtendedFlag("XT"));
+
+    try t.expectEqual(0, res.ext_nums.size);
+
+    try t.expectEqual(62, res.ext_strs.size);
+
+    try t.expectEqualSlices(u8, "\x1b]112\x07", res.getExtendedString("Cr").?);
+    try t.expectEqualSlices(u8, "\x1b]12;%p1%s\x07", res.getExtendedString("Cs").?);
+    try t.expectEqualSlices(u8, "\x1b[3J", res.getExtendedString("E3").?);
+    try t.expectEqualSlices(u8, "\x1b]52;%p1%s;%p2%s\x07", res.getExtendedString("Ms").?);
+    try t.expectEqualSlices(u8, "\x1b[2 q", res.getExtendedString("Se").?);
+    try t.expectEqualSlices(u8, "\x1b[%p1%d q", res.getExtendedString("Ss").?);
+    try t.expectEqualSlices(u8, "\x1b[?1006;1000%?%p1%{1}%=%th%el%;", res.getExtendedString("XM").?);
+    try t.expectEqualSlices(u8, "\x1b[3;3~", res.getExtendedString("kDC3").?);
+    try t.expectEqualSlices(u8, "\x1b[3;4~", res.getExtendedString("kDC4").?);
+    try t.expectEqualSlices(u8, "\x1b[3;5~", res.getExtendedString("kDC5").?);
+    try t.expectEqualSlices(u8, "\x1b[3;6~", res.getExtendedString("kDC6").?);
+    try t.expectEqualSlices(u8, "\x1b[3;7~", res.getExtendedString("kDC7").?);
+    try t.expectEqualSlices(u8, "\x1b[1;2B", res.getExtendedString("kDN").?);
+    try t.expectEqualSlices(u8, "\x1b[1;3B", res.getExtendedString("kDN3").?);
+    try t.expectEqualSlices(u8, "\x1b[1;4B", res.getExtendedString("kDN4").?);
+    try t.expectEqualSlices(u8, "\x1b[1;5B", res.getExtendedString("kDN5").?);
+    try t.expectEqualSlices(u8, "\x1b[1;6B", res.getExtendedString("kDN6").?);
+    try t.expectEqualSlices(u8, "\x1b[1;7B", res.getExtendedString("kDN7").?);
+    try t.expectEqualSlices(u8, "\x1b[1;3F", res.getExtendedString("kEND3").?);
+    try t.expectEqualSlices(u8, "\x1b[1;4F", res.getExtendedString("kEND4").?);
+    try t.expectEqualSlices(u8, "\x1b[1;5F", res.getExtendedString("kEND5").?);
+    try t.expectEqualSlices(u8, "\x1b[1;6F", res.getExtendedString("kEND6").?);
+    try t.expectEqualSlices(u8, "\x1b[1;7F", res.getExtendedString("kEND7").?);
+    try t.expectEqualSlices(u8, "\x1b[1;3H", res.getExtendedString("kHOM3").?);
+    try t.expectEqualSlices(u8, "\x1b[1;4H", res.getExtendedString("kHOM4").?);
+    try t.expectEqualSlices(u8, "\x1b[1;5H", res.getExtendedString("kHOM5").?);
+    try t.expectEqualSlices(u8, "\x1b[1;6H", res.getExtendedString("kHOM6").?);
+    try t.expectEqualSlices(u8, "\x1b[1;7H", res.getExtendedString("kHOM7").?);
+    try t.expectEqualSlices(u8, "\x1b[2;3~", res.getExtendedString("kIC3").?);
+    try t.expectEqualSlices(u8, "\x1b[2;4~", res.getExtendedString("kIC4").?);
+    try t.expectEqualSlices(u8, "\x1b[2;5~", res.getExtendedString("kIC5").?);
+    try t.expectEqualSlices(u8, "\x1b[2;6~", res.getExtendedString("kIC6").?);
+    try t.expectEqualSlices(u8, "\x1b[2;7~", res.getExtendedString("kIC7").?);
+    try t.expectEqualSlices(u8, "\x1b[1;3D", res.getExtendedString("kLFT3").?);
+    try t.expectEqualSlices(u8, "\x1b[1;4D", res.getExtendedString("kLFT4").?);
+    try t.expectEqualSlices(u8, "\x1b[1;5D", res.getExtendedString("kLFT5").?);
+    try t.expectEqualSlices(u8, "\x1b[1;6D", res.getExtendedString("kLFT6").?);
+    try t.expectEqualSlices(u8, "\x1b[1;7D", res.getExtendedString("kLFT7").?);
+    try t.expectEqualSlices(u8, "\x1b[6;3~", res.getExtendedString("kNXT3").?);
+    try t.expectEqualSlices(u8, "\x1b[6;4~", res.getExtendedString("kNXT4").?);
+    try t.expectEqualSlices(u8, "\x1b[6;5~", res.getExtendedString("kNXT5").?);
+    try t.expectEqualSlices(u8, "\x1b[6;6~", res.getExtendedString("kNXT6").?);
+    try t.expectEqualSlices(u8, "\x1b[6;7~", res.getExtendedString("kNXT7").?);
+    try t.expectEqualSlices(u8, "\x1b[5;3~", res.getExtendedString("kPRV3").?);
+    try t.expectEqualSlices(u8, "\x1b[5;4~", res.getExtendedString("kPRV4").?);
+    try t.expectEqualSlices(u8, "\x1b[5;5~", res.getExtendedString("kPRV5").?);
+    try t.expectEqualSlices(u8, "\x1b[5;6~", res.getExtendedString("kPRV6").?);
+    try t.expectEqualSlices(u8, "\x1b[5;7~", res.getExtendedString("kPRV7").?);
+    try t.expectEqualSlices(u8, "\x1b[1;3C", res.getExtendedString("kRIT3").?);
+    try t.expectEqualSlices(u8, "\x1b[1;4C", res.getExtendedString("kRIT4").?);
+    try t.expectEqualSlices(u8, "\x1b[1;5C", res.getExtendedString("kRIT5").?);
+    try t.expectEqualSlices(u8, "\x1b[1;6C", res.getExtendedString("kRIT6").?);
+    try t.expectEqualSlices(u8, "\x1b[1;7C", res.getExtendedString("kRIT7").?);
+    try t.expectEqualSlices(u8, "\x1b[1;2A", res.getExtendedString("kUP").?);
+    try t.expectEqualSlices(u8, "\x1b[1;3A", res.getExtendedString("kUP3").?);
+    try t.expectEqualSlices(u8, "\x1b[1;4A", res.getExtendedString("kUP4").?);
+    try t.expectEqualSlices(u8, "\x1b[1;5A", res.getExtendedString("kUP5").?);
+    try t.expectEqualSlices(u8, "\x1b[1;6A", res.getExtendedString("kUP6").?);
+    try t.expectEqualSlices(u8, "\x1b[1;7A", res.getExtendedString("kUP7").?);
+    try t.expectEqualSlices(u8, "\x1b[29m", res.getExtendedString("rmxx").?);
+    try t.expectEqualSlices(u8, "\x1b[9m", res.getExtendedString("smxx").?);
+    try t.expectEqualSlices(u8, "\x1b[<%p1%d;%p2%d;%p3%d;%?%p4%tM%em%;", res.getExtendedString("xm").?);
+
+    try t.expectEqual(null, res.getExtendedString("E0"));
+    try t.expectEqual(null, res.getExtendedString("S0"));
+    try t.expectEqual(null, res.getExtendedString("TS"));
+    try t.expectEqual(null, res.getExtendedString("grbom"));
+    try t.expectEqual(null, res.getExtendedString("gsbom"));
+    try t.expectEqual(null, res.getExtendedString("kEND8"));
+    try t.expectEqual(null, res.getExtendedString("kHOM8"));
+    try t.expectEqual(null, res.getExtendedString("ka2"));
+    try t.expectEqual(null, res.getExtendedString("kb1"));
+    try t.expectEqual(null, res.getExtendedString("kb3"));
+    try t.expectEqual(null, res.getExtendedString("kc2"));
 }
+
+// test "findTermInfoPath" {
+//     {
+//         const file = openTermInfoFile("st-256color").?;
+//         defer file.close();
+
+//         const buf = try file.readToEndAlloc(std.testing.allocator, 32768);
+//         defer std.testing.allocator.free(buf);
+//         const res = try parse(ta, buf);
+//         defer res.destroy(ta);
+//         try t.expectEqualStrings("st-256color| simpleterm with 256 colors", res.names);
+//     }
+
+//     {
+//         const file = openTermInfoFile("xterm-256color").?;
+//         defer file.close();
+
+//         const buf = try file.readToEndAlloc(std.testing.allocator, 32768);
+//         defer std.testing.allocator.free(buf);
+//         const res = try parse(ta, buf);
+//         defer res.destroy(ta);
+//         try t.expectEqualStrings("xterm-256color|xterm with 256 colors", res.names);
+//     }
+
+//     try t.expectEqual(@as(?std.fs.File, null), openTermInfoFile(""));
+//     try t.expectEqual(@as(?std.fs.File, null), openTermInfoFile("Non-extant-terminal :)"));
+// }
 
 const ParamTestContext = struct {
     list: std.ArrayList(u8) = std.ArrayList(u8).init(t.allocator),
@@ -1536,7 +2566,6 @@ test "param string" {
 
     try validateParamSequence("", 9);
     try validateParamSequence("%p1%4d", 1);
-    try t.expectError(error.UnpoppedStack, validateParamSequence("%p1", 1));
     try t.expectError(error.InvalidSpecifier, validateParamSequence("%pp", 1));
     try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%p", 1));
     try t.expectError(error.UnexpectedEndOfInput, validateParamSequence("%P", 1));

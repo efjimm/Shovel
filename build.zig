@@ -24,8 +24,9 @@ pub fn build(b: *Build) void {
     const spoon_module = b.addModule("spoon", .{
         .root_source_file = .{ .path = "src/main.zig" },
     });
+    const opts_module = opts.createModule();
     spoon_module.addImport("wcwidth", wcwidth);
-    spoon_module.addImport("build_options", opts.createModule());
+    spoon_module.addImport("build_options", opts_module);
 
     const filter = b.option([]const u8, "test-filter", "Filter string for tests");
 
@@ -35,7 +36,7 @@ pub fn build(b: *Build) void {
         .optimize = optimize,
         .filter = filter,
     });
-    tests.root_module.addImport("build_options", opts.createModule());
+    tests.root_module.addImport("build_options", opts_module);
     tests.root_module.addImport("wcwidth", wcwidth);
 
     const run_tests = b.addRunArtifact(tests);
