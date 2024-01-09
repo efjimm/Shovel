@@ -17,7 +17,7 @@
 
 const std = @import("std");
 const Self = @This();
-const TermInfo = @import("terminfo.zig");
+const TermInfo = @import("TermInfo.zig");
 
 pub const Colour = union(enum(u5)) {
     const colour_desc = @import("colour_description.zig");

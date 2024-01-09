@@ -34,7 +34,7 @@ const constants = if (builtin.link_libc and builtin.os.tag == .linux) os.linux e
 const Style = @import("Style.zig");
 const spells = @import("spells.zig");
 const rpw = @import("restricted_padding_writer.zig");
-const TermInfo = @import("terminfo.zig");
+const TermInfo = @import("TermInfo.zig");
 
 const Term = @This();
 
