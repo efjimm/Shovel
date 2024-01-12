@@ -71,6 +71,15 @@ terminfo: ?*TermInfo = null,
 
 pub const CursorShape = spells.CursorShape;
 
+const InputMap = @import("input.zig").InputMap;
+
+pub fn createInputMap(term: *Term, allocator: Allocator) !InputMap {
+    return if (term.terminfo) |ti|
+        try ti.createInputMap(allocator)
+    else
+        InputMap.init();
+}
+
 pub const WriteError = os.WriteError;
 
 /// Dumb writer. Don't use.

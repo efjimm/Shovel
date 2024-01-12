@@ -19,6 +19,9 @@ pub fn main() !void {
     term = try spoon.Term.init(allocator, .{});
     defer term.deinit(allocator);
 
+    var map = try term.createInputMap(allocator);
+    defer map.deinit(allocator);
+
     try os.sigaction(os.SIG.WINCH, &os.Sigaction{
         .handler = .{ .handler = handleSigWinch },
         .mask = os.empty_sigset,
@@ -36,7 +39,7 @@ pub fn main() !void {
     var buf: [16]u8 = undefined;
     while (loop) {
         const slice = try term.readInput(&buf);
-        var it = spoon.inputParser(slice);
+        var it = spoon.inputParser(slice, &map);
         while (it.next()) |in| {
             // The input descriptor parser is not only useful for user-configuration.
             // Since it can work at comptime, you can use it to simplify the

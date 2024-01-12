@@ -16,5 +16,9 @@
             .url = "https://github.com/efjimm/zig-wcwidth/archive/79a3c702a2d7e7a0cccbf5e2b6f5c41f6c73d007.tar.gz",
             .hash = "12200122cb36b0c8b4f02bfedd381c98a3e666d5112de25837e5a07cd26cf08fc97e",
         },
+        .critbit = .{
+            .url = "https://github.com/efjimm/critbit-zig/archive/6431a17faa5884b115de4eff63e98a4920250377.tar.gz",
+            .hash = "1220bc5d4cead3cc3ff97d7381a014dd86876afabf44756f29727bf1872411127524",
+        },
     },
 }

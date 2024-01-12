@@ -16,6 +16,7 @@ pub fn build(b: *Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const wcwidth = b.dependency("wcwidth", .{}).module("wcwidth");
+    const critbit = b.dependency("critbit", .{}).module("critbit");
 
     const enable_logging = b.option(bool, "logging", "Enable logging") orelse false;
     const opts = b.addOptions();
@@ -26,6 +27,7 @@ pub fn build(b: *Build) void {
     });
     const opts_module = opts.createModule();
     spoon_module.addImport("wcwidth", wcwidth);
+    spoon_module.addImport("critbit", critbit);
     spoon_module.addImport("build_options", opts_module);
 
     const filter = b.option([]const u8, "test-filter", "Filter string for tests");
@@ -36,8 +38,9 @@ pub fn build(b: *Build) void {
         .optimize = optimize,
         .filter = filter,
     });
-    tests.root_module.addImport("build_options", opts_module);
     tests.root_module.addImport("wcwidth", wcwidth);
+    tests.root_module.addImport("critbit", critbit);
+    tests.root_module.addImport("build_options", opts_module);
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run all tests");

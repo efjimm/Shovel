@@ -1,3 +1,4 @@
+// TODO: Investigate using terminfo for mouse support
 const std = @import("std");
 const log = @import("log.zig");
 const getenv = std.os.getenv;
@@ -7,6 +8,9 @@ const native_endian = @import("builtin").cpu.arch.endian();
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const util = @import("util.zig");
+const critbit = @import("critbit");
+const CritBitMap = critbit.CritBitMap;
+const input = @import("input.zig");
 
 // Maximum length of terminfo definition files
 pub const max_file_length = 32768;
@@ -197,6 +201,130 @@ pub fn destroy(self: *Self, allocator: Allocator) void {
     self.ext_nums.deinit(allocator);
     self.ext_strs.deinit(allocator);
     allocator.destroy(self);
+}
+
+const keys = [_]struct { []const u8, input.Input }{
+    .{ "backspace", .{ .content = .backspace } },
+    .{ "beg", .{ .content = .begin } },
+    .{ "command", .{ .content = .command } },
+    .{ "dc", .{ .content = .delete } },
+    .{ "down", .{ .content = .arrow_down } },
+    .{ "end", .{ .content = .end } },
+    .{ "enter", .{ .content = .enter } },
+    .{ "home", .{ .content = .home } },
+    .{ "ic", .{ .content = .insert } },
+    .{ "left", .{ .content = .arrow_left } },
+    .{ "next", .{ .content = .page_down } },
+    .{ "npage", .{ .content = .page_down } },
+    .{ "ppage", .{ .content = .page_up } },
+    .{ "previous", .{ .content = .page_up } },
+    .{ "print", .{ .content = .print } },
+    .{ "right", .{ .content = .arrow_right } },
+    .{ "up", .{ .content = .arrow_up } },
+
+    .{ "sbeg", .{ .content = .begin, .mod_shift = true } },
+    .{ "btab", .{ .content = .tab, .mod_shift = true } },
+    .{ "scommand", .{ .content = .command, .mod_shift = true } },
+    .{ "sdc", .{ .content = .delete, .mod_shift = true } },
+    .{ "send", .{ .content = .end, .mod_shift = true } },
+    .{ "shome", .{ .content = .home, .mod_shift = true } },
+    .{ "sic", .{ .content = .insert, .mod_shift = true } },
+    .{ "sleft", .{ .content = .arrow_left, .mod_shift = true } },
+    .{ "sright", .{ .content = .arrow_right, .mod_shift = true } },
+    .{ "sprint", .{ .content = .print, .mod_shift = true } },
+
+    // Scroll forward/scroll backward are mapped to shift down/up
+    .{ "sf", .{ .content = .arrow_down, .mod_shift = true } },
+    .{ "sr", .{ .content = .arrow_up, .mod_shift = true } },
+
+    // termkey defines these to be the same as pageup/pagedown
+    .{ "next", .{ .content = .page_down } },
+    .{ "previous", .{ .content = .page_up } },
+    .{ "snext", .{ .content = .page_down, .mod_shift = true } },
+    .{ "sprevious", .{ .content = .page_up, .mod_shift = true } },
+
+    // These keys don't exist on modern keyboards
+    // .{ "clear", .clear },
+    // .{ "cancel", .cancel },
+    // .{ "close", .close },
+    // .{ "copy", .copy },
+    // .{ "exit", .exit },
+    // .{ "find", .find },
+    // .{ "help", .help },
+    // .{ "mark", .mark },
+    // .{ "message", .message },
+    // .{ "move", .move },
+    // .{ "open", .open },
+    // .{ "options", .options },
+    // .{ "redo", .redo },
+    // .{ "reference", .reference },
+    // .{ "refresh", .refresh },
+    // .{ "replace", .replace },
+    // .{ "restart", .restart },
+    // .{ "resume", .@"resume" },
+    // .{ "save", .save },
+    // .{ "select", .select },
+    // .{ "suspend", .@"suspend" },
+    // .{ "undo", .undo },
+
+    // .{ "scancel", .shift_cancel },
+    // .{ "scopy", .shift_copy },
+    // .{ "screate", .shift_create },
+    // .{ "sdl", .shift_delete_line },
+    // .{ "seol", .shift_clear_to_eol },
+    // .{ "sexit", .shift_exit },
+    // .{ "sfind", .shift_find },
+    // .{ "shelp", .shift_help },
+    // .{ "smessage", .shift_message },
+    // .{ "smove", .shift_move },
+    // .{ "soptions", .shift_options },
+    // .{ "sredo", .shift_redo },
+    // .{ "sreplace", .shift_replace },
+    // .{ "srsume", .shift_resume },
+    // .{ "ssave", .shift_save },
+    // .{ "ssuspend", .shift_suspend },
+    // .{ "sundo", .shift_undo },
+};
+
+pub fn createInputMap(
+    self: *Self,
+    allocator: Allocator,
+) !input.InputMap {
+    const print = std.fmt.comptimePrint;
+
+    var map = input.InputMap.init();
+    errdefer map.deinit(allocator);
+
+    if (self.getStringCapability(.delete_character)) |str| {
+        try map.put(allocator, str, .{ .content = .delete });
+    }
+
+    if (self.getStringCapability(.cursor_left)) |str| {
+        try map.put(allocator, str, .{ .content = .backspace });
+    }
+
+    inline for (keys) |k| {
+        const key_name, const in = k;
+        const name = comptime print("key_{s}", .{key_name});
+        const tag = comptime std.meta.stringToEnum(StringTag, name).?;
+        if (self.getStringCapability(tag)) |str| {
+            try map.put(allocator, str, in);
+        }
+    }
+
+    inline for (0..64) |i| {
+        const name = comptime print("key_f{d}", .{i});
+        const tag = comptime std.meta.stringToEnum(StringTag, name).?;
+        if (self.getStringCapability(tag)) |str| {
+            try map.put(allocator, str, .{
+                .content = .{ .function = i },
+            });
+        }
+    }
+
+    // TODO: Handle `key_mouse`?
+
+    return map;
 }
 
 pub const ParseError = error{
@@ -1361,7 +1489,7 @@ pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void
 
 const t = std.testing;
 const ta = t.allocator;
-const terminfo = @embedFile("descriptions/st-256color").*;
+const terminfo = @embedFile("descriptions/s/st-256color").*;
 
 test "Invalid" {
     try t.expectError(error.InvalidFormat, parse(ta, ""));
@@ -1538,7 +1666,7 @@ fn expectExtendedString(self: *Self, expected: []const u8, name: []const u8) !vo
 // }
 
 test "st" {
-    const x = @embedFile("descriptions/st-256color");
+    const x = @embedFile("descriptions/s/st-256color");
     const res = try parse(ta, x);
     defer res.destroy(ta);
 
@@ -1546,7 +1674,7 @@ test "st" {
 }
 
 test "tmux" {
-    const x = @embedFile("descriptions/tmux");
+    const x = @embedFile("descriptions/t/tmux");
     const res = try parse(ta, x);
     defer res.destroy(ta);
 
@@ -2129,7 +2257,7 @@ test "tmux" {
 }
 
 test "xterm" {
-    const x = @embedFile("descriptions/xterm");
+    const x = @embedFile("descriptions/x/xterm");
     const res = try parse(ta, x);
     defer res.destroy(ta);
 

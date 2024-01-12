@@ -27,6 +27,7 @@ pub const InputContent = @import("input.zig").InputContent;
 pub const restrictedPaddingWriter = @import("restricted_padding_writer.zig").restrictedPaddingWriter;
 pub const RestrictedPaddingWriter = @import("restricted_padding_writer.zig").RestrictedPaddingWriter;
 pub const TermInfo = @import("TermInfo.zig");
+pub const InputMap = @import("input.zig").InputMap;
 
 test {
     _ = @import("input.zig");

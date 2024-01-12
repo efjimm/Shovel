@@ -4,9 +4,13 @@ const spoon = @import("spoon");
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    var term = try spoon.Term.init(gpa.allocator(), .{});
-    defer term.deinit(gpa.allocator());
+    var term = try spoon.Term.init(allocator, .{});
+    defer term.deinit(allocator);
+
+    var map = try term.createInputMap(allocator);
+    defer map.deinit(allocator);
 
     try term.uncook(.{});
     try term.fetchSize();
@@ -17,7 +21,7 @@ pub fn main() !void {
         try render(&term);
 
         const slice = try term.readInput(&buf);
-        var iter = spoon.inputParser(slice);
+        var iter = spoon.inputParser(slice, &map);
         while (iter.next()) |in| {
             switch (in.content) {
                 .codepoint => |cp| switch (cp) {

@@ -30,9 +30,13 @@ pub fn main() !void {
 
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    term = try spoon.Term.init(gpa.allocator(), .{});
-    defer term.deinit(gpa.allocator());
+    term = try spoon.Term.init(allocator, .{});
+    defer term.deinit(allocator);
+
+    var map = try term.createInputMap(allocator);
+    defer map.deinit(allocator);
 
     try os.sigaction(os.SIG.WINCH, &os.Sigaction{
         .handler = .{ .handler = handleSigWinch },
@@ -47,16 +51,16 @@ pub fn main() !void {
 
     try term.fetchSize();
     try term.setWindowTitle("zig-spoon example: input-demo", .{});
-    try render();
+    try render(&map);
 
     while (loop) {
         read = (try term.readInput(&buf)).len;
         empty = false;
-        try render();
+        try render(&map);
     }
 }
 
-fn render() !void {
+fn render(map: *spoon.InputMap) !void {
     var rc = try term.getRenderContext(4096);
     defer rc.done() catch {};
 
@@ -139,7 +143,7 @@ fn render() !void {
         }
         try rpw.finish();
 
-        var it = spoon.inputParser(buf[0..read]);
+        var it = spoon.inputParser(buf[0..read], map);
         var i: u16 = 1;
         while (it.next()) |in| : (i += 1) {
             rpw = rc.restrictedPaddingWriter(term.width);
@@ -174,6 +178,7 @@ fn render() !void {
                 },
                 else => try writer.writeAll(@tagName(in.content)),
             }
+            if (in.mod_shift) try writer.writeAll(" +Shift");
             if (in.mod_alt) try writer.writeAll(" +Alt");
             if (in.mod_ctrl) try writer.writeAll(" +Ctrl");
             if (in.mod_super) try writer.writeAll(" +Super");
@@ -191,7 +196,6 @@ fn render() !void {
 
 fn handleSigWinch(_: c_int) callconv(.C) void {
     term.fetchSize() catch {};
-    render() catch {};
 }
 
 /// Custom panic handler, so that we can try to cook the terminal on a crash,
