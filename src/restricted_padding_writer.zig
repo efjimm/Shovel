@@ -4,6 +4,7 @@ const io = std.io;
 const assert = std.debug.assert;
 
 pub fn restrictedPaddingWriter(writer: anytype, width: u32) RestrictedPaddingWriter(@TypeOf(writer)) {
+    assert(width > 0);
     return .{
         .underlying_writer = writer,
         .width_left = width,
@@ -15,7 +16,11 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
         underlying_writer: UnderlyingWriter,
 
         width_left: u32,
-        codepoint_buf: ?u21 = null,
+        buf: union(enum) {
+            codepoint: u21,
+            byte: u8,
+            none,
+        } = .none,
         finished: bool = false,
 
         const Self = @This();
@@ -30,30 +35,49 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
 
         pub fn write(self: *Self, bytes: []const u8) WriteError!usize {
             if (self.finished) {
-                if (self.codepoint_buf) |_| {
-                    self.codepoint_buf = null;
+                if (self.buf != .none) {
                     try self.underlying_writer.writeAll("…");
+                    self.buf = .none;
                 }
                 return bytes.len;
             }
 
-            var iter = std.unicode.Utf8Iterator{
-                .bytes = bytes,
-                .i = 0,
-            };
+            var i: usize = 0;
+            while (i < bytes.len) {
+                if (std.ascii.isControl(bytes[i])) {
+                    try self.writeByte(bytes[i], i == bytes.len - 1);
+                    i += 1;
+                    continue;
+                }
 
-            while (iter.nextCodepointSlice()) |slice| {
-                const cp = std.unicode.utf8Decode(slice) catch unreachable;
+                const cp_len = std.unicode.utf8ByteSequenceLength(bytes[i]) catch {
+                    try self.writeByte(bytes[i], i == bytes.len - 1);
+                    i += 1;
+                    continue;
+                };
+
+                if (i + cp_len > bytes.len) {
+                    try self.writeByte(bytes[i], i == bytes.len - 1);
+                    i += 1;
+                    continue;
+                }
+
+                const cp = std.unicode.utf8Decode(bytes[i..][0..cp_len]) catch {
+                    try self.writeByte(bytes[i], i == bytes.len - 1);
+                    i += 1;
+                    continue;
+                };
+
                 const width = wcWidth(cp);
                 if (width == self.width_left) {
                     self.finished = true;
-                    if (iter.i >= bytes.len) {
+                    if (i + cp_len >= bytes.len) {
                         // Have no more input after this - buffer the codepoint
-                        self.codepoint_buf = cp;
+                        self.buf = .{ .codepoint = cp };
                         self.width_left -= width;
                     } else {
                         // Have more input after this - truncate
-                        self.codepoint_buf = null;
+                        self.buf = .none;
                         self.width_left -= 1;
                         try self.underlying_writer.writeAll("…");
                     }
@@ -61,29 +85,67 @@ pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
                     break;
                 } else if (width > self.width_left) {
                     assert(self.width_left > 0);
-                    self.codepoint_buf = null;
+                    self.buf = .none;
                     self.width_left -= 1;
                     self.finished = true;
                     try self.underlying_writer.writeAll("…");
                     break;
                 }
 
+                try self.underlying_writer.writeAll(bytes[i..][0..cp_len]);
                 self.width_left -= width;
-                try self.underlying_writer.writeAll(slice);
+
+                i += cp_len;
             }
 
             return bytes.len;
         }
 
         pub fn finish(self: *Self) WriteError!void {
-            if (self.codepoint_buf) |cp| {
-                try std.fmt.formatUnicodeCodepoint(cp, .{}, self.underlying_writer);
+            switch (self.buf) {
+                .codepoint => |cp| try std.fmt.formatUnicodeCodepoint(cp, .{}, self.underlying_writer),
+                .byte => |b| try self.underlying_writer.print("{}", .{
+                    std.fmt.fmtSliceEscapeUpper(&.{b}),
+                }),
+                .none => {},
             }
         }
 
         pub fn pad(self: *Self) WriteError!void {
             try self.finish();
             try self.underlying_writer.writeByteNTimes(' ', self.width_left);
+        }
+
+        fn writeByte(self: *Self, byte: u8, last: bool) WriteError!void {
+            if (std.ascii.isPrint(byte)) {
+                return self.underlying_writer.writeByte(byte);
+            }
+
+            if (self.width_left == 3) {
+                self.finished = true;
+                if (last) {
+                    self.buf = .{ .byte = byte };
+                    self.width_left -= 3;
+                } else {
+                    try self.underlying_writer.writeAll("…");
+                    self.buf = .none;
+                    self.width_left -= 1;
+                }
+                return;
+            }
+
+            if (self.width_left < 3) {
+                try self.underlying_writer.writeAll("…");
+                self.buf = .none;
+                self.width_left -= 1;
+                self.finished = true;
+                return;
+            }
+
+            try self.underlying_writer.print("{}", .{
+                std.fmt.fmtSliceEscapeUpper(&.{byte}),
+            });
+            self.width_left -= 3;
         }
     };
 }
@@ -113,7 +175,13 @@ test "RestrictedPaddingWriter" {
         .{ .pad, 16, "漢字漢字漢字漢字", "漢字漢字漢字漢字" },
         .{ .pad, 20, "漢字漢字漢字漢字", "漢字漢字漢字漢字    " },
         .{ .pad, 6, "漢字漢字", "漢字… " },
+        .{ .pad, 2, "\x01", "… " },
+        .{ .finish, 3, "\x01", "\\x01" },
+        .{ .pad, 5, "\xff", "\\xFF  " },
     };
 
-    inline for (data) |d| try testWriter(d[0], d[1], d[2], d[3]);
+    inline for (data) |d| {
+        const end, const width, const input, const expected = d;
+        try testWriter(end, width, input, expected);
+    }
 }
