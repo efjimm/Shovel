@@ -226,7 +226,10 @@ pub const InputParser = struct {
         // character followed by the letter 'O'. Who knows! Let the heuristics
         // begin.
         if (self.bytes[1] == 'O' and self.bytes.len > 2) {
-            if (singleLetterSpecialInput(self.bytes[2])) |res| return res;
+            if (singleLetterSpecialInput(self.bytes[2])) |res| {
+                self.advanceBufferBy("\x1BOA".len);
+                return res;
+            }
         }
 
         // This may be either a M-[a-z] code, or we accidentally received an
@@ -553,6 +556,13 @@ test "input parser: Mixed legacy terminal utf8 and kitty u21 codepoint" {
     try testing.expect(parser.next() == null);
 }
 
+test "input parser: O escape sequence" {
+    const testing = std.testing;
+    var parser = inputParser("\x1BOP", null);
+    try testing.expectEqual(Input{ .content = .{ .function = 1 } }, parser.next().?);
+    try testing.expectEqual(null, parser.next());
+}
+
 test "input parser: Some random weird edge cases" {
     const testing = std.testing;
     var parser = inputParser("\x1B\x1BO\x1Ba", null);
@@ -626,10 +636,10 @@ test "input parser: terminfo escape sequences" {
     const t = std.testing;
 
     const Context = struct {
-        map: *InputMap,
+        term: *Term,
 
         fn testInput(ctx: *@This(), input: []const u8, expected: Input) !void {
-            var parser = inputParser(input, ctx.map);
+            var parser = inputParser(input, ctx.term);
             try t.expectEqual(expected, parser.next().?);
         }
     };
@@ -637,10 +647,13 @@ test "input parser: terminfo escape sequences" {
     const ti = try TermInfo.parse(t.allocator, @embedFile("descriptions/x/xterm"));
     defer ti.destroy(t.allocator);
 
-    var map = try ti.createInputMap(t.allocator);
-    defer map.deinit(t.allocator);
+    var term = Term{
+        .tty = -1,
+        .terminfo = ti,
+    };
+    try term.useTermInfoInputs(t.allocator);
 
-    var ctx: Context = .{ .map = &map };
+    var ctx: Context = .{ .term = &term };
     try ctx.testInput("\x08", .{ .content = .backspace });
     try ctx.testInput("\x1b[3~", .{ .content = .delete });
     try ctx.testInput("\x1bOB", .{ .content = .arrow_down });
