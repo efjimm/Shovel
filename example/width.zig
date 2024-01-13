@@ -9,9 +9,6 @@ pub fn main() !void {
     var term = try spoon.Term.init(allocator, .{});
     defer term.deinit(allocator);
 
-    var map = try term.createInputMap(allocator);
-    defer map.deinit(allocator);
-
     try term.uncook(.{});
     try term.fetchSize();
 
@@ -21,7 +18,7 @@ pub fn main() !void {
         try render(&term);
 
         const slice = try term.readInput(&buf);
-        var iter = spoon.inputParser(slice, &map);
+        var iter = term.inputParser(slice);
         while (iter.next()) |in| {
             switch (in.content) {
                 .codepoint => |cp| switch (cp) {

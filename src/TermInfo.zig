@@ -16,6 +16,8 @@ const input = @import("input.zig");
 pub const max_file_length = 32768;
 const Self = @This();
 
+input_map: ?input.InputMap = null,
+
 names: [:0]const u8 = "",
 string_table: []const u8 = "",
 ext_string_table: []u8 = "",
@@ -194,6 +196,7 @@ fn readNonNegative(src: *const [2]u8) ParseError!u15 {
 }
 
 pub fn destroy(self: *Self, allocator: Allocator) void {
+    if (self.input_map) |*map| map.deinit(allocator);
     allocator.free(self.names);
     allocator.free(self.string_table);
     allocator.free(self.ext_string_table);
@@ -296,11 +299,17 @@ pub fn createInputMap(
     errdefer map.deinit(allocator);
 
     if (self.getStringCapability(.delete_character)) |str| {
-        try map.put(allocator, str, .{ .content = .delete });
+        map.put(allocator, str, .{ .content = .delete }) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.IsPrefix => {},
+        };
     }
 
     if (self.getStringCapability(.cursor_left)) |str| {
-        try map.put(allocator, str, .{ .content = .backspace });
+        map.put(allocator, str, .{ .content = .backspace }) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.IsPrefix => {},
+        };
     }
 
     inline for (keys) |k| {
@@ -308,7 +317,10 @@ pub fn createInputMap(
         const name = comptime print("key_{s}", .{key_name});
         const tag = comptime std.meta.stringToEnum(StringTag, name).?;
         if (self.getStringCapability(tag)) |str| {
-            try map.put(allocator, str, in);
+            map.put(allocator, str, in) catch |err| switch (err) {
+                error.OutOfMemory => |e| return e,
+                error.IsPrefix => {},
+            };
         }
     }
 
@@ -316,14 +328,18 @@ pub fn createInputMap(
         const name = comptime print("key_f{d}", .{i});
         const tag = comptime std.meta.stringToEnum(StringTag, name).?;
         if (self.getStringCapability(tag)) |str| {
-            try map.put(allocator, str, .{
+            map.put(allocator, str, .{
                 .content = .{ .function = i },
-            });
+            }) catch |err| switch (err) {
+                error.OutOfMemory => |e| return e,
+                error.IsPrefix => {},
+            };
         }
     }
 
     // TODO: Handle `key_mouse`?
 
+    self.input_map = map;
     return map;
 }
 

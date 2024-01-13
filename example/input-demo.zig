@@ -27,6 +27,8 @@ pub fn main() !void {
         }
         break :blk false;
     };
+    log_file = try std.fs.cwd().createFile("log.txt", .{});
+    defer log_file.close();
 
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     defer _ = gpa.deinit();
@@ -34,9 +36,6 @@ pub fn main() !void {
 
     term = try spoon.Term.init(allocator, .{});
     defer term.deinit(allocator);
-
-    var map = try term.createInputMap(allocator);
-    defer map.deinit(allocator);
 
     try os.sigaction(os.SIG.WINCH, &os.Sigaction{
         .handler = .{ .handler = handleSigWinch },
@@ -51,16 +50,35 @@ pub fn main() !void {
 
     try term.fetchSize();
     try term.setWindowTitle("zig-spoon example: input-demo", .{});
-    try render(&map);
+    try render();
 
     while (loop) {
         read = (try term.readInput(&buf)).len;
         empty = false;
-        try render(&map);
+        try render();
     }
 }
 
-fn render(map: *spoon.InputMap) !void {
+var log_file: std.fs.File = undefined;
+
+pub const std_options = struct {
+    pub const log_level = .debug;
+    pub const logFn = log;
+};
+
+pub fn log(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const writer = log_file.writer();
+    writer.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
+    writer.print(format, args) catch {};
+    writer.writeByte('\n') catch {};
+}
+
+fn render() !void {
     var rc = try term.getRenderContext(4096);
     defer rc.done() catch {};
 
@@ -70,6 +88,9 @@ fn render(map: *spoon.InputMap) !void {
     try rc.setStyle(.{ .fg = .green, .attrs = .{ .reverse = true } });
     var rpw = rc.restrictedPaddingWriter(term.width);
     try rpw.writer().writeAll(" Spoon example program: input-demo");
+    try rpw.writer().print("kitty keyboard {s}", .{
+        if (term.kitty_enabled) "active" else "inactive",
+    });
     try rpw.pad();
 
     try rc.moveCursorTo(1, 0);
@@ -143,7 +164,7 @@ fn render(map: *spoon.InputMap) !void {
         }
         try rpw.finish();
 
-        var it = spoon.inputParser(buf[0..read], map);
+        var it = term.inputParser(buf[0..read]);
         var i: u16 = 1;
         while (it.next()) |in| : (i += 1) {
             rpw = rc.restrictedPaddingWriter(term.width);

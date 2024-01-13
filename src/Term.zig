@@ -45,6 +45,8 @@ const UncookOptions = struct {
 
 const TermConfig = struct {
     tty_name: []const u8 = "/dev/tty",
+    use_terminfo: bool = true,
+    terminfo_inputs: bool = true,
 };
 
 /// The original termios configuration saved when entering raw mode. null if in cooked mode,
@@ -69,15 +71,25 @@ codepoint_len: u3 = 0,
 
 terminfo: ?*TermInfo = null,
 
+/// True if the kitty keyboard protocol is active.
+kitty_enabled: bool = false,
+
 pub const CursorShape = spells.CursorShape;
 
 const InputMap = @import("input.zig").InputMap;
 
-pub fn createInputMap(term: *Term, allocator: Allocator) !InputMap {
-    return if (term.terminfo) |ti|
-        try ti.createInputMap(allocator)
-    else
-        InputMap.init();
+pub fn useTermInfoInputs(term: *Term, allocator: Allocator) !void {
+    if (term.terminfo) |ti| {
+        _ = try ti.createInputMap(allocator);
+    }
+}
+
+const input = @import("input.zig");
+const InputParser = input.InputParser;
+
+/// See `input.inputParser`
+pub fn inputParser(term: *Term, bytes: []const u8) InputParser {
+    return input.inputParser(bytes, term);
 }
 
 pub const WriteError = os.WriteError;
@@ -122,13 +134,21 @@ pub fn init(allocator: Allocator, term_config: TermConfig) (InitError || Allocat
     var ret = try initInternal(term_config);
     errdefer ret.deinit(allocator);
 
-    ret.terminfo = getTermInfo(allocator) catch |err| switch (err) {
-        error.OutOfMemory => |e| return e,
-        error.NoTermInfo => blk: {
-            log.warn("Proceeding without terminfo definitions", .{});
-            break :blk null;
-        },
-    };
+    if (term_config.use_terminfo) {
+        ret.terminfo = getTermInfo(allocator) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.NoTermInfo => blk: {
+                log.warn("Proceeding without terminfo definitions", .{});
+                break :blk null;
+            },
+        };
+
+        if (term_config.terminfo_inputs) {
+            try ret.useTermInfoInputs(allocator);
+        }
+    } else {
+        ret.terminfo = null;
+    }
 
     return ret;
 }
@@ -435,12 +455,42 @@ pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
     }) |str| try _writer.writeAll(str);
 
     if (options.request_kitty_keyboard_protocol) {
-        try _writer.writeAll(spells.enable_kitty_keyboard);
+        try self.enableKittyKeyboard(&buffered_writer);
     }
+
     if (options.request_mouse_tracking) {
         try _writer.writeAll(spells.enable_mouse_tracking);
     }
     try buffered_writer.flush();
+}
+
+fn enableKittyKeyboard(term: *Term, buffered_writer: anytype) !void {
+    const _writer = buffered_writer.writer();
+    try _writer.writeAll(spells.enable_kitty_keyboard);
+    try _writer.writeAll("\x1B[?u");
+    try buffered_writer.flush();
+    var poll_fds: [1]os.pollfd = .{
+        .{
+            .fd = term.tty,
+            .events = os.POLL.IN,
+            .revents = 0,
+        },
+    };
+    _ = os.poll(&poll_fds, 5) catch {};
+    if (poll_fds[0].revents & os.POLL.IN != 0) {
+        var buf: [16]u8 = undefined;
+        if (os.read(term.tty, &buf)) |len| {
+            if (std.mem.eql(u8, buf[0..len], "\x1b[?1u")) {
+                // Got the correct response from the terminal, kitty keyboard is enabled
+                term.kitty_enabled = true;
+                log.info("Kitty keyboard enabled", .{});
+            }
+        } else |err| {
+            log.warn("Could not read kitty keyboard query response from terminal: {}", .{err});
+        }
+    } else {
+        log.info("Kitty keyboard not found, disabling", .{});
+    }
 }
 
 pub const CookError = os.WriteError || os.TermiosSetError;
@@ -455,8 +505,13 @@ pub fn cook(self: *Term) CookError!void {
 
     var buffered_writer = self.bufferedWriter(128);
     const _writer = buffered_writer.writer();
+
+    if (self.kitty_enabled) {
+        try _writer.writeAll(spells.disable_kitty_keyboard);
+        self.kitty_enabled = false;
+    }
+
     inline for (.{
-        spells.disable_kitty_keyboard,
         spells.disable_mouse_tracking,
         self.getStringCapability(.clear_screen) orelse "",
         self.getStringCapability(.exit_ca_mode) orelse "",
