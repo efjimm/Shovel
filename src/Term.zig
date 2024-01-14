@@ -44,7 +44,6 @@ const UncookOptions = struct {
 };
 
 const TermConfig = struct {
-    tty_name: []const u8 = "/dev/tty",
     use_terminfo: bool = true,
     terminfo_inputs: bool = true,
 };
@@ -60,7 +59,6 @@ height: u16 = 0,
 /// Are we currently rendering?
 currently_rendering: bool = false,
 
-/// Descriptor of opened file.
 tty: os.fd_t,
 
 cursor_visible: bool = true,
@@ -78,12 +76,6 @@ pub const CursorShape = spells.CursorShape;
 
 const InputMap = @import("input.zig").InputMap;
 
-pub fn useTermInfoInputs(term: *Term, allocator: Allocator) !void {
-    if (term.terminfo) |ti| {
-        _ = try ti.createInputMap(allocator);
-    }
-}
-
 const input = @import("input.zig");
 const InputParser = input.InputParser;
 
@@ -94,20 +86,16 @@ pub fn inputParser(term: *Term, bytes: []const u8) InputParser {
 
 pub const WriteError = os.WriteError;
 
-/// Dumb writer. Don't use.
 const Writer = io.Writer(os.fd_t, os.WriteError, os.write);
-fn writer(self: Term) Writer {
+fn unbufferedWriter(self: Term) Writer {
     return .{ .context = self.tty };
 }
 
-/// Buffered writer. Use.
 fn bufferedWriter(
     self: Term,
     comptime buffer_size: usize,
 ) io.BufferedWriter(buffer_size, Writer) {
-    return io.BufferedWriter(buffer_size, Writer){
-        .unbuffered_writer = self.writer(),
-    };
+    return .{ .unbuffered_writer = self.unbufferedWriter() };
 }
 
 // NotATerminal + a subset of os.OpenError, removing all errors which aren't reachable due to how
@@ -131,37 +119,8 @@ pub const InitError = error{
 };
 
 pub fn init(allocator: Allocator, term_config: TermConfig) (InitError || Allocator.Error)!Term {
-    var ret = try initInternal(term_config);
-    errdefer ret.deinit(allocator);
-
-    if (term_config.use_terminfo) {
-        ret.terminfo = getTermInfo(allocator) catch |err| switch (err) {
-            error.OutOfMemory => |e| return e,
-            error.NoTermInfo => blk: {
-                log.warn("Proceeding without terminfo definitions", .{});
-                break :blk null;
-            },
-        };
-
-        if (term_config.terminfo_inputs) {
-            try ret.useTermInfoInputs(allocator);
-        }
-    } else {
-        ret.terminfo = null;
-    }
-
-    return ret;
-}
-
-pub fn initNoTermInfo(term_config: TermConfig) InitError!Term {
-    const ret = try initInternal(term_config);
-    log.info("spoon initialized without terminfo definitions", .{});
-    return ret;
-}
-
-fn initInternal(term_config: TermConfig) InitError!Term {
-    const ret = Term{
-        .tty = os.open(term_config.tty_name, constants.O.RDWR, 0) catch |err| switch (err) {
+    var ret = Term{
+        .tty = os.open("/dev/tty", constants.O.RDWR, 0) catch |err| switch (err) {
             // None of these are reachable with the flags we pass to os.open
             error.DeviceBusy,
             error.FileLocksNotSupported,
@@ -187,7 +146,7 @@ fn initInternal(term_config: TermConfig) InitError!Term {
             error.SystemFdQuotaExceeded,
             error.SystemResources,
             error.Unexpected,
-            => |new_err| return new_err,
+            => |e| return e,
         },
         .terminfo = null,
     };
@@ -195,8 +154,37 @@ fn initInternal(term_config: TermConfig) InitError!Term {
 
     if (!os.isatty(ret.tty))
         return error.NotATerminal;
+    errdefer ret.deinit(allocator);
+
+    if (term_config.use_terminfo) {
+        ret.terminfo = getTermInfo(allocator) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.NoTermInfo => blk: {
+                log.warn("Proceeding without terminfo definitions", .{});
+                break :blk null;
+            },
+        };
+
+        if (term_config.terminfo_inputs) {
+            try ret.useTermInfoInputs(allocator);
+        }
+    }
 
     return ret;
+}
+
+pub fn deinit(self: *Term, allocator: Allocator) void {
+    assert(!self.currently_rendering);
+
+    // It's probably a good idea to cook the terminal on exit.
+    if (!self.isCooked())
+        self.cook() catch {};
+
+    if (self.terminfo) |ti|
+        ti.destroy(allocator);
+
+    os.close(self.tty);
+    self.* = undefined;
 }
 
 fn getTermInfo(allocator: Allocator) !*TermInfo {
@@ -234,18 +222,10 @@ fn getTermInfo(allocator: Allocator) !*TermInfo {
     return error.NoTermInfo;
 }
 
-pub fn deinit(self: *Term, allocator: Allocator) void {
-    assert(!self.currently_rendering);
-
-    // It's probably a good idea to cook the terminal on exit.
-    if (!self.isCooked())
-        self.cook() catch {};
-
-    if (self.terminfo) |ti|
-        ti.destroy(allocator);
-
-    os.close(self.tty);
-    self.* = undefined;
+pub fn useTermInfoInputs(term: *Term, allocator: Allocator) !void {
+    if (term.terminfo) |ti| {
+        _ = try ti.createInputMap(allocator);
+    }
 }
 
 const SetBlockingReadError = os.TermiosGetError || os.TermiosSetError;
@@ -445,29 +425,29 @@ pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
     try os.tcsetattr(self.tty, .FLUSH, raw_termios);
 
     var buffered_writer = self.bufferedWriter(256);
-    const _writer = buffered_writer.writer();
+    const writer = buffered_writer.writer();
     inline for (.{
         self.getStringCapability(.save_cursor) orelse spells.save_cursor_position,
         self.getStringCapability(.enter_ca_mode) orelse spells.enter_alt_buffer,
         self.getStringCapability(.exit_insert_mode) orelse spells.overwrite_mode,
         self.getStringCapability(.exit_am_mode) orelse spells.reset_auto_wrap,
         self.getStringCapability(.cursor_invisible) orelse spells.hide_cursor,
-    }) |str| try _writer.writeAll(str);
+    }) |str| try writer.writeAll(str);
 
     if (options.request_kitty_keyboard_protocol) {
         try self.enableKittyKeyboard(&buffered_writer);
     }
 
     if (options.request_mouse_tracking) {
-        try _writer.writeAll(spells.enable_mouse_tracking);
+        try writer.writeAll(spells.enable_mouse_tracking);
     }
     try buffered_writer.flush();
 }
 
 fn enableKittyKeyboard(term: *Term, buffered_writer: anytype) !void {
-    const _writer = buffered_writer.writer();
-    try _writer.writeAll(spells.enable_kitty_keyboard);
-    try _writer.writeAll("\x1B[?u");
+    const writer = buffered_writer.writer();
+    try writer.writeAll(spells.enable_kitty_keyboard);
+    try writer.writeAll("\x1B[?u");
     try buffered_writer.flush();
     var poll_fds: [1]os.pollfd = .{
         .{
@@ -504,10 +484,10 @@ pub fn cook(self: *Term) CookError!void {
     self.cooked_termios = null;
 
     var buffered_writer = self.bufferedWriter(128);
-    const _writer = buffered_writer.writer();
+    const writer = buffered_writer.writer();
 
     if (self.kitty_enabled) {
-        try _writer.writeAll(spells.disable_kitty_keyboard);
+        try writer.writeAll(spells.disable_kitty_keyboard);
         self.kitty_enabled = false;
     }
 
@@ -517,7 +497,7 @@ pub fn cook(self: *Term) CookError!void {
         self.getStringCapability(.exit_ca_mode) orelse "",
         self.getStringCapability(.cursor_visible) orelse "",
         self.getStringCapability(.exit_attribute_mode) orelse "",
-    }) |str| try _writer.writeAll(str);
+    }) |str| try writer.writeAll(str);
     try buffered_writer.flush();
 }
 
@@ -537,33 +517,9 @@ pub fn fetchSize(self: *Term) os.UnexpectedError!void {
 /// Set window title using OSC 2. Shall not be called while rendering.
 pub fn setWindowTitle(self: *Term, comptime fmt: []const u8, args: anytype) WriteError!void {
     assert(!self.currently_rendering);
-    const _writer = self.writer();
-    try _writer.print("\x1b]2;" ++ fmt ++ "\x1b\\", args);
-}
-
-pub fn getRenderContextSafe(
-    self: *Term,
-    comptime buffer_size: usize,
-) WriteError!?RenderContext(buffer_size) {
-    if (self.currently_rendering or self.isCooked())
-        return null;
-
-    self.currently_rendering = true;
-    errdefer self.currently_rendering = false;
-
-    var rc = RenderContext(buffer_size){
-        .term = self,
-        .buffer = self.bufferedWriter(buffer_size),
-    };
-
-    const _writer = rc.buffer.writer();
-    if (rc.term.getExtendedString("Sync")) |sync| {
-        try TermInfo.writeParamSequence(sync, _writer, .{1});
-    }
-    if (self.getStringCapability(.exit_attribute_mode)) |srg0|
-        try _writer.writeAll(srg0);
-
-    return rc;
+    var bw = self.bufferedWriter(1024);
+    bw.writer().print("\x1b]2;" ++ fmt ++ "\x1b\\", args) catch unreachable;
+    try bw.flush();
 }
 
 pub fn getRenderContext(
@@ -572,7 +528,22 @@ pub fn getRenderContext(
 ) WriteError!RenderContext(buffer_size) {
     assert(!self.currently_rendering);
     assert(!self.isCooked());
-    return (try self.getRenderContextSafe(buffer_size)) orelse unreachable;
+
+    var rc: RenderContext(buffer_size) = .{
+        .term = self,
+        .buffer = self.bufferedWriter(buffer_size),
+    };
+
+    const writer = rc.buffer.writer();
+
+    if (rc.term.getExtendedString("Sync")) |sync|
+        try TermInfo.writeParamSequence(sync, writer, .{1});
+
+    if (self.getStringCapability(.exit_attribute_mode)) |srg0|
+        try writer.writeAll(srg0);
+
+    self.currently_rendering = true;
+    return rc;
 }
 
 pub fn RenderContext(comptime buffer_size: usize) type {
@@ -590,9 +561,9 @@ pub fn RenderContext(comptime buffer_size: usize) type {
             assert(rc.term.currently_rendering);
             assert(!rc.term.isCooked());
             defer rc.term.currently_rendering = false;
-            const _writer = rc.buffer.writer();
+            const writer = rc.buffer.writer();
             if (rc.term.getExtendedString("Sync")) |sync| {
-                try TermInfo.writeParamSequence(sync, _writer, .{2});
+                try TermInfo.writeParamSequence(sync, writer, .{2});
             }
             try rc.buffer.flush();
         }
@@ -602,48 +573,48 @@ pub fn RenderContext(comptime buffer_size: usize) type {
         /// functions like `clearToEol` and `clearToBot`.
         pub fn clear(rc: *Self) WriteError!void {
             assert(rc.term.currently_rendering);
-            const _writer = rc.buffer.writer();
-            try _writer.writeAll(rc.term.getStringCapability(.clear_screen) orelse spells.clear);
+            const writer = rc.buffer.writer();
+            try writer.writeAll(rc.term.getStringCapability(.clear_screen) orelse spells.clear);
         }
 
         /// Clears the screen from the current line to the bottom.
         pub fn clearToBot(rc: *Self) WriteError!void {
             assert(rc.term.curerntly_rendering);
-            const _writer = rc.buffer.writer();
-            try _writer.writeAll(rc.term.getStringCapability(.clr_eos) orelse spells.clear_to_bot);
+            const writer = rc.buffer.writer();
+            try writer.writeAll(rc.term.getStringCapability(.clr_eos) orelse spells.clear_to_bot);
         }
 
         /// Clears from the cursor position to the end of the line.
         pub fn clearToEol(rc: *Self) WriteError!void {
             assert(rc.term.currently_rendering);
-            const _writer = rc.buffer.writer();
+            const writer = rc.buffer.writer();
             const spell = rc.term.getStringCapability(.clr_eol) orelse spells.clear_to_eol;
-            try _writer.writeAll(spell);
+            try writer.writeAll(spell);
         }
 
         /// Clears the screen from the cursor to the beginning of the line.
         pub fn clearToBol(rc: *Self) WriteError!void {
             assert(rc.term.currently_rendering);
-            const _writer = rc.buffer.writer();
+            const writer = rc.buffer.writer();
             const spell = rc.term.getStringCapability(.clr_bol) orelse spells.clear_to_bol;
-            try _writer.writeAll(spell);
+            try writer.writeAll(spell);
         }
 
         /// Move the cursor to the specified cell.
         pub fn moveCursorTo(rc: *Self, row: u16, col: u16) WriteError!void {
             assert(rc.term.currently_rendering);
-            const _writer = rc.buffer.writer();
+            const writer = rc.buffer.writer();
             const spell = rc.term.getStringCapability(.cursor_address) orelse spells.move_cursor_fmt;
-            try TermInfo.writeParamSequence(spell, _writer, .{ row, col });
+            try TermInfo.writeParamSequence(spell, writer, .{ row, col });
         }
 
         /// Hide the cursor.
         pub fn hideCursor(rc: *Self) WriteError!void {
             assert(rc.term.currently_rendering);
             if (!rc.term.cursor_visible) return;
-            const _writer = rc.buffer.writer();
+            const writer = rc.buffer.writer();
             const spell = rc.term.getStringCapability(.cursor_invisible) orelse spells.hide_cursor;
-            try _writer.writeAll(spell);
+            try writer.writeAll(spell);
             rc.term.cursor_visible = false;
         }
 
@@ -651,17 +622,17 @@ pub fn RenderContext(comptime buffer_size: usize) type {
         pub fn showCursor(rc: *Self) WriteError!void {
             assert(rc.term.currently_rendering);
             if (rc.term.cursor_visible) return;
-            const _writer = rc.buffer.writer();
+            const writer = rc.buffer.writer();
             const spell = rc.term.getStringCapability(.cursor_normal) orelse spells.show_cursor;
-            try _writer.writeAll(spell);
+            try writer.writeAll(spell);
             rc.term.cursor_visible = true;
         }
 
         /// Set the text attributes for all following writes.
         pub fn setStyle(rc: *Self, attr: Style) WriteError!void {
             assert(rc.term.currently_rendering);
-            const _writer = rc.buffer.writer();
-            try attr.dump(rc.term.terminfo, _writer);
+            const writer = rc.buffer.writer();
+            try attr.dump(rc.term.terminfo, writer);
         }
 
         pub fn restrictedPaddingWriter(rc: *Self, width: u16) RestrictedPaddingWriter {
@@ -672,12 +643,12 @@ pub fn RenderContext(comptime buffer_size: usize) type {
         /// Write all bytes, wrapping at the end of the line.
         pub fn writeAllWrapping(rc: *Self, bytes: []const u8) WriteError!void {
             assert(rc.term.currently_rendering);
-            const _writer = rc.buffer.writer();
+            const writer = rc.buffer.writer();
             const enable = rc.term.getStringCapability(.enter_am_mode) orelse spells.enable_auto_wrap;
             const disable = rc.term.getStringCapability(.exit_am_mode) orelse spells.reset_auto_wrap;
-            try _writer.writeAll(enable);
-            try _writer.writeAll(bytes);
-            try _writer.writeAll(disable);
+            try writer.writeAll(enable);
+            try writer.writeAll(bytes);
+            try writer.writeAll(disable);
         }
 
         pub fn setCursorShape(rc: *Self, shape: CursorShape) WriteError!void {
@@ -685,11 +656,10 @@ pub fn RenderContext(comptime buffer_size: usize) type {
             assert(shape != .unknown);
 
             if (rc.term.cursor_shape == shape) return;
-            const _writer = rc.buffer.writer();
+            const writer = rc.buffer.writer();
 
-            if (rc.term.terminfo.?.getExtendedString("Ss")) |ss| {
-                try TermInfo.writeParamSequence(ss, _writer, .{@intFromEnum(shape)});
-            }
+            const spell = rc.term.getExtendedString("Ss") orelse spells.change_cursor;
+            try TermInfo.writeParamSequence(spell, writer, .{@intFromEnum(shape)});
             rc.term.cursor_shape = shape;
         }
     };

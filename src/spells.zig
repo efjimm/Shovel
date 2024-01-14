@@ -32,17 +32,7 @@ pub const CursorShape = enum(u3) {
     bar = 6,
 };
 
-// pub const cursor_shapes = blk: {
-//     var ret = std.EnumArray(CursorShape, []const u8).initUndefined();
-//     ret.set(.unknown, "");
-//     ret.set(.blinking_block, "\x1B[1 q");
-//     ret.set(.block, "\x1B[2 q");
-//     ret.set(.blinking_underline, "\x1B[3 q");
-//     ret.set(.underline, "\x1B[4 q");
-//     ret.set(.blinking_bar, "\x1B[5 q");
-//     ret.set(.bar, "\x1B[6 q");
-//     break :blk ret;
-// };
+pub const change_cursor = "\x1B[%d q";
 
 // https://sw.kovidgoyal.net/kitty/keyboard-protocol/
 // This enables an alternative input mode, that makes it possible, among
