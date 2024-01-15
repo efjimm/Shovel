@@ -1,5 +1,3 @@
-// This file is part of zig-spoon, a TUI library for the zig language.
-//
 // Copyright © 2021 - 2022 Leon Henrik Plickat
 //
 // This program is free software: you can redistribute it and/or modify
@@ -37,7 +35,7 @@ pub const Input = struct {
     /// Checks whether the Input equals an input description. Description must
     /// be comptime known.
     pub fn eqlDescription(self: Input, comptime descr: []const u8) bool {
-        const description_input = comptime Input.fromDescription(descr) catch @compileError("zig-spoon: Bad input descriptor.");
+        const description_input = comptime Input.fromDescription(descr) catch @compileError("Shovel: Bad input descriptor.");
         return meta.eql(self, description_input);
     }
 
@@ -360,7 +358,7 @@ pub const InputParser = struct {
         // <rant>
         //   32 is always added to the coordinates to ensure that they are
         //   printable chars. This hack dates back to X10. Yes. Also they are
-        //   indexed starting at 1. In zig-spoon we (try to) enforce sane 0
+        //   indexed starting at 1. In Shovel we (try to) enforce sane 0
         //   based indexing so that also needs to go. And yet again we uncover
         //   abominations that allow us to laugh in the face of anyone who
         //   claims backwards compatability is a good idea. This is what people

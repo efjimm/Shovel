@@ -1,12 +1,12 @@
 const std = @import("std");
-const spoon = @import("spoon");
+const shovel = @import("shovel");
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var term = try spoon.Term.init(allocator, .{});
+    var term = try shovel.Term.init(allocator, .{});
     defer term.deinit(allocator);
 
     try term.uncook(.{});
@@ -31,9 +31,9 @@ pub fn main() !void {
     }
 }
 
-const RenderError = spoon.Term.WriteError;
+const RenderError = shovel.Term.WriteError;
 
-fn render(term: *spoon.Term) RenderError!void {
+fn render(term: *shovel.Term) RenderError!void {
     var rc = try term.getRenderContext(4096);
 
     try rc.clear();

@@ -1,32 +1,20 @@
-# zig-spoon
+# Shovel
 
-This is a fork of [zig-spoon](https://git.sr.ht/~leon_plickat/zig-spoon), updated to Zig master and
-with some personal modifications. Below is the original readme:
+Shovel is a TUI library written in Zig, exposing a robust and simple interface
+for creating TUI programs. Shovel started as a fork of
+[zig-spoon](https://git.sr.ht/~leon_plickat/zig-spoon) and has since
+significantly outgrown the original code.
 
-zig-spoon is a zig library offering a simple, low-level and allocation free
-abstraction for creating TUI programs. zig-spoon takes care of wrangling the
-terminal, but unlike other TUI libraries it does not get in the way when you
-want to render the interface.
+The design of Shovel is inherently decoupled, so it is not necessary to use
+everything in the library. For example, Shovel implements a terminfo parser
+which is used internally but can also be used standalone.
 
-zig-spoon supports the kitty keyboard protocol.
+Shovel supports the kitty keyboard protocol.
 
-The text attribute code can be used independently, so zig-spoon is also useful
-for non-TUI terminal programs that still want fancy text.
+## Read before use!
 
-```
-    _
-  /   \
- |     |
-  \   /
-   | |
-   | |
-   | |
-   | |
-   (_)
-```
-
-
-## Read this before using zig-spoon!
+**This text is taken from the README of zig-spoon, the project that Shovel
+was originally forked from. This all still applies so I left it in.**
 
 I am happy you are interested in this project and I hope it will serve you well.
 However before you continue, I'd like to quickly explain and mention a few
@@ -56,7 +44,7 @@ support for legacy inputs will be implemented where possible / feasible / useful
 While the higher kitty keyboard modes offer even more information about inputs,
 they are generally not needed for the average terminal application. The lowest
 mode already fixes all major input annoyances that were outlined in the previous
-paragraph. If you do need the extra information, you can easiely replace
+paragraph. If you do need the extra information, you can easily replace
 zig-spoons input parser with your own custom one.
 
 The traditional 16 terminal colours may differ between background versus
@@ -69,39 +57,5 @@ probably should use the RGB-colour mode.
 And certainly the saddest caveat: Not all terminal emulators support blinking
 text.
 
-If you face any issues or unexpected oddities, please contact me so that we can
-figure out a way around them.
-
-
-## API Stability
-
-**API stability is not guaranteed.**
-
-If I realize that any API I designed does not fulfill its purpose in a sane
-manner, it will be improved or completely replaced. I do not guarantee backward
-or forward compatability. In fact, I can likely promise their certain absence.
-
-The purpose of zig-spoon is to work around outdated and outright broken legacy
-APIs so that the application developers can focus on other things. As such I
-believe that allowing zig-spoons API to stagnate and rot in a similar way would
-just be silly, literally defeating the purpose of using this library at all.
-
-This means that you can can get involved in designing and improving the API.
-So if you have any thoughts on it, feel free to contact me.
-
-
-## License
-
-zig-spoon is licensed under the GPL version 3 (no later).
-
-Yes, that means that any project using zig-spoon - although not necessarily
-all code - will also be licensed under the GPLv3. This should not be a problem
-for any honest FOSS project.
-
-While I recognize that licensing a  library under the GPL is unusual and poses
-restrictions on users of the library, I consider this choice necessary to ensure
-that all my code always remains Free Software and therefore always remains of
-most use to end users. I write software for people, not for companies. As such,
-I do not wish any of it being used as free labour for some proprietary project
-by a company wanting to improve their profit margins.
-Thank you for understanding.
+If you face any issues or unexpected oddities, please create an issue detailing
+them.

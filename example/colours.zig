@@ -1,19 +1,19 @@
-// This example programs demonstrates that spoon.Style can also be used
-// stand-alone without using spoon.Term.
+// This example programs demonstrates that shovel.Style can also be used
+// stand-alone without using shovel.Term.
 
 const std = @import("std");
 const io = std.io;
 
-const spoon = @import("spoon");
+const shovel = @import("shovel");
 
-const red = spoon.Style{ .fg = .red, .attrs = .{ .italic = true } };
-const green = spoon.Style{ .fg = .green, .attrs = .{ .blinking = true } };
-const blue = spoon.Style{ .fg = .blue, .attrs = .{ .bold = true } };
-const cyan = spoon.Style{ .fg = .cyan, .attrs = .{ .reverse = true } };
-const parsed = spoon.Style.Colour.fromDescription("magenta") catch
+const red = shovel.Style{ .fg = .red, .attrs = .{ .italic = true } };
+const green = shovel.Style{ .fg = .green, .attrs = .{ .blinking = true } };
+const blue = shovel.Style{ .fg = .blue, .attrs = .{ .bold = true } };
+const cyan = shovel.Style{ .fg = .cyan, .attrs = .{ .reverse = true } };
+const parsed = shovel.Style.Colour.fromDescription("magenta") catch
     @compileError("bad colour description");
-const magenta = spoon.Style{ .fg = parsed, .attrs = .{ .dimmed = true } };
-const reset = spoon.Style{};
+const magenta = shovel.Style{ .fg = parsed, .attrs = .{ .dimmed = true } };
+const reset = shovel.Style{};
 
 pub fn main() !void {
     const writer = io.getStdOut().writer();
@@ -27,7 +27,7 @@ pub fn main() !void {
     try magenta.dumpRaw(writer);
     try writer.writeAll("zig ");
     try cyan.dumpRaw(writer);
-    try writer.writeAll("spoon\n");
+    try writer.writeAll("shovel\n");
 
     try reset.dumpRaw(writer);
 }

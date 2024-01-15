@@ -4,9 +4,9 @@ const heap = std.heap;
 const os = std.os;
 const unicode = std.unicode;
 
-const spoon = @import("spoon");
+const shovel = @import("shovel");
 
-var term: spoon.Term = undefined;
+var term: shovel.Term = undefined;
 var loop: bool = true;
 var buf: [32]u8 = undefined;
 var read: usize = undefined;
@@ -34,7 +34,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    term = try spoon.Term.init(allocator, .{});
+    term = try shovel.Term.init(allocator, .{});
     defer term.deinit(allocator);
 
     try os.sigaction(os.SIG.WINCH, &os.Sigaction{
@@ -49,7 +49,7 @@ pub fn main() !void {
     });
 
     try term.fetchSize();
-    try term.setWindowTitle("zig-spoon example: input-demo", .{});
+    try term.setWindowTitle("Shovel example: input-demo", .{});
     try render();
 
     while (loop) {
@@ -87,7 +87,7 @@ fn render() !void {
     try rc.moveCursorTo(0, 0);
     try rc.setStyle(.{ .fg = .green, .attrs = .{ .reverse = true } });
     var rpw = rc.restrictedPaddingWriter(term.width);
-    try rpw.writer().writeAll(" Spoon example program: input-demo");
+    try rpw.writer().writeAll(" shovel example program: input-demo");
     try rpw.writer().print("kitty keyboard {s}", .{
         if (term.kitty_enabled) "active" else "inactive",
     });

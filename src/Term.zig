@@ -1,5 +1,3 @@
-// This file is part of zig-spoon, a TUI library for the zig language.
-//
 // Copyright © 2021 - 2022 Leon Henrik Plickat
 // Copyright © 2023 Evan Bonner
 //

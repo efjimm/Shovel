@@ -1,7 +1,7 @@
 const std = @import("std");
 const root = @import("root");
 const build_options = @import("build_options");
-const log = std.log.scoped(.spoon);
+const log = std.log.scoped(.shovel);
 
 pub const enabled = build_options.logging_enabled;
 

@@ -3,11 +3,11 @@ const Build = std.Build;
 
 fn example(
     b: *Build,
-    spoon_module: *Build.Module,
+    shovel_module: *Build.Module,
     opts: Build.ExecutableOptions,
 ) void {
     const exe = b.addExecutable(opts);
-    exe.root_module.addImport("spoon", spoon_module);
+    exe.root_module.addImport("shovel", shovel_module);
     b.installArtifact(exe);
 }
 
@@ -22,13 +22,13 @@ pub fn build(b: *Build) void {
     const opts = b.addOptions();
     opts.addOption(bool, "logging_enabled", enable_logging);
 
-    const spoon_module = b.addModule("spoon", .{
+    const shovel_module = b.addModule("shovel", .{
         .root_source_file = .{ .path = "src/main.zig" },
     });
     const opts_module = opts.createModule();
-    spoon_module.addImport("wcwidth", wcwidth);
-    spoon_module.addImport("critbit", critbit);
-    spoon_module.addImport("build_options", opts_module);
+    shovel_module.addImport("wcwidth", wcwidth);
+    shovel_module.addImport("critbit", critbit);
+    shovel_module.addImport("build_options", opts_module);
 
     const filter = b.option([]const u8, "test-filter", "Filter string for tests");
 
@@ -46,14 +46,14 @@ pub fn build(b: *Build) void {
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_tests.step);
 
-    _ = example(b, spoon_module, .{
+    _ = example(b, shovel_module, .{
         .name = "menu",
         .root_source_file = .{ .path = "example/menu.zig" },
         .target = target,
         .optimize = optimize,
     });
 
-    example(b, spoon_module, .{
+    example(b, shovel_module, .{
         .name = "menu-libc",
         .root_source_file = .{ .path = "example/menu.zig" },
         .link_libc = true,
@@ -61,25 +61,25 @@ pub fn build(b: *Build) void {
         .optimize = optimize,
     });
 
-    _ = example(b, spoon_module, .{
+    _ = example(b, shovel_module, .{
         .name = "input-demo",
         .root_source_file = .{ .path = "example/input-demo.zig" },
         .target = target,
         .optimize = optimize,
     });
-    _ = example(b, spoon_module, .{
+    _ = example(b, shovel_module, .{
         .name = "colours",
         .root_source_file = .{ .path = "example/colours.zig" },
         .target = target,
         .optimize = optimize,
     });
-    _ = example(b, spoon_module, .{
+    _ = example(b, shovel_module, .{
         .name = "table-256-colours",
         .root_source_file = .{ .path = "example/table-256-colours.zig" },
         .target = target,
         .optimize = optimize,
     });
-    _ = example(b, spoon_module, .{
+    _ = example(b, shovel_module, .{
         .name = "width",
         .root_source_file = .{ .path = "example/width.zig" },
         .target = target,

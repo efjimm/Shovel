@@ -4,9 +4,9 @@ const math = std.math;
 const mem = std.mem;
 const os = std.os;
 
-const spoon = @import("spoon");
+const shovel = @import("shovel");
 
-var term: spoon.Term = undefined;
+var term: shovel.Term = undefined;
 var loop: bool = true;
 
 var cursor: usize = 0;
@@ -16,7 +16,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    term = try spoon.Term.init(allocator, .{});
+    term = try shovel.Term.init(allocator, .{});
     defer term.deinit(allocator);
 
     try os.sigaction(os.SIG.WINCH, &os.Sigaction{
@@ -25,12 +25,12 @@ pub fn main() !void {
         .flags = 0,
     }, null);
 
-    // zig-spoon will return the terminal back to cooked state automatically
+    // Shovel will return the terminal back to cooked state automatically
     // when we call term.deinit().
     try term.uncook(.{});
 
     try term.fetchSize();
-    try term.setWindowTitle("zig-spoon example: menu", .{});
+    try term.setWindowTitle("Shovel example: menu", .{});
     try render();
 
     var buf: [16]u8 = undefined;
@@ -42,7 +42,7 @@ pub fn main() !void {
             // Since it can work at comptime, you can use it to simplify the
             // matching of hardcoded keybinds as well. Down below we specify the
             // typical keybinds a terminal user would expect for moving up and
-            // down, without getting our hands dirty in the interals of zig-spoons
+            // down, without getting our hands dirty in the interals of Shovels
             // Input object.
             if (in.eqlDescription("escape") or in.eqlDescription("q")) {
                 loop = false;
@@ -81,7 +81,7 @@ fn render() !void {
     // The RestrictedPaddingWriter.pad() function will fill the remaining space
     // with whitespace padding.
     var rpw = rc.restrictedPaddingWriter(term.width);
-    try rpw.writer().writeAll(" Spoon example program: menu");
+    try rpw.writer().writeAll(" shovel example program: menu");
     try rpw.pad();
 
     try rc.moveCursorTo(1, 0);
