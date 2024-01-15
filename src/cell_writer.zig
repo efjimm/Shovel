@@ -3,7 +3,7 @@ const wcWidth = @import("wcwidth").wcWidth;
 const io = std.io;
 const assert = std.debug.assert;
 
-pub fn restrictedPaddingWriter(writer: anytype, width: u32) RestrictedPaddingWriter(@TypeOf(writer)) {
+pub fn cellWriter(writer: anytype, width: u32) CellWriter(@TypeOf(writer)) {
     assert(width > 0);
     return .{
         .underlying_writer = writer,
@@ -11,7 +11,7 @@ pub fn restrictedPaddingWriter(writer: anytype, width: u32) RestrictedPaddingWri
     };
 }
 
-pub fn RestrictedPaddingWriter(comptime UnderlyingWriter: type) type {
+pub fn CellWriter(comptime UnderlyingWriter: type) type {
     return struct {
         underlying_writer: UnderlyingWriter,
 
@@ -157,7 +157,7 @@ fn testWriter(
     expected: []const u8,
 ) !void {
     var buf = std.BoundedArray(u8, 128){};
-    var rpw = restrictedPaddingWriter(buf.writer(), width);
+    var rpw = cellWriter(buf.writer(), width);
     try rpw.writer().writeAll(input);
     switch (finish_type) {
         .finish => try rpw.finish(),
@@ -166,7 +166,7 @@ fn testWriter(
     try std.testing.expectEqualStrings(expected, buf.slice());
 }
 
-test "RestrictedPaddingWriter" {
+test "CellWriter" {
     const data = .{
         .{ .finish, 8, "12345678", "12345678" },
         .{ .finish, 7, "12345678", "123456…" },

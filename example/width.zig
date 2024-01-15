@@ -63,10 +63,10 @@ fn testPaddingWriter(
 
     try writer.print("Should display '{s}': '", .{desired});
 
-    var rpw = rc.restrictedPaddingWriter(width);
+    var cw = rc.cellWriter(width);
 
-    try rpw.writer().writeAll(string);
-    try rpw.finish();
+    try cw.writer().writeAll(string);
+    try cw.finish();
 
     try writer.writeAll("'");
 }

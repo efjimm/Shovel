@@ -1,5 +1,4 @@
 // Copyright © 2021 - 2022 Leon Henrik Plickat
-// Copyright © 2023 Evan Bonner
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License version 3 as published
@@ -31,7 +30,7 @@ const constants = if (builtin.link_libc and builtin.os.tag == .linux) os.linux e
 
 const Style = @import("Style.zig");
 const spells = @import("spells.zig");
-const rpw = @import("restricted_padding_writer.zig");
+const cell_writer = @import("cell_writer.zig");
 const TermInfo = @import("TermInfo.zig");
 
 const Term = @This();
@@ -551,7 +550,7 @@ pub fn RenderContext(comptime buffer_size: usize) type {
 
         const Self = @This();
         const BufferedWriter = io.BufferedWriter(buffer_size, Writer);
-        const RestrictedPaddingWriter = rpw.RestrictedPaddingWriter(BufferedWriter.Writer);
+        const CellWriter = cell_writer.CellWriter(BufferedWriter.Writer);
 
         /// Finishes the render operation. The render context may not be used any
         /// further.
@@ -633,9 +632,9 @@ pub fn RenderContext(comptime buffer_size: usize) type {
             try attr.dump(rc.term.terminfo, writer);
         }
 
-        pub fn restrictedPaddingWriter(rc: *Self, width: u16) RestrictedPaddingWriter {
+        pub fn cellWriter(rc: *Self, width: u16) CellWriter {
             assert(rc.term.currently_rendering);
-            return rpw.restrictedPaddingWriter(rc.buffer.writer(), width);
+            return cell_writer.cellWriter(rc.buffer.writer(), width);
         }
 
         /// Write all bytes, wrapping at the end of the line.

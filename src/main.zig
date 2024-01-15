@@ -22,8 +22,8 @@ pub const inputParser = @import("input.zig").inputParser;
 pub const Input = @import("input.zig").Input;
 pub const InputContent = @import("input.zig").InputContent;
 
-pub const restrictedPaddingWriter = @import("restricted_padding_writer.zig").restrictedPaddingWriter;
-pub const RestrictedPaddingWriter = @import("restricted_padding_writer.zig").RestrictedPaddingWriter;
+pub const cellWriter = @import("cell_writer.zig").cellWriter;
+pub const CellWriter = @import("cell_writer.zig").CellWriter;
 pub const TermInfo = @import("TermInfo.zig");
 pub const InputMap = @import("input.zig").InputMap;
 
@@ -31,6 +31,6 @@ test {
     _ = @import("input.zig");
     _ = @import("input_description.zig");
     _ = @import("colour_description.zig");
-    _ = @import("restricted_padding_writer.zig");
+    _ = @import("cell_writer.zig");
     _ = @import("TermInfo.zig");
 }

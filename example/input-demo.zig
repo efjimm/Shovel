@@ -86,32 +86,32 @@ fn render() !void {
 
     try rc.moveCursorTo(0, 0);
     try rc.setStyle(.{ .fg = .green, .attrs = .{ .reverse = true } });
-    var rpw = rc.restrictedPaddingWriter(term.width);
-    try rpw.writer().writeAll(" shovel example program: input-demo");
-    try rpw.writer().print("kitty keyboard {s}", .{
+    var cw = rc.cellWriter(term.width);
+    try cw.writer().writeAll(" shovel example program: input-demo");
+    try cw.writer().print("kitty keyboard {s}", .{
         if (term.kitty_enabled) "active" else "inactive",
     });
-    try rpw.pad();
+    try cw.pad();
 
     try rc.moveCursorTo(1, 0);
     try rc.setStyle(.{ .fg = .red, .attrs = .{ .bold = true } });
-    rpw = rc.restrictedPaddingWriter(term.width);
-    try rpw.writer().writeAll(" Input demo / tester, q to exit.");
-    try rpw.finish();
+    cw = rc.cellWriter(term.width);
+    try cw.writer().writeAll(" Input demo / tester, q to exit.");
+    try cw.finish();
 
     try rc.moveCursorTo(3, 0);
     try rc.setStyle(.{ .attrs = .{ .bold = true } });
     if (empty) {
-        rpw = rc.restrictedPaddingWriter(term.width);
-        try rpw.writer().writeAll(" Press a key! Or try to paste something!");
-        try rpw.finish();
+        cw = rc.cellWriter(term.width);
+        try cw.writer().writeAll(" Press a key! Or try to paste something!");
+        try cw.finish();
     } else {
-        rpw = rc.restrictedPaddingWriter(term.width);
-        var writer = rpw.writer();
+        cw = rc.cellWriter(term.width);
+        var writer = cw.writer();
         try writer.writeAll(" Bytes read:    ");
         try rc.setStyle(.{});
         try writer.print("{}", .{read});
-        try rpw.finish();
+        try cw.finish();
 
         var valid_unicode = true;
         _ = unicode.Utf8View.init(buf[0..read]) catch {
@@ -119,8 +119,8 @@ fn render() !void {
         };
         try rc.moveCursorTo(4, 0);
         try rc.setStyle(.{ .attrs = .{ .bold = true } });
-        rpw = rc.restrictedPaddingWriter(term.width);
-        writer = rpw.writer();
+        cw = rc.cellWriter(term.width);
+        writer = cw.writer();
         try writer.writeAll(" Valid unicode: ");
         try rc.setStyle(.{});
         if (valid_unicode) {
@@ -162,13 +162,13 @@ fn render() !void {
         } else {
             try writer.writeAll("no");
         }
-        try rpw.finish();
+        try cw.finish();
 
         var it = term.inputParser(buf[0..read]);
         var i: u16 = 1;
         while (it.next()) |in| : (i += 1) {
-            rpw = rc.restrictedPaddingWriter(term.width);
-            writer = rpw.writer();
+            cw = rc.cellWriter(term.width);
+            writer = cw.writer();
 
             try rc.moveCursorTo(5 + (i - 1), 0);
 
@@ -204,7 +204,7 @@ fn render() !void {
             if (in.mod_ctrl) try writer.writeAll(" +Ctrl");
             if (in.mod_super) try writer.writeAll(" +Super");
 
-            try rpw.finish();
+            try cw.finish();
 
             if (mouse) |m| {
                 try rc.moveCursorTo(m.y, m.x);
