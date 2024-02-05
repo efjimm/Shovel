@@ -113,7 +113,7 @@ pub const InitError = error{
     SystemFdQuotaExceeded,
     SystemResources,
     Unexpected,
-};
+} || Allocator.Error;
 
 pub fn init(allocator: Allocator, term_config: TermConfig) (InitError || Allocator.Error)!Term {
     var ret = Term{
