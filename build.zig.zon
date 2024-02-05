@@ -2,7 +2,7 @@
     .name = "shovel",
     .version = "0.1.0",
     .paths = .{
-        "lib",
+        "src",
         "example",
         "README.md",
         "build.zig",
