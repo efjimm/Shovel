@@ -61,9 +61,9 @@ pub fn main() !void {
 
 var log_file: std.fs.File = undefined;
 
-pub const std_options = struct {
-    pub const log_level = .debug;
-    pub const logFn = log;
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = log,
 };
 
 pub fn log(

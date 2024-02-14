@@ -25,6 +25,11 @@ pub fn build(b: *Build) void {
     const shovel_module = b.addModule("shovel", .{
         .root_source_file = .{ .path = "src/main.zig" },
     });
+    // TODO: I have no idea if this works on BSD, because Zig does not ship libc for any BSDs.
+    // A proper BSD system is required to test. Since ziglang/zig#18910, the necessary termios
+    // constants should exist now for OpenBSD and FreeBSD.
+    if (target.result.isBSD())
+        shovel_module.link_libc = true;
     const opts_module = opts.createModule();
     shovel_module.addImport("wcwidth", wcwidth);
     shovel_module.addImport("critbit", critbit);
@@ -41,6 +46,8 @@ pub fn build(b: *Build) void {
     tests.root_module.addImport("wcwidth", wcwidth);
     tests.root_module.addImport("critbit", critbit);
     tests.root_module.addImport("build_options", opts_module);
+    if (target.result.isBSD())
+        tests.linkLibC();
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run all tests");

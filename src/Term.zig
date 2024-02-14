@@ -117,7 +117,7 @@ pub const InitError = error{
 
 pub fn init(allocator: Allocator, term_config: TermConfig) (InitError || Allocator.Error)!Term {
     var ret = Term{
-        .tty = os.open("/dev/tty", constants.O.RDWR, 0) catch |err| switch (err) {
+        .tty = os.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
             // None of these are reachable with the flags we pass to os.open
             error.DeviceBusy,
             error.FileLocksNotSupported,
@@ -384,10 +384,10 @@ pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
         //		 can handle them as normal escape sequences.
         // IEXTEN: Disable input preprocessing. This allows us to handle Ctrl-V,
         //		 which would otherwise be intercepted by some terminals.
-        raw.lflag &= ~@as(
-            constants.tcflag_t,
-            constants.ECHO | constants.ICANON | constants.ISIG | constants.IEXTEN,
-        );
+        raw.lflag.ECHO = false;
+        raw.lflag.ICANON = false;
+        raw.lflag.ISIG = false;
+        raw.lflag.IEXTEN = false;
 
         //   IXON: Disable software control flow. This allows us to handle Ctrl-S
         //		 and Ctrl-Q.
@@ -399,22 +399,23 @@ pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
         //		 remotely modern.
         // ISTRIP: Disable stripping the 8th bit of characters. Likely has no effect
         //		 on anything remotely modern.
-        raw.iflag &= ~@as(
-            constants.tcflag_t,
-            constants.IXON | constants.ICRNL | constants.BRKINT | constants.INPCK | constants.ISTRIP,
-        );
+        raw.iflag.IXON = false;
+        raw.iflag.ICRNL = false;
+        raw.iflag.BRKINT = false;
+        raw.iflag.INPCK = false;
+        raw.iflag.ISTRIP = false;
 
         // IUTF8: (Linux only)
         if (builtin.os.tag == .linux)
-            raw.iflag &= ~@as(constants.tcflag_t, constants.IUTF8);
+            raw.iflag.IUTF8 = true;
 
         // Disable output processing. Common output processing includes prefixing
         // newline with a carriage return.
-        raw.oflag &= ~@as(constants.tcflag_t, constants.OPOST);
+        raw.oflag.OPOST = false;
 
         // Set the character size to 8 bits per byte. Likely has no efffect on
         // anything remotely modern.
-        raw.cflag |= constants.CS8;
+        raw.cflag.CSIZE = .CS8;
 
         break :blk raw;
     };
