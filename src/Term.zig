@@ -115,18 +115,18 @@ pub const InitError = error{
     Unexpected,
 } || Allocator.Error;
 
-pub fn init(allocator: Allocator, term_config: TermConfig) (InitError || Allocator.Error)!Term {
+pub fn init(allocator: Allocator, term_config: TermConfig) InitError!Term {
     var ret = Term{
         .tty = os.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
             // None of these are reachable with the flags we pass to os.open
             error.DeviceBusy,
             error.FileLocksNotSupported,
-            error.InvalidHandle,
             error.NoSpaceLeft,
             error.NotDir,
             error.PathAlreadyExists,
             error.WouldBlock,
             error.NetworkNotFound,
+            error.InvalidWtf8,
             => unreachable,
 
             error.AccessDenied,
