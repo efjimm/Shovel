@@ -96,8 +96,8 @@ fn bufferedWriter(
     return .{ .unbuffered_writer = self.unbufferedWriter() };
 }
 
-// NotATerminal + a subset of os.OpenError, removing all errors which aren't reachable due to how
-// we call os.open
+// NotATerminal + a subset of posix.OpenError, removing all errors which aren't reachable due to how
+// we call posix.open
 pub const InitError = error{
     AccessDenied,
     BadPathName,
@@ -119,7 +119,7 @@ pub const InitError = error{
 pub fn init(allocator: Allocator, term_config: TermConfig) InitError!Term {
     var ret = Term{
         .tty = posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
-            // None of these are reachable with the flags we pass to os.open
+            // None of these are reachable with the flags we pass to posix.open
             error.DeviceBusy,
             error.FileLocksNotSupported,
             error.NoSpaceLeft,
@@ -226,11 +226,11 @@ pub fn useTermInfoInputs(term: *Term, allocator: Allocator) !void {
     }
 }
 
-const SetBlockingReadError = os.TermiosGetError || os.TermiosSetError;
+const SetBlockingReadError = posix.TermiosGetError || posix.TermiosSetError;
 
 pub fn setBlockingRead(self: Term, enabled: bool) SetBlockingReadError!void {
     const termios = blk: {
-        var raw = try os.tcgetattr(self.tty);
+        var raw = try posix.tcgetattr(self.tty);
 
         if (enabled) {
             raw.cc[constants.V.TIME] = 0;
@@ -243,7 +243,7 @@ pub fn setBlockingRead(self: Term, enabled: bool) SetBlockingReadError!void {
         break :blk raw;
     };
 
-    try os.tcsetattr(self.tty, .FLUSH, termios);
+    try posix.tcsetattr(self.tty, .FLUSH, termios);
 }
 
 // Reads from stdin to the supplied buffer. Asserts that `buf.len >= 8`.
@@ -263,7 +263,7 @@ pub fn readInput(self: *Term, buf: []u8) ![]u8 {
         break :blk buf;
     };
 
-    // Use system.read instead of os.read so it won't restart on signals.
+    // Use system.read instead of posix.read so it won't restart on signals.
     const rc = posix.system.read(self.tty, buffer.ptr, buffer.len);
 
     const bytes_read: usize = switch (posix.errno(rc)) {
@@ -496,6 +496,7 @@ pub fn cook(self: *Term) CookError!void {
         self.getStringCapability(.exit_ca_mode) orelse "",
         self.getStringCapability(.cursor_visible) orelse "",
         self.getStringCapability(.exit_attribute_mode) orelse "",
+        self.getStringCapability(.enter_am_mode) orelse spells.enable_auto_wrap,
     }) |str| try writer.writeAll(str);
     try buffered_writer.flush();
 }
