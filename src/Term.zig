@@ -24,9 +24,10 @@ const unicode = std.unicode;
 const debug = std.debug;
 const math = std.math;
 const assert = debug.assert;
+const posix = std.posix;
 
 // Workaround for bad libc integration of zigs std.
-const constants = if (builtin.link_libc and builtin.os.tag == .linux) os.linux else os.system;
+const constants = if (builtin.link_libc and builtin.os.tag == .linux) os.linux else posix.system;
 
 const Style = @import("Style.zig");
 const spells = @import("spells.zig");
@@ -47,7 +48,7 @@ const TermConfig = struct {
 
 /// The original termios configuration saved when entering raw mode. null if in cooked mode,
 /// otherwise we are uncooked.
-cooked_termios: ?os.termios = null,
+cooked_termios: ?posix.termios = null,
 
 /// Size of the terminal, updated when `fetchSize()` is called.
 width: u16 = 0,
@@ -56,7 +57,7 @@ height: u16 = 0,
 /// Are we currently rendering?
 currently_rendering: bool = false,
 
-tty: os.fd_t,
+tty: posix.fd_t,
 
 cursor_visible: bool = true,
 cursor_shape: CursorShape = .unknown,
@@ -81,9 +82,9 @@ pub fn inputParser(term: *Term, bytes: []const u8) InputParser {
     return input.inputParser(bytes, term);
 }
 
-pub const WriteError = os.WriteError;
+pub const WriteError = posix.WriteError;
 
-const Writer = io.Writer(os.fd_t, os.WriteError, os.write);
+const Writer = io.Writer(posix.fd_t, posix.WriteError, posix.write);
 fn unbufferedWriter(self: Term) Writer {
     return .{ .context = self.tty };
 }
@@ -117,7 +118,7 @@ pub const InitError = error{
 
 pub fn init(allocator: Allocator, term_config: TermConfig) InitError!Term {
     var ret = Term{
-        .tty = os.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
+        .tty = posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
             // None of these are reachable with the flags we pass to os.open
             error.DeviceBusy,
             error.FileLocksNotSupported,
@@ -147,9 +148,9 @@ pub fn init(allocator: Allocator, term_config: TermConfig) InitError!Term {
         },
         .terminfo = null,
     };
-    errdefer os.close(ret.tty);
+    errdefer posix.close(ret.tty);
 
-    if (!os.isatty(ret.tty))
+    if (!posix.isatty(ret.tty))
         return error.NotATerminal;
     errdefer ret.deinit(allocator);
 
@@ -180,12 +181,12 @@ pub fn deinit(self: *Term, allocator: Allocator) void {
     if (self.terminfo) |ti|
         ti.destroy(allocator);
 
-    os.close(self.tty);
+    posix.close(self.tty);
     self.* = undefined;
 }
 
 fn getTermInfo(allocator: Allocator) !*TermInfo {
-    const term_var = std.os.getenv("TERM") orelse {
+    const term_var = posix.getenv("TERM") orelse {
         log.info("No TERM variable defined", .{});
         return error.NoTermInfo;
     };
@@ -263,9 +264,9 @@ pub fn readInput(self: *Term, buf: []u8) ![]u8 {
     };
 
     // Use system.read instead of os.read so it won't restart on signals.
-    const rc = os.system.read(self.tty, buffer.ptr, buffer.len);
+    const rc = posix.system.read(self.tty, buffer.ptr, buffer.len);
 
-    const bytes_read: usize = switch (os.errno(rc)) {
+    const bytes_read: usize = switch (posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
         .INTR => 0,
         .INVAL => unreachable,
@@ -278,7 +279,7 @@ pub fn readInput(self: *Term, buf: []u8) ![]u8 {
         .NOMEM => return error.SystemResources,
         .CONNRESET => return error.ConnectionResetByPeer,
         .TIMEDOUT => return error.ConnectionTimedOut,
-        else => |err| return os.unexpectedErrno(err),
+        else => |err| return posix.unexpectedErrno(err),
     };
 
     const slice = buffer[0..bytes_read];
@@ -360,7 +361,7 @@ pub inline fn isCooked(self: *const Term) bool {
     return self.cooked_termios == null;
 }
 
-pub const UncookError = os.TermiosGetError || os.TermiosSetError || os.WriteError;
+pub const UncookError = posix.TermiosGetError || posix.TermiosSetError || posix.WriteError;
 
 /// Enter raw mode.
 pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
@@ -371,7 +372,7 @@ pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
     // together from various sources, including termios(3) and
     // https://viewsourcecode.org/snaptoken/kilo/02.enteringRawMode.html.
 
-    self.cooked_termios = try os.tcgetattr(self.tty);
+    self.cooked_termios = try posix.tcgetattr(self.tty);
     errdefer self.cook() catch {};
 
     const raw_termios = blk: {
@@ -420,7 +421,7 @@ pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
         break :blk raw;
     };
 
-    try os.tcsetattr(self.tty, .FLUSH, raw_termios);
+    try posix.tcsetattr(self.tty, .FLUSH, raw_termios);
 
     var buffered_writer = self.bufferedWriter(256);
     const writer = buffered_writer.writer();
@@ -447,17 +448,17 @@ fn enableKittyKeyboard(term: *Term, buffered_writer: anytype) !void {
     try writer.writeAll(spells.enable_kitty_keyboard);
     try writer.writeAll("\x1B[?u");
     try buffered_writer.flush();
-    var poll_fds: [1]os.pollfd = .{
+    var poll_fds: [1]posix.pollfd = .{
         .{
             .fd = term.tty,
-            .events = os.POLL.IN,
+            .events = posix.POLL.IN,
             .revents = 0,
         },
     };
-    _ = os.poll(&poll_fds, 5) catch {};
-    if (poll_fds[0].revents & os.POLL.IN != 0) {
+    _ = posix.poll(&poll_fds, 5) catch {};
+    if (poll_fds[0].revents & posix.POLL.IN != 0) {
         var buf: [16]u8 = undefined;
-        if (os.read(term.tty, &buf)) |len| {
+        if (posix.read(term.tty, &buf)) |len| {
             if (std.mem.eql(u8, buf[0..len], "\x1b[?1u")) {
                 // Got the correct response from the terminal, kitty keyboard is enabled
                 term.kitty_enabled = true;
@@ -471,14 +472,14 @@ fn enableKittyKeyboard(term: *Term, buffered_writer: anytype) !void {
     }
 }
 
-pub const CookError = os.WriteError || os.TermiosSetError;
+pub const CookError = posix.WriteError || posix.TermiosSetError;
 
 /// Enter cooked mode.
 pub fn cook(self: *Term) CookError!void {
     if (self.isCooked())
         return;
 
-    try os.tcsetattr(self.tty, .FLUSH, self.cooked_termios.?);
+    try posix.tcsetattr(self.tty, .FLUSH, self.cooked_termios.?);
     self.cooked_termios = null;
 
     var buffered_writer = self.bufferedWriter(128);
@@ -499,14 +500,14 @@ pub fn cook(self: *Term) CookError!void {
     try buffered_writer.flush();
 }
 
-pub fn fetchSize(self: *Term) os.UnexpectedError!void {
+pub fn fetchSize(self: *Term) posix.UnexpectedError!void {
     if (self.isCooked())
         return;
 
     var size = mem.zeroes(constants.winsize);
-    const err = os.system.ioctl(self.tty, constants.T.IOCGWINSZ, @intFromPtr(&size));
-    if (os.errno(err) != .SUCCESS) {
-        return os.unexpectedErrno(@enumFromInt(err));
+    const err = posix.system.ioctl(self.tty, constants.T.IOCGWINSZ, @intFromPtr(&size));
+    if (posix.errno(err) != .SUCCESS) {
+        return posix.unexpectedErrno(@enumFromInt(err));
     }
     self.height = size.ws_row;
     self.width = size.ws_col;

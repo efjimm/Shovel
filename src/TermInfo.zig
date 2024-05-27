@@ -1,7 +1,7 @@
 // TODO: Investigate using terminfo for mouse support
 const std = @import("std");
 const log = @import("log.zig");
-const getenv = std.os.getenv;
+const getenv = std.posix.getenv;
 const sep = std.fs.path.sep;
 const readInt = std.mem.readInt;
 const native_endian = @import("builtin").cpu.arch.endian();

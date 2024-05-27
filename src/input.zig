@@ -408,7 +408,7 @@ pub const InputParser = struct {
             if (modifiers_str) |_| len += modifiers_str.?.len + ";".len;
             self.advanceBufferBy(len);
         }
-        const sequences = std.ComptimeStringMap(Input, .{
+        const sequences = std.StaticStringMap(Input).initComptime(.{
             .{ "1", .{ .content = .home } },
             .{ "2", .{ .content = .insert } },
             .{ "3", .{ .content = .delete } },

@@ -16,14 +16,14 @@ pub fn build(b: *Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const wcwidth = b.dependency("wcwidth", .{}).module("wcwidth");
-    const critbit = b.dependency("critbit", .{}).module("critbit");
+    const critbit = b.dependency("critbit-zig", .{}).module("critbit");
 
     const enable_logging = b.option(bool, "logging", "Enable logging") orelse false;
     const opts = b.addOptions();
     opts.addOption(bool, "logging_enabled", enable_logging);
 
     const shovel_module = b.addModule("shovel", .{
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = b.path("src/main.zig"),
     });
     // TODO: I have no idea if this works on BSD, because Zig does not ship libc for any BSDs.
     // A proper BSD system is required to test. Since ziglang/zig#18910, the necessary termios
@@ -38,7 +38,7 @@ pub fn build(b: *Build) void {
     const filter = b.option([]const u8, "test-filter", "Filter string for tests");
 
     const tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .filter = filter,
@@ -55,14 +55,14 @@ pub fn build(b: *Build) void {
 
     _ = example(b, shovel_module, .{
         .name = "menu",
-        .root_source_file = .{ .path = "example/menu.zig" },
+        .root_source_file = b.path("example/menu.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     example(b, shovel_module, .{
         .name = "menu-libc",
-        .root_source_file = .{ .path = "example/menu.zig" },
+        .root_source_file = b.path("example/menu.zig"),
         .link_libc = true,
         .target = target,
         .optimize = optimize,
@@ -70,25 +70,25 @@ pub fn build(b: *Build) void {
 
     _ = example(b, shovel_module, .{
         .name = "input-demo",
-        .root_source_file = .{ .path = "example/input-demo.zig" },
+        .root_source_file = b.path("example/input-demo.zig"),
         .target = target,
         .optimize = optimize,
     });
     _ = example(b, shovel_module, .{
         .name = "colours",
-        .root_source_file = .{ .path = "example/colours.zig" },
+        .root_source_file = b.path("example/colours.zig"),
         .target = target,
         .optimize = optimize,
     });
     _ = example(b, shovel_module, .{
         .name = "table-256-colours",
-        .root_source_file = .{ .path = "example/table-256-colours.zig" },
+        .root_source_file = b.path("example/table-256-colours.zig"),
         .target = target,
         .optimize = optimize,
     });
     _ = example(b, shovel_module, .{
         .name = "width",
-        .root_source_file = .{ .path = "example/width.zig" },
+        .root_source_file = b.path("example/width.zig"),
         .target = target,
         .optimize = optimize,
     });

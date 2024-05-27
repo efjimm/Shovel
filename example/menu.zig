@@ -3,6 +3,7 @@ const heap = std.heap;
 const math = std.math;
 const mem = std.mem;
 const os = std.os;
+const posix = std.posix;
 
 const shovel = @import("shovel");
 
@@ -19,9 +20,9 @@ pub fn main() !void {
     term = try shovel.Term.init(allocator, .{});
     defer term.deinit(allocator);
 
-    try os.sigaction(os.SIG.WINCH, &os.Sigaction{
+    try posix.sigaction(posix.SIG.WINCH, &posix.Sigaction{
         .handler = .{ .handler = handleSigWinch },
-        .mask = os.empty_sigset,
+        .mask = posix.empty_sigset,
         .flags = 0,
     }, null);
 
