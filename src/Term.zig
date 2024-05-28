@@ -39,6 +39,7 @@ const Term = @This();
 const UncookOptions = struct {
     request_kitty_keyboard_protocol: bool = true,
     request_mouse_tracking: bool = false,
+    request_mode_2027: bool = true,
 };
 
 const TermConfig = struct {
@@ -69,6 +70,9 @@ terminfo: ?*TermInfo = null,
 
 /// True if the kitty keyboard protocol is active.
 kitty_enabled: bool = false,
+
+/// True if mode 2027 is active.
+mode_2027_enabled: bool = false,
 
 pub const CursorShape = spells.CursorShape;
 
@@ -233,11 +237,11 @@ pub fn setBlockingRead(self: Term, enabled: bool) SetBlockingReadError!void {
         var raw = try posix.tcgetattr(self.tty);
 
         if (enabled) {
-            raw.cc[constants.V.TIME] = 0;
-            raw.cc[constants.V.MIN] = 1;
+            raw.cc[@intFromEnum(constants.V.TIME)] = 0;
+            raw.cc[@intFromEnum(constants.V.MIN)] = 1;
         } else {
-            raw.cc[constants.V.TIME] = 0;
-            raw.cc[constants.V.MIN] = 0;
+            raw.cc[@intFromEnum(constants.V.TIME)] = 0;
+            raw.cc[@intFromEnum(constants.V.MIN)] = 0;
         }
 
         break :blk raw;
@@ -361,7 +365,7 @@ pub inline fn isCooked(self: *const Term) bool {
     return self.cooked_termios == null;
 }
 
-pub const UncookError = posix.TermiosGetError || posix.TermiosSetError || posix.WriteError;
+pub const UncookError = posix.TermiosGetError || posix.TermiosSetError || posix.WriteError || posix.FcntlError || posix.ReadError || posix.PollError;
 
 /// Enter raw mode.
 pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
@@ -437,10 +441,45 @@ pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
         try self.enableKittyKeyboard(&buffered_writer);
     }
 
+    if (options.request_mode_2027) {
+        try self.enableMode2027(&buffered_writer);
+    }
+
     if (options.request_mouse_tracking) {
         try writer.writeAll(spells.enable_mouse_tracking);
     }
     try buffered_writer.flush();
+}
+
+/// See `spells.enable_mode_2027`
+pub fn enableMode2027(term: *Term, bw: anytype) !void {
+    const writer = bw.writer();
+    try writer.writeAll(spells.enable_mode_2027);
+    try writer.writeAll("\x1B[?2027$p");
+    try bw.flush();
+    var poll_fds: [1]posix.pollfd = .{
+        .{
+            .fd = term.tty,
+            .events = posix.POLL.IN,
+            .revents = 0,
+        },
+    };
+    _ = posix.poll(&poll_fds, 5) catch {};
+    if (poll_fds[0].revents & posix.POLL.IN != 0) {
+        var buf: [16]u8 = undefined;
+        if (posix.read(term.tty, &buf)) |len| {
+            if (std.mem.eql(u8, buf[0..len], "\x1b[?2027;1$y") or
+                std.mem.eql(u8, buf[0..len], "\x1b[?2027;3$y"))
+            {
+                term.mode_2027_enabled = true;
+                log.info("Mode 2027 enabled", .{});
+            }
+        } else |err| {
+            log.warn("Could not read mode 2027 query response from terminal: {}", .{err});
+        }
+    } else {
+        log.info("Mode 2027 not found, disabling", .{});
+    }
 }
 
 fn enableKittyKeyboard(term: *Term, buffered_writer: anytype) !void {

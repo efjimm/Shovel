@@ -20,6 +20,10 @@ pub const hide_cursor = "\x1B[?25l";
 pub const show_cursor = "\x1B[?25h";
 pub const move_cursor_fmt = "\x1B[%i%p1%d;%p2%dH";
 
+/// https://github.com/contour-terminal/terminal-unicode-core
+pub const enable_mode_2027 = "\x1b[2027h";
+pub const disable_mode_2027 = "\x1b[2027l";
+
 pub const CursorShape = enum(u3) {
     unknown,
     blinking_block = 1,
