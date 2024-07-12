@@ -34,7 +34,7 @@ fn searchTermInfoDirectory(term: []const u8) ?std.fs.File {
     std.debug.assert(term.len > 0);
 
     const path = getenv("TERMINFO") orelse return null;
-    var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
     var list = std.ArrayListUnmanaged(u8).initBuffer(&buf);
     list.appendSliceAssumeCapacity(path);
     list.appendSliceAssumeCapacity(&.{ sep, term[0], sep });
@@ -53,7 +53,7 @@ fn searchHomeDirectory(term: []const u8) ?std.fs.File {
 
     const home = getenv("HOME") orelse return null;
     const temp: []const u8 = .{sep} ++ ".terminfo" ++ .{ sep, term[0], sep };
-    var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
     var list = std.ArrayListUnmanaged(u8).initBuffer(&buf);
     list.appendSliceAssumeCapacity(home);
     list.appendSliceAssumeCapacity(temp);
@@ -71,7 +71,7 @@ fn searchTermInfoDirs(term: []const u8) ?std.fs.File {
     const dirs = getenv("TERMINFO_DIRS") orelse return null;
     var iter = std.mem.splitScalar(u8, dirs, ':');
 
-    var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
     var list = std.ArrayListUnmanaged(u8).initBuffer(&buf);
 
     while (iter.next()) |path| {
@@ -105,7 +105,7 @@ fn searchDefaultDirs(term: []const u8) ?std.fs.File {
         "/usr/local/share/lib/terminfo",
     };
 
-    var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
     var list = std.ArrayListUnmanaged(u8).initBuffer(&buf);
     for (dirs) |dir| {
         list.clearRetainingCapacity();

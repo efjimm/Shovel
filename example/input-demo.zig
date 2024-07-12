@@ -38,7 +38,7 @@ pub fn main() !void {
     term = try shovel.Term.init(allocator, .{});
     defer term.deinit(allocator);
 
-    try posix.sigaction(posix.SIG.WINCH, &posix.Sigaction{
+    try posix.sigaction(posix.SIG.WINCH, &.{
         .handler = .{ .handler = handleSigWinch },
         .mask = posix.empty_sigset,
         .flags = 0,
