@@ -14,7 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
-const Self = @This();
+const Style = @This();
 const TermInfo = @import("TermInfo.zig");
 
 pub const Colour = union(enum(u5)) {
@@ -63,7 +63,7 @@ fg: Colour = .none,
 bg: Colour = .none,
 attrs: Attribute = .{},
 
-pub fn init(fg: Colour, bg: Colour, attrs: Attribute) Self {
+pub fn init(fg: Colour, bg: Colour, attrs: Attribute) Style {
     return .{
         .fg = fg,
         .bg = bg,
@@ -71,26 +71,23 @@ pub fn init(fg: Colour, bg: Colour, attrs: Attribute) Self {
     };
 }
 
-pub fn eql(self: Self, other: Self) bool {
-    inline for (@typeInfo(Self).Struct.fields) |field| {
-        if (@field(self, field.name) != @field(other, field.name)) return false;
-    }
-    return true;
+pub fn eql(a: Style, b: Style) bool {
+    return std.meta.eql(a, b);
 }
 
 /// Dumps the attributes to `writer`, using the capabilities reported by `ti`.
-pub fn dump(self: Self, terminfo: ?*const TermInfo, writer: anytype) !void {
-    const ti = terminfo orelse return self.dumpRaw(writer);
+pub fn dump(style: Style, terminfo: ?*const TermInfo, writer: anytype) !void {
+    const ti = terminfo orelse return style.dumpRaw(writer);
 
     if (ti.getStringCapability(.set_attributes)) |sgr| {
         try TermInfo.writeParamSequence(sgr, writer, .{
-            self.attrs.standout,
-            self.attrs.underline,
-            self.attrs.reverse,
-            self.attrs.blinking,
-            self.attrs.dimmed,
-            self.attrs.bold,
-            self.attrs.hidden,
+            style.attrs.standout,
+            style.attrs.underline,
+            style.attrs.reverse,
+            style.attrs.blinking,
+            style.attrs.dimmed,
+            style.attrs.bold,
+            style.attrs.hidden,
             false,
             false,
         });
@@ -100,56 +97,56 @@ pub fn dump(self: Self, terminfo: ?*const TermInfo, writer: anytype) !void {
         // Other attributes are disabled individually anyway in case sgr0 is not defined.
         if (ti.getStringCapability(.exit_attribute_mode)) |sgr0| try writer.writeAll(sgr0);
 
-        if (self.attrs.standout) {
+        if (style.attrs.standout) {
             if (ti.getStringCapability(.enter_standout_mode)) |so| try writer.writeAll(so);
         } else if (ti.getStringCapability(.exit_standout_mode)) |so| try writer.writeAll(so);
 
-        if (self.attrs.underline) {
+        if (style.attrs.underline) {
             if (ti.getStringCapability(.enter_underline_mode)) |ul| try writer.writeAll(ul);
         } else if (ti.getStringCapability(.exit_underline_mode)) |ul| try writer.writeAll(ul);
 
-        if (self.attrs.reverse) {
+        if (style.attrs.reverse) {
             if (ti.getStringCapability(.enter_reverse_mode)) |rev| try writer.writeAll(rev);
         }
 
-        if (self.attrs.blinking) {
+        if (style.attrs.blinking) {
             if (ti.getStringCapability(.enter_blink_mode)) |blink| try writer.writeAll(blink);
         }
 
-        if (self.attrs.dimmed) {
+        if (style.attrs.dimmed) {
             if (ti.getStringCapability(.enter_dim_mode)) |dim| try writer.writeAll(dim);
         }
 
-        if (self.attrs.bold) {
+        if (style.attrs.bold) {
             if (ti.getStringCapability(.enter_bold_mode)) |bold| try writer.writeAll(bold);
         }
 
-        if (self.attrs.hidden) {
+        if (style.attrs.hidden) {
             if (ti.getStringCapability(.enter_secure_mode)) |invis| try writer.writeAll(invis);
         }
     }
 
-    if (self.attrs.strikethrough) {
+    if (style.attrs.strikethrough) {
         if (ti.getExtendedString("smxx")) |xx| try writer.writeAll(xx);
     } else {
         if (ti.getExtendedString("rmxx")) |xx| try writer.writeAll(xx);
     }
 
-    switch (self.fg) {
+    switch (style.fg) {
         .none => {},
         .black, .red, .green, .yellow, .blue, .magenta, .cyan, .white => {
-            const n = @intFromEnum(self.fg) - 1;
+            const n = @intFromEnum(style.fg) - 1;
             if (ti.getStringCapability(.set_a_foreground)) |setaf| {
                 try TermInfo.writeParamSequence(setaf, writer, .{n});
             } else if (ti.getStringCapability(.set_foreground)) |setf| {
                 // Rare case where setaf is not defined.
                 // Red/blue are swapped for setf.
-                const t = switch (self.fg) {
+                const t = switch (style.fg) {
                     .cyan => .yellow,
                     .yellow => .cyan,
                     .red => .blue,
                     .blue => .red,
-                    else => self.fg,
+                    else => style.fg,
                 };
                 try TermInfo.writeParamSequence(setf, writer, .{@intFromEnum(t) - 1});
             } else {
@@ -168,7 +165,7 @@ pub fn dump(self: Self, terminfo: ?*const TermInfo, writer: anytype) !void {
             const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
             if (num_colors >= 16) {
                 if (ti.getStringCapability(.set_a_foreground)) |setaf| {
-                    try TermInfo.writeParamSequence(setaf, writer, .{@intFromEnum(self.fg) - 1});
+                    try TermInfo.writeParamSequence(setaf, writer, .{@intFromEnum(style.fg) - 1});
                 }
             }
         },
@@ -199,21 +196,21 @@ pub fn dump(self: Self, terminfo: ?*const TermInfo, writer: anytype) !void {
         },
     }
 
-    switch (self.bg) {
+    switch (style.bg) {
         .none => {},
         .black, .red, .green, .yellow, .blue, .magenta, .cyan, .white => {
-            const n = @intFromEnum(self.bg) - 1;
+            const n = @intFromEnum(style.bg) - 1;
             if (ti.getStringCapability(.set_a_background)) |setab| {
                 try TermInfo.writeParamSequence(setab, writer, .{n});
             } else if (ti.getStringCapability(.set_background)) |setb| {
                 // Rare case where setab is not defined.
                 // Red/blue are swapped for setb.
-                const t = switch (self.bg) {
+                const t = switch (style.bg) {
                     .cyan => .yellow,
                     .yellow => .cyan,
                     .red => .blue,
                     .blue => .red,
-                    else => self.bg,
+                    else => style.bg,
                 };
                 try TermInfo.writeParamSequence(setb, writer, .{@intFromEnum(t) - 1});
             } else {
@@ -232,7 +229,7 @@ pub fn dump(self: Self, terminfo: ?*const TermInfo, writer: anytype) !void {
             const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
             if (num_colors >= 16) {
                 if (ti.getStringCapability(.set_a_background)) |setab| {
-                    try TermInfo.writeParamSequence(setab, writer, .{@intFromEnum(self.bg) - 1});
+                    try TermInfo.writeParamSequence(setab, writer, .{@intFromEnum(style.bg) - 1});
                 }
             }
         },
@@ -254,79 +251,84 @@ pub fn dump(self: Self, terminfo: ?*const TermInfo, writer: anytype) !void {
 
 /// Dumps attributes to `writer` using ANSI escape sequences. For better compatibility, prefer to
 /// use `dump`.
-pub fn dumpRaw(self: Self, writer: anytype) !void {
-    try writer.writeAll("\x1B[");
+pub fn dumpRaw(style: Style, writer: anytype) !void {
+    var buf: std.BoundedArray(u8, 64) = .{};
+    buf.appendSliceAssumeCapacity("\x1B[");
 
-    if (self.attrs.bold) try writer.writeAll(";1");
-    if (self.attrs.dimmed) try writer.writeAll(";2");
-    if (self.attrs.italic) try writer.writeAll(";3");
-    if (self.attrs.underline) try writer.writeAll(";4");
-    if (self.attrs.blinking) try writer.writeAll(";5");
-    if (self.attrs.reverse) try writer.writeAll(";7");
-    if (self.attrs.hidden) try writer.writeAll(";8");
-    if (self.attrs.strikethrough) try writer.writeAll(";9");
+    if (style.attrs.bold) buf.appendSliceAssumeCapacity("1;");
+    if (style.attrs.dimmed) buf.appendSliceAssumeCapacity("2;");
+    if (style.attrs.italic) buf.appendSliceAssumeCapacity("3;");
+    if (style.attrs.underline) buf.appendSliceAssumeCapacity("4;");
+    if (style.attrs.blinking) buf.appendSliceAssumeCapacity("5;");
+    if (style.attrs.reverse) buf.appendSliceAssumeCapacity("7;");
+    if (style.attrs.hidden) buf.appendSliceAssumeCapacity("8;");
+    if (style.attrs.strikethrough) buf.appendSliceAssumeCapacity("9;");
 
-    switch (self.fg) {
+    switch (style.fg) {
         .none => {},
-        .black => try writer.writeAll(";30"),
-        .red => try writer.writeAll(";31"),
-        .green => try writer.writeAll(";32"),
-        .yellow => try writer.writeAll(";33"),
-        .blue => try writer.writeAll(";34"),
-        .magenta => try writer.writeAll(";35"),
-        .cyan => try writer.writeAll(";36"),
-        .white => try writer.writeAll(";37"),
-        .bright_black => try writer.writeAll(";90"),
-        .bright_red => try writer.writeAll(";91"),
-        .bright_green => try writer.writeAll(";92"),
-        .bright_yellow => try writer.writeAll(";93"),
-        .bright_blue => try writer.writeAll(";94"),
-        .bright_magenta => try writer.writeAll(";95"),
-        .bright_cyan => try writer.writeAll(";96"),
-        .bright_white => try writer.writeAll(";97"),
+        .black => buf.appendSliceAssumeCapacity("30;"),
+        .red => buf.appendSliceAssumeCapacity("31;"),
+        .green => buf.appendSliceAssumeCapacity("32;"),
+        .yellow => buf.appendSliceAssumeCapacity("33;"),
+        .blue => buf.appendSliceAssumeCapacity("34;"),
+        .magenta => buf.appendSliceAssumeCapacity("35;"),
+        .cyan => buf.appendSliceAssumeCapacity("36;"),
+        .white => buf.appendSliceAssumeCapacity("37;"),
+        .bright_black => buf.appendSliceAssumeCapacity("90;"),
+        .bright_red => buf.appendSliceAssumeCapacity("91;"),
+        .bright_green => buf.appendSliceAssumeCapacity("92;"),
+        .bright_yellow => buf.appendSliceAssumeCapacity("93;"),
+        .bright_blue => buf.appendSliceAssumeCapacity("94;"),
+        .bright_magenta => buf.appendSliceAssumeCapacity("95;"),
+        .bright_cyan => buf.appendSliceAssumeCapacity("96;"),
+        .bright_white => buf.appendSliceAssumeCapacity("97;"),
         .@"256" => {
-            try writer.writeAll(";38;5");
-            try writer.print(";{d}", .{self.fg.@"256"});
+            buf.appendSliceAssumeCapacity("38;5;");
+            buf.writer().print("{d};", .{style.fg.@"256"}) catch unreachable;
         },
         .rgb => {
-            try writer.writeAll(";38;2");
-            try writer.print(";{d};{d};{d}", .{
-                self.fg.rgb[0],
-                self.fg.rgb[1],
-                self.fg.rgb[2],
-            });
+            buf.appendSliceAssumeCapacity("38;2;");
+            buf.writer().print("{d};{d};{d};", .{
+                style.fg.rgb[0],
+                style.fg.rgb[1],
+                style.fg.rgb[2],
+            }) catch unreachable;
         },
     }
-    switch (self.bg) {
+    switch (style.bg) {
         .none => {},
-        .black => try writer.writeAll(";40"),
-        .red => try writer.writeAll(";41"),
-        .green => try writer.writeAll(";42"),
-        .yellow => try writer.writeAll(";43"),
-        .blue => try writer.writeAll(";44"),
-        .magenta => try writer.writeAll(";45"),
-        .cyan => try writer.writeAll(";46"),
-        .white => try writer.writeAll(";74"),
-        .bright_black => try writer.writeAll(";100"),
-        .bright_red => try writer.writeAll(";101"),
-        .bright_green => try writer.writeAll(";102"),
-        .bright_yellow => try writer.writeAll(";103"),
-        .bright_blue => try writer.writeAll(";104"),
-        .bright_magenta => try writer.writeAll(";105"),
-        .bright_cyan => try writer.writeAll(";106"),
-        .bright_white => try writer.writeAll(";107"),
+        .black => buf.appendSliceAssumeCapacity("40;"),
+        .red => buf.appendSliceAssumeCapacity("41;"),
+        .green => buf.appendSliceAssumeCapacity("42;"),
+        .yellow => buf.appendSliceAssumeCapacity("43;"),
+        .blue => buf.appendSliceAssumeCapacity("44;"),
+        .magenta => buf.appendSliceAssumeCapacity("45;"),
+        .cyan => buf.appendSliceAssumeCapacity("46;"),
+        .white => buf.appendSliceAssumeCapacity("74;"),
+        .bright_black => buf.appendSliceAssumeCapacity("100;"),
+        .bright_red => buf.appendSliceAssumeCapacity("101;"),
+        .bright_green => buf.appendSliceAssumeCapacity("102;"),
+        .bright_yellow => buf.appendSliceAssumeCapacity("103;"),
+        .bright_blue => buf.appendSliceAssumeCapacity("104;"),
+        .bright_magenta => buf.appendSliceAssumeCapacity("105;"),
+        .bright_cyan => buf.appendSliceAssumeCapacity("106;"),
+        .bright_white => buf.appendSliceAssumeCapacity("107;"),
         .@"256" => {
-            try writer.writeAll(";48;5");
-            try writer.print(";{d}", .{self.bg.@"256"});
+            buf.appendSliceAssumeCapacity("48;5;");
+            buf.writer().print("{d};", .{style.bg.@"256"}) catch unreachable;
         },
         .rgb => {
-            try writer.writeAll(";48;2");
-            try writer.print(";{d};{d};{d}", .{
-                self.bg.rgb[0],
-                self.bg.rgb[1],
-                self.bg.rgb[2],
-            });
+            buf.appendSliceAssumeCapacity("48;2;");
+            buf.writer().print("{d};{d};{d};", .{
+                style.bg.rgb[0],
+                style.bg.rgb[1],
+                style.bg.rgb[2],
+            }) catch unreachable;
         },
     }
-    try writer.writeAll("m");
+    // Style was empty, we dont write anything in this case
+    if (buf.buffer[buf.len - 1] != ';') return;
+
+    buf.buffer[buf.len - 1] = 'm';
+    try writer.writeAll(buf.constSlice());
 }

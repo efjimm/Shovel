@@ -19,7 +19,7 @@ const unicode = std.unicode;
 
 const Input = @import("input.zig").Input;
 
-const ParseError = error{
+pub const ParseError = error{
     UnknownBadDescription,
 } || AddModError;
 

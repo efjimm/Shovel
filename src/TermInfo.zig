@@ -8,8 +8,6 @@ const native_endian = @import("builtin").cpu.arch.endian();
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const util = @import("util.zig");
-const critbit = @import("critbit");
-const CritBitMap = critbit.CritBitMap;
 const input = @import("input.zig");
 
 // Maximum length of terminfo definition files
@@ -289,6 +287,7 @@ const keys = [_]struct { []const u8, input.Input }{
     // .{ "sundo", .shift_undo },
 };
 
+// TODO: Test this
 pub fn createInputMap(
     self: *Self,
     allocator: Allocator,

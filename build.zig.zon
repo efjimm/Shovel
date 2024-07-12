@@ -17,8 +17,16 @@
             .hash = "1220cc83e32bc6a56437ef85404f52f7281a03912e3d8f4ccbdbcb54a5fc0356af35",
         },
         .@"critbit-zig" = .{
-            .url = "git+https://github.com/efjimm/critbit-zig#382aab562e549367f8bdb70427c2fb4c5fd56bae",
-            .hash = "1220a257b98cead00cb9eea5123cc59a82b9081f5341e8eb1d63592ff23f0999a3b8",
+            .url = "git+https://github.com/efjimm/critbit-zig?ref=master#ea05f1ed7b5a16164359c1ad455173ff47851f0b",
+            .hash = "12209ca18504482c93cfe45ffb7a0dd7b17e8e0bff5b7dc1848530fc123e634423cb",
+        },
+        .@"libgrapheme-zig" = .{
+            .url = "git+https://github.com/efjimm/zig-grapheme?ref=master#a1524e7856e2d05ed691eba74f8a94d6466deadd",
+            .hash = "1220d40635c4d71394c92a9b3674c490b56edf241057a661e550b26e5d34886280d0",
+        },
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis#40e51ad0542ea964190db411292660c274e2a984",
+            .hash = "12200ade9c84de359ac4a83645bda328342df7d2e288f2e2d966895b9b9f50da6b01",
         },
     },
 }

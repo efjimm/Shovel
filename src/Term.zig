@@ -89,11 +89,11 @@ pub fn inputParser(term: *Term, bytes: []const u8) InputParser {
 pub const WriteError = posix.WriteError;
 
 const Writer = io.Writer(posix.fd_t, posix.WriteError, posix.write);
-fn unbufferedWriter(self: Term) Writer {
+pub fn unbufferedWriter(self: Term) Writer {
     return .{ .context = self.tty };
 }
 
-fn bufferedWriter(
+pub fn bufferedWriter(
     self: Term,
     comptime buffer_size: usize,
 ) io.BufferedWriter(buffer_size, Writer) {
@@ -310,11 +310,13 @@ pub fn readInput(self: *Term, buf: []u8) ![]u8 {
     return slice;
 }
 
+// TODO: Make this ?bool
+
 pub fn getExtendedFlag(self: *const Term, name: []const u8) bool {
     return if (self.terminfo) |ti|
         ti.getExtendedFlag(name)
     else
-        null;
+        false;
 }
 
 pub fn getExtendedNumber(self: *const Term, name: []const u8) ?u31 {

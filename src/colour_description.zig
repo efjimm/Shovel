@@ -19,7 +19,7 @@ const mem = std.mem;
 
 const Colour = @import("Style.zig").Colour;
 
-const ParseError = error{
+pub const ParseError = error{
     BadColourDescription,
     BadRgbFormat,
 };
