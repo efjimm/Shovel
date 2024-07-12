@@ -1,4 +1,5 @@
 // TODO: Investigate using terminfo for mouse support
+// TODO: Ues enum arrays
 const std = @import("std");
 const log = @import("log.zig");
 const getenv = std.posix.getenv;
@@ -20,9 +21,9 @@ names: [:0]const u8 = "",
 string_table: []const u8 = "",
 ext_string_table: []u8 = "",
 
-flags: Flags = .{},
-numbers: Numbers = .{},
-strings: Strings = .{},
+flags: std.EnumArray(Flag, bool) = std.EnumArray(Flag, bool).initFill(false),
+numbers: std.EnumArray(Number, i32) = std.EnumArray(Number, i32).initFill(-1),
+strings: std.EnumArray(String, i16) = std.EnumArray(String, i16).initFill(-1),
 
 ext_flags: std.StringHashMapUnmanaged(void) = .{},
 ext_nums: std.StringHashMapUnmanaged(u31) = .{},
@@ -314,7 +315,7 @@ pub fn createInputMap(
     inline for (keys) |k| {
         const key_name, const in = k;
         const name = comptime print("key_{s}", .{key_name});
-        const tag = comptime std.meta.stringToEnum(StringTag, name).?;
+        const tag = comptime std.meta.stringToEnum(String, name).?;
         if (self.getStringCapability(tag)) |str| {
             map.put(allocator, str, in) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
@@ -325,7 +326,7 @@ pub fn createInputMap(
 
     inline for (0..64) |i| {
         const name = comptime print("key_f{d}", .{i});
-        const tag = comptime std.meta.stringToEnum(StringTag, name).?;
+        const tag = comptime std.meta.stringToEnum(String, name).?;
         if (self.getStringCapability(tag)) |str| {
             map.put(allocator, str, .{
                 .content = .{ .function = i },
@@ -385,7 +386,7 @@ fn parseInternal(allocator: Allocator, bytes: []const u8) !*Self {
 
     try reader.skipBytes(names_len, .{});
 
-    const flags_dest: *[Flags.count]bool = @ptrCast(&ret.flags);
+    const flags_dest = &ret.flags.values;
     for (flags_dest[0..flags_len]) |*flag| {
         // Convert byte to bool
         flag.* = 0 != try reader.readByte();
@@ -400,14 +401,14 @@ fn parseInternal(allocator: Allocator, bytes: []const u8) !*Self {
                 .legacy => i16,
                 .extended => i32,
             };
-            const nums_dest: *[Numbers.count]i32 = @ptrCast(&ret.numbers);
+            const nums_dest = &ret.numbers.values;
             for (nums_dest[0..nums_len]) |*num| {
                 num.* = try reader.readInt(T, .little);
             }
         },
     }
 
-    const strings_dest: *[Strings.count]i16 = @ptrCast(&ret.strings);
+    const strings_dest = &ret.strings.values;
     for (strings_dest[0..strings_len]) |*string_index| {
         string_index.* = try reader.readInt(i16, .little);
     }
@@ -502,20 +503,17 @@ fn parseInternal(allocator: Allocator, bytes: []const u8) !*Self {
     return ret;
 }
 
-pub fn getFlagCapability(self: *const Self, tag: FlagTag) bool {
-    const slice: *const [total_flags]bool = @ptrCast(&self.flags);
-    return slice[@intFromEnum(tag)];
+pub fn getFlagCapability(self: *const Self, tag: Flag) bool {
+    return self.flags.get(tag);
 }
 
-pub fn getNumberCapability(self: *const Self, tag: NumberTag) ?u31 {
-    const slice: *const [total_numbers]i32 = @ptrCast(&self.numbers);
-    const v = slice[@intFromEnum(tag)];
+pub fn getNumberCapability(self: *const Self, tag: Number) ?u31 {
+    const v = self.numbers.get(tag);
     return if (v < 0) null else @intCast(v);
 }
 
-pub fn getStringCapability(self: *const Self, tag: StringTag) ?[:0]const u8 {
-    const slice: *const [total_strings]i16 = @ptrCast(&self.strings);
-    const v = std.math.cast(u16, slice[@intFromEnum(tag)]) orelse return null;
+pub fn getStringCapability(self: *const Self, tag: String) ?[:0]const u8 {
+    const v = std.math.cast(u16, self.strings.get(tag)) orelse return null;
     return std.mem.span(@as([*:0]const u8, @ptrCast(self.string_table[v..].ptr)));
 }
 
@@ -534,527 +532,513 @@ pub fn getExtendedString(self: *const Self, name: []const u8) ?[:0]const u8 {
     return null;
 }
 
-pub const FlagTag = std.meta.FieldEnum(Flags);
-pub const NumberTag = std.meta.FieldEnum(Numbers);
-pub const StringTag = std.meta.FieldEnum(Strings);
+pub const Flag = enum {
+    auto_left_margin,
+    auto_right_margin,
+    no_esc_ctlc,
+    ceol_standout_glitch,
+    eat_newline_glitch,
+    erase_overstrike,
+    generic_type,
+    hard_copy,
+    has_meta_key,
+    has_status_line,
+    insert_null_glitch,
+    memory_above,
+    memory_below,
+    move_insert_mode,
+    move_standout_mode,
+    over_strike,
+    status_line_esc_ok,
+    dest_tabs_magic_smso,
+    tilde_glitch,
+    transparent_underline,
+    xon_xoff,
+    needs_xon_xoff,
+    prtr_silent,
+    hard_cursor,
+    non_rev_rmcup,
+    no_pad_char,
+    non_dest_scroll_region,
+    can_change,
+    back_color_erase,
+    hue_lightness_saturation,
+    col_addr_glitch,
+    cr_cancels_micro_mode,
+    has_print_wheel,
+    row_addr_glitch,
+    semi_auto_right_margin,
+    cpi_changes_res,
+    lpi_changes_res,
 
-const total_flags: comptime_int = @typeInfo(Flags).Struct.fields.len;
-const total_numbers: comptime_int = @typeInfo(Numbers).Struct.fields.len;
-const total_strings: comptime_int = @typeInfo(Strings).Struct.fields.len;
-
-pub const Flags = extern struct {
-    pub const count = 44;
-
-    auto_left_margin: bool = false,
-    auto_right_margin: bool = false,
-    no_esc_ctlc: bool = false,
-    ceol_standout_glitch: bool = false,
-    eat_newline_glitch: bool = false,
-    erase_overstrike: bool = false,
-    generic_type: bool = false,
-    hard_copy: bool = false,
-    has_meta_key: bool = false,
-    has_status_line: bool = false,
-    insert_null_glitch: bool = false,
-    memory_above: bool = false,
-    memory_below: bool = false,
-    move_insert_mode: bool = false,
-    move_standout_mode: bool = false,
-    over_strike: bool = false,
-    status_line_esc_ok: bool = false,
-    dest_tabs_magic_smso: bool = false,
-    tilde_glitch: bool = false,
-    transparent_underline: bool = false,
-    xon_xoff: bool = false,
-    needs_xon_xoff: bool = false,
-    prtr_silent: bool = false,
-    hard_cursor: bool = false,
-    non_rev_rmcup: bool = false,
-    no_pad_char: bool = false,
-    non_dest_scroll_region: bool = false,
-    can_change: bool = false,
-    back_color_erase: bool = false,
-    hue_lightness_saturation: bool = false,
-    col_addr_glitch: bool = false,
-    cr_cancels_micro_mode: bool = false,
-    has_print_wheel: bool = false,
-    row_addr_glitch: bool = false,
-    semi_auto_right_margin: bool = false,
-    cpi_changes_res: bool = false,
-    lpi_changes_res: bool = false,
-
-    backspaces_with_bs: bool = false,
-    crt_no_scrolling: bool = false,
-    no_correctly_working_cr: bool = false,
-    gnu_has_meta_key: bool = false,
-    linefeed_is_newline: bool = false,
-    has_hardware_tabs: bool = false,
-    return_does_clr_eol: bool = false,
+    backspaces_with_bs,
+    crt_no_scrolling,
+    no_correctly_working_cr,
+    gnu_has_meta_key,
+    linefeed_is_newline,
+    has_hardware_tabs,
+    return_does_clr_eol,
 };
 
-pub const Numbers = extern struct {
-    pub const count = 39;
+pub const Number = enum {
+    columns,
+    init_tabs,
+    lines,
+    lines_of_memory,
+    magic_cookie_glitch,
+    padding_baud_rate,
+    virtual_terminal,
+    width_status_line,
+    num_labels,
+    label_height,
+    label_width,
+    max_attributes,
+    maximum_windows,
+    max_colors,
+    max_pairs,
+    no_color_video,
+    buffer_capacity,
+    dot_vert_spacing,
+    dot_horz_spacing,
+    max_micro_address,
+    max_micro_jump,
+    micro_col_size,
+    micro_line_size,
+    number_of_pins,
+    output_res_char,
+    output_res_line,
+    output_res_horz_inch,
+    output_res_vert_inch,
+    print_rate,
+    wide_char_size,
+    buttons,
+    bit_image_entwining,
+    bit_image_type,
 
-    columns: i32 = -1,
-    init_tabs: i32 = -1,
-    lines: i32 = -1,
-    lines_of_memory: i32 = -1,
-    magic_cookie_glitch: i32 = -1,
-    padding_baud_rate: i32 = -1,
-    virtual_terminal: i32 = -1,
-    width_status_line: i32 = -1,
-    num_labels: i32 = -1,
-    label_height: i32 = -1,
-    label_width: i32 = -1,
-    max_attributes: i32 = -1,
-    maximum_windows: i32 = -1,
-    max_colors: i32 = -1,
-    max_pairs: i32 = -1,
-    no_color_video: i32 = -1,
-    buffer_capacity: i32 = -1,
-    dot_vert_spacing: i32 = -1,
-    dot_horz_spacing: i32 = -1,
-    max_micro_address: i32 = -1,
-    max_micro_jump: i32 = -1,
-    micro_col_size: i32 = -1,
-    micro_line_size: i32 = -1,
-    number_of_pins: i32 = -1,
-    output_res_char: i32 = -1,
-    output_res_line: i32 = -1,
-    output_res_horz_inch: i32 = -1,
-    output_res_vert_inch: i32 = -1,
-    print_rate: i32 = -1,
-    wide_char_size: i32 = -1,
-    buttons: i32 = -1,
-    bit_image_entwining: i32 = -1,
-    bit_image_type: i32 = -1,
-
-    magic_cookie_glitch_ul: i32 = -1,
-    carriage_return_delay: i32 = -1,
-    new_line_delay: i32 = -1,
-    backspace_delay: i32 = -1,
-    horizontal_tab_delay: i32 = -1,
-    number_of_function_keys: i32 = -1,
+    magic_cookie_glitch_ul,
+    carriage_return_delay,
+    new_line_delay,
+    backspace_delay,
+    horizontal_tab_delay,
+    number_of_function_keys,
 };
 
-pub const Strings = extern struct {
-    pub const count = 414;
+pub const String = enum {
+    back_tab,
+    bell,
+    carriage_return,
+    change_scroll_region,
+    clear_all_tabs,
+    clear_screen,
+    clr_eol,
+    clr_eos,
+    column_address,
+    command_character,
+    cursor_address,
+    cursor_down,
+    cursor_home,
+    cursor_invisible,
+    cursor_left,
+    cursor_mem_address,
+    cursor_normal,
+    cursor_right,
+    cursor_to_ll,
+    cursor_up,
+    cursor_visible,
+    delete_character,
+    delete_line,
+    dis_status_line,
+    down_half_line,
+    enter_alt_charset_mode,
+    enter_blink_mode,
+    enter_bold_mode,
+    enter_ca_mode,
+    enter_delete_mode,
+    enter_dim_mode,
+    enter_insert_mode,
+    enter_secure_mode,
+    enter_protected_mode,
+    enter_reverse_mode,
+    enter_standout_mode,
+    enter_underline_mode,
+    erase_chars,
+    exit_alt_charset_mode,
+    exit_attribute_mode,
+    exit_ca_mode,
+    exit_delete_mode,
+    exit_insert_mode,
+    exit_standout_mode,
+    exit_underline_mode,
+    flash_screen,
+    form_feed,
+    from_status_line,
+    init_1string,
+    init_2string,
+    init_3string,
+    init_file,
+    insert_character,
+    insert_line,
+    insert_padding,
+    key_backspace,
+    key_catab,
+    key_clear,
+    key_ctab,
+    key_dc,
+    key_dl,
+    key_down,
+    key_eic,
+    key_eol,
+    key_eos,
+    key_f0,
+    key_f1,
+    key_f10,
+    key_f2,
+    key_f3,
+    key_f4,
+    key_f5,
+    key_f6,
+    key_f7,
+    key_f8,
+    key_f9,
+    key_home,
+    key_ic,
+    key_il,
+    key_left,
+    key_ll,
+    key_npage,
+    key_ppage,
+    key_right,
+    key_sf,
+    key_sr,
+    key_stab,
+    key_up,
+    keypad_local,
+    keypad_xmit,
+    lab_f0,
+    lab_f1,
+    lab_f10,
+    lab_f2,
+    lab_f3,
+    lab_f4,
+    lab_f5,
+    lab_f6,
+    lab_f7,
+    lab_f8,
+    lab_f9,
+    meta_off,
+    meta_on,
+    newline,
+    pad_char,
+    parm_dch,
+    parm_delete_line,
+    parm_down_cursor,
+    parm_ich,
+    parm_index,
+    parm_insert_line,
+    parm_left_cursor,
+    parm_right_cursor,
+    parm_rindex,
+    parm_up_cursor,
+    pkey_key,
+    pkey_local,
+    pkey_xmit,
+    print_screen,
+    prtr_off,
+    prtr_on,
+    repeat_char,
+    reset_1string,
+    reset_2string,
+    reset_3string,
+    reset_file,
+    restore_cursor,
+    row_address,
+    save_cursor,
+    scroll_forward,
+    scroll_reverse,
+    set_attributes,
+    set_tab,
+    set_window,
+    tab,
+    to_status_line,
+    underline_char,
+    up_half_line,
+    init_prog,
+    key_a1,
+    key_a3,
+    key_b2,
+    key_c1,
+    key_c3,
+    prtr_non,
+    char_padding,
+    acs_chars,
+    plab_norm,
+    key_btab,
+    enter_xon_mode,
+    exit_xon_mode,
+    enter_am_mode,
+    exit_am_mode,
+    xon_character,
+    xoff_character,
+    ena_acs,
+    label_on,
+    label_off,
+    key_beg,
+    key_cancel,
+    key_close,
+    key_command,
+    key_copy,
+    key_create,
+    key_end,
+    key_enter,
+    key_exit,
+    key_find,
+    key_help,
+    key_mark,
+    key_message,
+    key_move,
+    key_next,
+    key_open,
+    key_options,
+    key_previous,
+    key_print,
+    key_redo,
+    key_reference,
+    key_refresh,
+    key_replace,
+    key_restart,
+    key_resume,
+    key_save,
+    key_suspend,
+    key_undo,
+    key_sbeg,
+    key_scancel,
+    key_scommand,
+    key_scopy,
+    key_screate,
+    key_sdc,
+    key_sdl,
+    key_select,
+    key_send,
+    key_seol,
+    key_sexit,
+    key_sfind,
+    key_shelp,
+    key_shome,
+    key_sic,
+    key_sleft,
+    key_smessage,
+    key_smove,
+    key_snext,
+    key_soptions,
+    key_sprevious,
+    key_sprint,
+    key_sredo,
+    key_sreplace,
+    key_sright,
+    key_srsume,
+    key_ssave,
+    key_ssuspend,
+    key_sundo,
+    req_for_input,
+    key_f11,
+    key_f12,
+    key_f13,
+    key_f14,
+    key_f15,
+    key_f16,
+    key_f17,
+    key_f18,
+    key_f19,
+    key_f20,
+    key_f21,
+    key_f22,
+    key_f23,
+    key_f24,
+    key_f25,
+    key_f26,
+    key_f27,
+    key_f28,
+    key_f29,
+    key_f30,
+    key_f31,
+    key_f32,
+    key_f33,
+    key_f34,
+    key_f35,
+    key_f36,
+    key_f37,
+    key_f38,
+    key_f39,
+    key_f40,
+    key_f41,
+    key_f42,
+    key_f43,
+    key_f44,
+    key_f45,
+    key_f46,
+    key_f47,
+    key_f48,
+    key_f49,
+    key_f50,
+    key_f51,
+    key_f52,
+    key_f53,
+    key_f54,
+    key_f55,
+    key_f56,
+    key_f57,
+    key_f58,
+    key_f59,
+    key_f60,
+    key_f61,
+    key_f62,
+    key_f63,
+    clr_bol,
+    clear_margins,
+    set_left_margin,
+    set_right_margin,
+    label_format,
+    set_clock,
+    display_clock,
+    remove_clock,
+    create_window,
+    goto_window,
+    hangup,
+    dial_phone,
+    quick_dial,
+    tone,
+    pulse,
+    flash_hook,
+    fixed_pause,
+    wait_tone,
+    user0,
+    user1,
+    user2,
+    user3,
+    user4,
+    user5,
+    user6,
+    user7,
+    user8,
+    user9,
+    orig_pair,
+    orig_colors,
+    initialize_color,
+    initialize_pair,
+    set_color_pair,
+    set_foreground,
+    set_background,
+    change_char_pitch,
+    change_line_pitch,
+    change_res_horz,
+    change_res_vert,
+    define_char,
+    enter_doublewide_mode,
+    enter_draft_quality,
+    enter_italics_mode,
+    enter_leftward_mode,
+    enter_micro_mode,
+    enter_near_letter_quality,
+    enter_normal_quality,
+    enter_shadow_mode,
+    enter_subscript_mode,
+    enter_superscript_mode,
+    enter_upward_mode,
+    exit_doublewide_mode,
+    exit_italics_mode,
+    exit_leftward_mode,
+    exit_micro_mode,
+    exit_shadow_mode,
+    exit_subscript_mode,
+    exit_superscript_mode,
+    exit_upward_mode,
+    micro_column_address,
+    micro_down,
+    micro_left,
+    micro_right,
+    micro_row_address,
+    micro_up,
+    order_of_pins,
+    parm_down_micro,
+    parm_left_micro,
+    parm_right_micro,
+    parm_up_micro,
+    select_char_set,
+    set_bottom_margin,
+    set_bottom_margin_parm,
+    set_left_margin_parm,
+    set_right_margin_parm,
+    set_top_margin,
+    set_top_margin_parm,
+    start_bit_image,
+    start_char_set_def,
+    stop_bit_image,
+    stop_char_set_def,
+    subscript_characters,
+    superscript_characters,
+    these_cause_cr,
+    zero_motion,
+    char_set_names,
+    key_mouse,
+    mouse_info,
+    req_mouse_pos,
+    get_mouse,
+    set_a_foreground,
+    set_a_background,
+    pkey_plab,
+    device_type,
+    code_set_init,
+    set0_des_seq,
+    set1_des_seq,
+    set2_des_seq,
+    set3_des_seq,
+    set_lr_margin,
+    set_tb_margin,
+    bit_image_repeat,
+    bit_image_newline,
+    bit_image_carriage_return,
+    color_names,
+    define_bit_image_region,
+    end_bit_image_region,
+    set_color_band,
+    set_page_length,
+    display_pc_char,
+    enter_pc_charset_mode,
+    exit_pc_charset_mode,
+    enter_scancode_mode,
+    exit_scancode_mode,
+    pc_term_options,
+    scancode_escape,
+    alt_scancode_esc,
+    enter_horizontal_hl_mode,
+    enter_left_hl_mode,
+    enter_low_hl_mode,
+    enter_right_hl_mode,
+    enter_top_hl_mode,
+    enter_vertical_hl_mode,
+    set_a_attributes,
+    set_pglen_inch,
 
-    back_tab: i16 = -1,
-    bell: i16 = -1,
-    carriage_return: i16 = -1,
-    change_scroll_region: i16 = -1,
-    clear_all_tabs: i16 = -1,
-    clear_screen: i16 = -1,
-    clr_eol: i16 = -1,
-    clr_eos: i16 = -1,
-    column_address: i16 = -1,
-    command_character: i16 = -1,
-    cursor_address: i16 = -1,
-    cursor_down: i16 = -1,
-    cursor_home: i16 = -1,
-    cursor_invisible: i16 = -1,
-    cursor_left: i16 = -1,
-    cursor_mem_address: i16 = -1,
-    cursor_normal: i16 = -1,
-    cursor_right: i16 = -1,
-    cursor_to_ll: i16 = -1,
-    cursor_up: i16 = -1,
-    cursor_visible: i16 = -1,
-    delete_character: i16 = -1,
-    delete_line: i16 = -1,
-    dis_status_line: i16 = -1,
-    down_half_line: i16 = -1,
-    enter_alt_charset_mode: i16 = -1,
-    enter_blink_mode: i16 = -1,
-    enter_bold_mode: i16 = -1,
-    enter_ca_mode: i16 = -1,
-    enter_delete_mode: i16 = -1,
-    enter_dim_mode: i16 = -1,
-    enter_insert_mode: i16 = -1,
-    enter_secure_mode: i16 = -1,
-    enter_protected_mode: i16 = -1,
-    enter_reverse_mode: i16 = -1,
-    enter_standout_mode: i16 = -1,
-    enter_underline_mode: i16 = -1,
-    erase_chars: i16 = -1,
-    exit_alt_charset_mode: i16 = -1,
-    exit_attribute_mode: i16 = -1,
-    exit_ca_mode: i16 = -1,
-    exit_delete_mode: i16 = -1,
-    exit_insert_mode: i16 = -1,
-    exit_standout_mode: i16 = -1,
-    exit_underline_mode: i16 = -1,
-    flash_screen: i16 = -1,
-    form_feed: i16 = -1,
-    from_status_line: i16 = -1,
-    init_1string: i16 = -1,
-    init_2string: i16 = -1,
-    init_3string: i16 = -1,
-    init_file: i16 = -1,
-    insert_character: i16 = -1,
-    insert_line: i16 = -1,
-    insert_padding: i16 = -1,
-    key_backspace: i16 = -1,
-    key_catab: i16 = -1,
-    key_clear: i16 = -1,
-    key_ctab: i16 = -1,
-    key_dc: i16 = -1,
-    key_dl: i16 = -1,
-    key_down: i16 = -1,
-    key_eic: i16 = -1,
-    key_eol: i16 = -1,
-    key_eos: i16 = -1,
-    key_f0: i16 = -1,
-    key_f1: i16 = -1,
-    key_f10: i16 = -1,
-    key_f2: i16 = -1,
-    key_f3: i16 = -1,
-    key_f4: i16 = -1,
-    key_f5: i16 = -1,
-    key_f6: i16 = -1,
-    key_f7: i16 = -1,
-    key_f8: i16 = -1,
-    key_f9: i16 = -1,
-    key_home: i16 = -1,
-    key_ic: i16 = -1,
-    key_il: i16 = -1,
-    key_left: i16 = -1,
-    key_ll: i16 = -1,
-    key_npage: i16 = -1,
-    key_ppage: i16 = -1,
-    key_right: i16 = -1,
-    key_sf: i16 = -1,
-    key_sr: i16 = -1,
-    key_stab: i16 = -1,
-    key_up: i16 = -1,
-    keypad_local: i16 = -1,
-    keypad_xmit: i16 = -1,
-    lab_f0: i16 = -1,
-    lab_f1: i16 = -1,
-    lab_f10: i16 = -1,
-    lab_f2: i16 = -1,
-    lab_f3: i16 = -1,
-    lab_f4: i16 = -1,
-    lab_f5: i16 = -1,
-    lab_f6: i16 = -1,
-    lab_f7: i16 = -1,
-    lab_f8: i16 = -1,
-    lab_f9: i16 = -1,
-    meta_off: i16 = -1,
-    meta_on: i16 = -1,
-    newline: i16 = -1,
-    pad_char: i16 = -1,
-    parm_dch: i16 = -1,
-    parm_delete_line: i16 = -1,
-    parm_down_cursor: i16 = -1,
-    parm_ich: i16 = -1,
-    parm_index: i16 = -1,
-    parm_insert_line: i16 = -1,
-    parm_left_cursor: i16 = -1,
-    parm_right_cursor: i16 = -1,
-    parm_rindex: i16 = -1,
-    parm_up_cursor: i16 = -1,
-    pkey_key: i16 = -1,
-    pkey_local: i16 = -1,
-    pkey_xmit: i16 = -1,
-    print_screen: i16 = -1,
-    prtr_off: i16 = -1,
-    prtr_on: i16 = -1,
-    repeat_char: i16 = -1,
-    reset_1string: i16 = -1,
-    reset_2string: i16 = -1,
-    reset_3string: i16 = -1,
-    reset_file: i16 = -1,
-    restore_cursor: i16 = -1,
-    row_address: i16 = -1,
-    save_cursor: i16 = -1,
-    scroll_forward: i16 = -1,
-    scroll_reverse: i16 = -1,
-    set_attributes: i16 = -1,
-    set_tab: i16 = -1,
-    set_window: i16 = -1,
-    tab: i16 = -1,
-    to_status_line: i16 = -1,
-    underline_char: i16 = -1,
-    up_half_line: i16 = -1,
-    init_prog: i16 = -1,
-    key_a1: i16 = -1,
-    key_a3: i16 = -1,
-    key_b2: i16 = -1,
-    key_c1: i16 = -1,
-    key_c3: i16 = -1,
-    prtr_non: i16 = -1,
-    char_padding: i16 = -1,
-    acs_chars: i16 = -1,
-    plab_norm: i16 = -1,
-    key_btab: i16 = -1,
-    enter_xon_mode: i16 = -1,
-    exit_xon_mode: i16 = -1,
-    enter_am_mode: i16 = -1,
-    exit_am_mode: i16 = -1,
-    xon_character: i16 = -1,
-    xoff_character: i16 = -1,
-    ena_acs: i16 = -1,
-    label_on: i16 = -1,
-    label_off: i16 = -1,
-    key_beg: i16 = -1,
-    key_cancel: i16 = -1,
-    key_close: i16 = -1,
-    key_command: i16 = -1,
-    key_copy: i16 = -1,
-    key_create: i16 = -1,
-    key_end: i16 = -1,
-    key_enter: i16 = -1,
-    key_exit: i16 = -1,
-    key_find: i16 = -1,
-    key_help: i16 = -1,
-    key_mark: i16 = -1,
-    key_message: i16 = -1,
-    key_move: i16 = -1,
-    key_next: i16 = -1,
-    key_open: i16 = -1,
-    key_options: i16 = -1,
-    key_previous: i16 = -1,
-    key_print: i16 = -1,
-    key_redo: i16 = -1,
-    key_reference: i16 = -1,
-    key_refresh: i16 = -1,
-    key_replace: i16 = -1,
-    key_restart: i16 = -1,
-    key_resume: i16 = -1,
-    key_save: i16 = -1,
-    key_suspend: i16 = -1,
-    key_undo: i16 = -1,
-    key_sbeg: i16 = -1,
-    key_scancel: i16 = -1,
-    key_scommand: i16 = -1,
-    key_scopy: i16 = -1,
-    key_screate: i16 = -1,
-    key_sdc: i16 = -1,
-    key_sdl: i16 = -1,
-    key_select: i16 = -1,
-    key_send: i16 = -1,
-    key_seol: i16 = -1,
-    key_sexit: i16 = -1,
-    key_sfind: i16 = -1,
-    key_shelp: i16 = -1,
-    key_shome: i16 = -1,
-    key_sic: i16 = -1,
-    key_sleft: i16 = -1,
-    key_smessage: i16 = -1,
-    key_smove: i16 = -1,
-    key_snext: i16 = -1,
-    key_soptions: i16 = -1,
-    key_sprevious: i16 = -1,
-    key_sprint: i16 = -1,
-    key_sredo: i16 = -1,
-    key_sreplace: i16 = -1,
-    key_sright: i16 = -1,
-    key_srsume: i16 = -1,
-    key_ssave: i16 = -1,
-    key_ssuspend: i16 = -1,
-    key_sundo: i16 = -1,
-    req_for_input: i16 = -1,
-    key_f11: i16 = -1,
-    key_f12: i16 = -1,
-    key_f13: i16 = -1,
-    key_f14: i16 = -1,
-    key_f15: i16 = -1,
-    key_f16: i16 = -1,
-    key_f17: i16 = -1,
-    key_f18: i16 = -1,
-    key_f19: i16 = -1,
-    key_f20: i16 = -1,
-    key_f21: i16 = -1,
-    key_f22: i16 = -1,
-    key_f23: i16 = -1,
-    key_f24: i16 = -1,
-    key_f25: i16 = -1,
-    key_f26: i16 = -1,
-    key_f27: i16 = -1,
-    key_f28: i16 = -1,
-    key_f29: i16 = -1,
-    key_f30: i16 = -1,
-    key_f31: i16 = -1,
-    key_f32: i16 = -1,
-    key_f33: i16 = -1,
-    key_f34: i16 = -1,
-    key_f35: i16 = -1,
-    key_f36: i16 = -1,
-    key_f37: i16 = -1,
-    key_f38: i16 = -1,
-    key_f39: i16 = -1,
-    key_f40: i16 = -1,
-    key_f41: i16 = -1,
-    key_f42: i16 = -1,
-    key_f43: i16 = -1,
-    key_f44: i16 = -1,
-    key_f45: i16 = -1,
-    key_f46: i16 = -1,
-    key_f47: i16 = -1,
-    key_f48: i16 = -1,
-    key_f49: i16 = -1,
-    key_f50: i16 = -1,
-    key_f51: i16 = -1,
-    key_f52: i16 = -1,
-    key_f53: i16 = -1,
-    key_f54: i16 = -1,
-    key_f55: i16 = -1,
-    key_f56: i16 = -1,
-    key_f57: i16 = -1,
-    key_f58: i16 = -1,
-    key_f59: i16 = -1,
-    key_f60: i16 = -1,
-    key_f61: i16 = -1,
-    key_f62: i16 = -1,
-    key_f63: i16 = -1,
-    clr_bol: i16 = -1,
-    clear_margins: i16 = -1,
-    set_left_margin: i16 = -1,
-    set_right_margin: i16 = -1,
-    label_format: i16 = -1,
-    set_clock: i16 = -1,
-    display_clock: i16 = -1,
-    remove_clock: i16 = -1,
-    create_window: i16 = -1,
-    goto_window: i16 = -1,
-    hangup: i16 = -1,
-    dial_phone: i16 = -1,
-    quick_dial: i16 = -1,
-    tone: i16 = -1,
-    pulse: i16 = -1,
-    flash_hook: i16 = -1,
-    fixed_pause: i16 = -1,
-    wait_tone: i16 = -1,
-    user0: i16 = -1,
-    user1: i16 = -1,
-    user2: i16 = -1,
-    user3: i16 = -1,
-    user4: i16 = -1,
-    user5: i16 = -1,
-    user6: i16 = -1,
-    user7: i16 = -1,
-    user8: i16 = -1,
-    user9: i16 = -1,
-    orig_pair: i16 = -1,
-    orig_colors: i16 = -1,
-    initialize_color: i16 = -1,
-    initialize_pair: i16 = -1,
-    set_color_pair: i16 = -1,
-    set_foreground: i16 = -1,
-    set_background: i16 = -1,
-    change_char_pitch: i16 = -1,
-    change_line_pitch: i16 = -1,
-    change_res_horz: i16 = -1,
-    change_res_vert: i16 = -1,
-    define_char: i16 = -1,
-    enter_doublewide_mode: i16 = -1,
-    enter_draft_quality: i16 = -1,
-    enter_italics_mode: i16 = -1,
-    enter_leftward_mode: i16 = -1,
-    enter_micro_mode: i16 = -1,
-    enter_near_letter_quality: i16 = -1,
-    enter_normal_quality: i16 = -1,
-    enter_shadow_mode: i16 = -1,
-    enter_subscript_mode: i16 = -1,
-    enter_superscript_mode: i16 = -1,
-    enter_upward_mode: i16 = -1,
-    exit_doublewide_mode: i16 = -1,
-    exit_italics_mode: i16 = -1,
-    exit_leftward_mode: i16 = -1,
-    exit_micro_mode: i16 = -1,
-    exit_shadow_mode: i16 = -1,
-    exit_subscript_mode: i16 = -1,
-    exit_superscript_mode: i16 = -1,
-    exit_upward_mode: i16 = -1,
-    micro_column_address: i16 = -1,
-    micro_down: i16 = -1,
-    micro_left: i16 = -1,
-    micro_right: i16 = -1,
-    micro_row_address: i16 = -1,
-    micro_up: i16 = -1,
-    order_of_pins: i16 = -1,
-    parm_down_micro: i16 = -1,
-    parm_left_micro: i16 = -1,
-    parm_right_micro: i16 = -1,
-    parm_up_micro: i16 = -1,
-    select_char_set: i16 = -1,
-    set_bottom_margin: i16 = -1,
-    set_bottom_margin_parm: i16 = -1,
-    set_left_margin_parm: i16 = -1,
-    set_right_margin_parm: i16 = -1,
-    set_top_margin: i16 = -1,
-    set_top_margin_parm: i16 = -1,
-    start_bit_image: i16 = -1,
-    start_char_set_def: i16 = -1,
-    stop_bit_image: i16 = -1,
-    stop_char_set_def: i16 = -1,
-    subscript_characters: i16 = -1,
-    superscript_characters: i16 = -1,
-    these_cause_cr: i16 = -1,
-    zero_motion: i16 = -1,
-    char_set_names: i16 = -1,
-    key_mouse: i16 = -1,
-    mouse_info: i16 = -1,
-    req_mouse_pos: i16 = -1,
-    get_mouse: i16 = -1,
-    set_a_foreground: i16 = -1,
-    set_a_background: i16 = -1,
-    pkey_plab: i16 = -1,
-    device_type: i16 = -1,
-    code_set_init: i16 = -1,
-    set0_des_seq: i16 = -1,
-    set1_des_seq: i16 = -1,
-    set2_des_seq: i16 = -1,
-    set3_des_seq: i16 = -1,
-    set_lr_margin: i16 = -1,
-    set_tb_margin: i16 = -1,
-    bit_image_repeat: i16 = -1,
-    bit_image_newline: i16 = -1,
-    bit_image_carriage_return: i16 = -1,
-    color_names: i16 = -1,
-    define_bit_image_region: i16 = -1,
-    end_bit_image_region: i16 = -1,
-    set_color_band: i16 = -1,
-    set_page_length: i16 = -1,
-    display_pc_char: i16 = -1,
-    enter_pc_charset_mode: i16 = -1,
-    exit_pc_charset_mode: i16 = -1,
-    enter_scancode_mode: i16 = -1,
-    exit_scancode_mode: i16 = -1,
-    pc_term_options: i16 = -1,
-    scancode_escape: i16 = -1,
-    alt_scancode_esc: i16 = -1,
-    enter_horizontal_hl_mode: i16 = -1,
-    enter_left_hl_mode: i16 = -1,
-    enter_low_hl_mode: i16 = -1,
-    enter_right_hl_mode: i16 = -1,
-    enter_top_hl_mode: i16 = -1,
-    enter_vertical_hl_mode: i16 = -1,
-    set_a_attributes: i16 = -1,
-    set_pglen_inch: i16 = -1,
-
-    termcap_init2: i16 = -1,
-    termcap_reset: i16 = -1,
-    linefeed_if_not_lf: i16 = -1,
-    backspace_if_not_bs: i16 = -1,
-    other_non_function_keys: i16 = -1,
-    arrow_key_map: i16 = -1,
-    acs_ulcorner: i16 = -1,
-    acs_llcorner: i16 = -1,
-    acs_urcorner: i16 = -1,
-    acs_lrcorner: i16 = -1,
-    acs_ltee: i16 = -1,
-    acs_rtee: i16 = -1,
-    acs_btee: i16 = -1,
-    acs_ttee: i16 = -1,
-    acs_hline: i16 = -1,
-    acs_vline: i16 = -1,
-    acs_plus: i16 = -1,
-    memory_lock: i16 = -1,
-    memory_unlock: i16 = -1,
-    box_chars_1: i16 = -1,
+    termcap_init2,
+    termcap_reset,
+    linefeed_if_not_lf,
+    backspace_if_not_bs,
+    other_non_function_keys,
+    arrow_key_map,
+    acs_ulcorner,
+    acs_llcorner,
+    acs_urcorner,
+    acs_lrcorner,
+    acs_ltee,
+    acs_rtee,
+    acs_btee,
+    acs_ttee,
+    acs_hline,
+    acs_vline,
+    acs_plus,
+    memory_lock,
+    memory_unlock,
+    box_chars_1,
 };
 
 const Parameter = union(enum) {
@@ -1519,45 +1503,45 @@ test "Invalid" {
 test "Boolean capabilities" {
     const res = try parse(ta, &terminfo);
     defer res.destroy(ta);
-    try t.expectEqual(false, res.flags.auto_left_margin);
-    try t.expectEqual(true, res.flags.auto_right_margin);
-    try t.expectEqual(false, res.flags.no_esc_ctlc);
-    try t.expectEqual(false, res.flags.ceol_standout_glitch);
-    try t.expectEqual(true, res.flags.eat_newline_glitch);
-    try t.expectEqual(false, res.flags.erase_overstrike);
-    try t.expectEqual(false, res.flags.generic_type);
-    try t.expectEqual(false, res.flags.hard_copy);
-    try t.expectEqual(false, res.flags.has_meta_key);
-    try t.expectEqual(true, res.flags.has_status_line);
-    try t.expectEqual(false, res.flags.insert_null_glitch);
-    try t.expectEqual(false, res.flags.memory_above);
-    try t.expectEqual(false, res.flags.memory_below);
-    try t.expectEqual(true, res.flags.move_insert_mode);
-    try t.expectEqual(true, res.flags.move_standout_mode);
-    try t.expectEqual(false, res.flags.over_strike);
-    try t.expectEqual(false, res.flags.status_line_esc_ok);
-    try t.expectEqual(false, res.flags.dest_tabs_magic_smso);
-    try t.expectEqual(false, res.flags.tilde_glitch);
-    try t.expectEqual(false, res.flags.transparent_underline);
-    try t.expectEqual(false, res.flags.xon_xoff);
-    try t.expectEqual(false, res.flags.needs_xon_xoff);
-    try t.expectEqual(false, res.flags.prtr_silent);
-    try t.expectEqual(false, res.flags.hard_cursor);
-    try t.expectEqual(false, res.flags.non_rev_rmcup);
-    try t.expectEqual(true, res.flags.no_pad_char);
-    try t.expectEqual(false, res.flags.non_dest_scroll_region);
-    try t.expectEqual(true, res.flags.can_change);
-    try t.expectEqual(true, res.flags.back_color_erase);
+    try t.expectEqual(false, res.flags.get(.auto_left_margin));
+    try t.expectEqual(true, res.flags.get(.auto_right_margin));
+    try t.expectEqual(false, res.flags.get(.no_esc_ctlc));
+    try t.expectEqual(false, res.flags.get(.ceol_standout_glitch));
+    try t.expectEqual(true, res.flags.get(.eat_newline_glitch));
+    try t.expectEqual(false, res.flags.get(.erase_overstrike));
+    try t.expectEqual(false, res.flags.get(.generic_type));
+    try t.expectEqual(false, res.flags.get(.hard_copy));
+    try t.expectEqual(false, res.flags.get(.has_meta_key));
+    try t.expectEqual(true, res.flags.get(.has_status_line));
+    try t.expectEqual(false, res.flags.get(.insert_null_glitch));
+    try t.expectEqual(false, res.flags.get(.memory_above));
+    try t.expectEqual(false, res.flags.get(.memory_below));
+    try t.expectEqual(true, res.flags.get(.move_insert_mode));
+    try t.expectEqual(true, res.flags.get(.move_standout_mode));
+    try t.expectEqual(false, res.flags.get(.over_strike));
+    try t.expectEqual(false, res.flags.get(.status_line_esc_ok));
+    try t.expectEqual(false, res.flags.get(.dest_tabs_magic_smso));
+    try t.expectEqual(false, res.flags.get(.tilde_glitch));
+    try t.expectEqual(false, res.flags.get(.transparent_underline));
+    try t.expectEqual(false, res.flags.get(.xon_xoff));
+    try t.expectEqual(false, res.flags.get(.needs_xon_xoff));
+    try t.expectEqual(false, res.flags.get(.prtr_silent));
+    try t.expectEqual(false, res.flags.get(.hard_cursor));
+    try t.expectEqual(false, res.flags.get(.non_rev_rmcup));
+    try t.expectEqual(true, res.flags.get(.no_pad_char));
+    try t.expectEqual(false, res.flags.get(.non_dest_scroll_region));
+    try t.expectEqual(true, res.flags.get(.can_change));
+    try t.expectEqual(true, res.flags.get(.back_color_erase));
 
     // Should all be false, as the number of flags is only 29
-    try t.expectEqual(false, res.flags.hue_lightness_saturation);
-    try t.expectEqual(false, res.flags.col_addr_glitch);
-    try t.expectEqual(false, res.flags.cr_cancels_micro_mode);
-    try t.expectEqual(false, res.flags.has_print_wheel);
-    try t.expectEqual(false, res.flags.row_addr_glitch);
-    try t.expectEqual(false, res.flags.semi_auto_right_margin);
-    try t.expectEqual(false, res.flags.cpi_changes_res);
-    try t.expectEqual(false, res.flags.lpi_changes_res);
+    try t.expectEqual(false, res.flags.get(.hue_lightness_saturation));
+    try t.expectEqual(false, res.flags.get(.col_addr_glitch));
+    try t.expectEqual(false, res.flags.get(.cr_cancels_micro_mode));
+    try t.expectEqual(false, res.flags.get(.has_print_wheel));
+    try t.expectEqual(false, res.flags.get(.row_addr_glitch));
+    try t.expectEqual(false, res.flags.get(.semi_auto_right_margin));
+    try t.expectEqual(false, res.flags.get(.cpi_changes_res));
+    try t.expectEqual(false, res.flags.get(.lpi_changes_res));
 }
 
 fn expectNumber(expected: u16, actual: i16) !void {
@@ -1573,41 +1557,41 @@ test "Number capabilities" {
     defer res.destroy(ta);
 
     // Hex values taken from running `hexdump -C` on the terminfo file
-    try expectNumber32(0x0050, res.numbers.columns);
-    try expectNumber32(0x0008, res.numbers.init_tabs);
-    try expectNumber32(0x0018, res.numbers.lines);
-    try expectNumber32(0xffffffff, res.numbers.lines_of_memory);
-    try expectNumber32(0xffffffff, res.numbers.magic_cookie_glitch);
-    try expectNumber32(0xffffffff, res.numbers.padding_baud_rate);
-    try expectNumber32(0xffffffff, res.numbers.virtual_terminal);
-    try expectNumber32(0xffffffff, res.numbers.width_status_line);
-    try expectNumber32(0xffffffff, res.numbers.num_labels);
-    try expectNumber32(0xffffffff, res.numbers.label_height);
-    try expectNumber32(0xffffffff, res.numbers.label_width);
-    try expectNumber32(0xffffffff, res.numbers.max_attributes);
-    try expectNumber32(0xffffffff, res.numbers.maximum_windows);
-    try expectNumber32(0x0100, res.numbers.max_colors);
-    try expectNumber32(0x7fff, res.numbers.max_pairs);
+    try expectNumber32(0x0050, res.numbers.get(.columns));
+    try expectNumber32(0x0008, res.numbers.get(.init_tabs));
+    try expectNumber32(0x0018, res.numbers.get(.lines));
+    try expectNumber32(0xffffffff, res.numbers.get(.lines_of_memory));
+    try expectNumber32(0xffffffff, res.numbers.get(.magic_cookie_glitch));
+    try expectNumber32(0xffffffff, res.numbers.get(.padding_baud_rate));
+    try expectNumber32(0xffffffff, res.numbers.get(.virtual_terminal));
+    try expectNumber32(0xffffffff, res.numbers.get(.width_status_line));
+    try expectNumber32(0xffffffff, res.numbers.get(.num_labels));
+    try expectNumber32(0xffffffff, res.numbers.get(.label_height));
+    try expectNumber32(0xffffffff, res.numbers.get(.label_width));
+    try expectNumber32(0xffffffff, res.numbers.get(.max_attributes));
+    try expectNumber32(0xffffffff, res.numbers.get(.maximum_windows));
+    try expectNumber32(0x0100, res.numbers.get(.max_colors));
+    try expectNumber32(0x7fff, res.numbers.get(.max_pairs));
 
     // Not in terminfo file, so all -1
-    try expectNumber32(0xffffffff, res.numbers.no_color_video);
-    try expectNumber32(0xffffffff, res.numbers.buffer_capacity);
-    try expectNumber32(0xffffffff, res.numbers.dot_vert_spacing);
-    try expectNumber32(0xffffffff, res.numbers.dot_horz_spacing);
-    try expectNumber32(0xffffffff, res.numbers.max_micro_address);
-    try expectNumber32(0xffffffff, res.numbers.max_micro_jump);
-    try expectNumber32(0xffffffff, res.numbers.micro_col_size);
-    try expectNumber32(0xffffffff, res.numbers.micro_line_size);
-    try expectNumber32(0xffffffff, res.numbers.number_of_pins);
-    try expectNumber32(0xffffffff, res.numbers.output_res_char);
-    try expectNumber32(0xffffffff, res.numbers.output_res_line);
-    try expectNumber32(0xffffffff, res.numbers.output_res_horz_inch);
-    try expectNumber32(0xffffffff, res.numbers.output_res_vert_inch);
-    try expectNumber32(0xffffffff, res.numbers.print_rate);
-    try expectNumber32(0xffffffff, res.numbers.wide_char_size);
-    try expectNumber32(0xffffffff, res.numbers.buttons);
-    try expectNumber32(0xffffffff, res.numbers.bit_image_entwining);
-    try expectNumber32(0xffffffff, res.numbers.bit_image_type);
+    try expectNumber32(0xffffffff, res.numbers.get(.no_color_video));
+    try expectNumber32(0xffffffff, res.numbers.get(.buffer_capacity));
+    try expectNumber32(0xffffffff, res.numbers.get(.dot_vert_spacing));
+    try expectNumber32(0xffffffff, res.numbers.get(.dot_horz_spacing));
+    try expectNumber32(0xffffffff, res.numbers.get(.max_micro_address));
+    try expectNumber32(0xffffffff, res.numbers.get(.max_micro_jump));
+    try expectNumber32(0xffffffff, res.numbers.get(.micro_col_size));
+    try expectNumber32(0xffffffff, res.numbers.get(.micro_line_size));
+    try expectNumber32(0xffffffff, res.numbers.get(.number_of_pins));
+    try expectNumber32(0xffffffff, res.numbers.get(.output_res_char));
+    try expectNumber32(0xffffffff, res.numbers.get(.output_res_line));
+    try expectNumber32(0xffffffff, res.numbers.get(.output_res_horz_inch));
+    try expectNumber32(0xffffffff, res.numbers.get(.output_res_vert_inch));
+    try expectNumber32(0xffffffff, res.numbers.get(.print_rate));
+    try expectNumber32(0xffffffff, res.numbers.get(.wide_char_size));
+    try expectNumber32(0xffffffff, res.numbers.get(.buttons));
+    try expectNumber32(0xffffffff, res.numbers.get(.bit_image_entwining));
+    try expectNumber32(0xffffffff, res.numbers.get(.bit_image_type));
 }
 
 test "String capabilities" {
@@ -1615,35 +1599,35 @@ test "String capabilities" {
     defer res.destroy(ta);
 
     // Hex values taken from running `hexdump -C` on the terminfo file
-    try expectNumber(0x0000, res.strings.back_tab);
-    try expectNumber(0x0004, res.strings.bell);
-    try expectNumber(0x0006, res.strings.carriage_return);
-    try expectNumber(0x0008, res.strings.change_scroll_region);
-    try expectNumber(0x0019, res.strings.clear_all_tabs);
-    try expectNumber(0x001e, res.strings.clear_screen);
-    try expectNumber(0x0026, res.strings.clr_eol);
-    try expectNumber(0x002a, res.strings.clr_eos);
-    try expectNumber(0x002e, res.strings.column_address);
-    try expectNumber(0xffff, res.strings.command_character);
-    try expectNumber(0x0039, res.strings.cursor_address);
-    try expectNumber(0x004a, res.strings.cursor_down);
-    try expectNumber(0x004c, res.strings.cursor_home);
-    try expectNumber(0x0050, res.strings.cursor_invisible);
-    try expectNumber(0x0057, res.strings.cursor_left);
-    try expectNumber(0xffff, res.strings.cursor_mem_address);
-    try expectNumber(0x0059, res.strings.cursor_normal);
-    try expectNumber(0x0066, res.strings.cursor_right);
-    try expectNumber(0xffff, res.strings.cursor_to_ll);
-    try expectNumber(0x006a, res.strings.cursor_up);
-    try expectNumber(0x006e, res.strings.cursor_visible);
-    try expectNumber(0x0075, res.strings.delete_character);
-    try expectNumber(0x0079, res.strings.delete_line);
-    try expectNumber(0xffff, res.strings.dis_status_line);
-    try expectNumber(0xffff, res.strings.down_half_line);
-    try expectNumber(0x007d, res.strings.enter_alt_charset_mode);
+    try expectNumber(0x0000, res.strings.get(.back_tab));
+    try expectNumber(0x0004, res.strings.get(.bell));
+    try expectNumber(0x0006, res.strings.get(.carriage_return));
+    try expectNumber(0x0008, res.strings.get(.change_scroll_region));
+    try expectNumber(0x0019, res.strings.get(.clear_all_tabs));
+    try expectNumber(0x001e, res.strings.get(.clear_screen));
+    try expectNumber(0x0026, res.strings.get(.clr_eol));
+    try expectNumber(0x002a, res.strings.get(.clr_eos));
+    try expectNumber(0x002e, res.strings.get(.column_address));
+    try expectNumber(0xffff, res.strings.get(.command_character));
+    try expectNumber(0x0039, res.strings.get(.cursor_address));
+    try expectNumber(0x004a, res.strings.get(.cursor_down));
+    try expectNumber(0x004c, res.strings.get(.cursor_home));
+    try expectNumber(0x0050, res.strings.get(.cursor_invisible));
+    try expectNumber(0x0057, res.strings.get(.cursor_left));
+    try expectNumber(0xffff, res.strings.get(.cursor_mem_address));
+    try expectNumber(0x0059, res.strings.get(.cursor_normal));
+    try expectNumber(0x0066, res.strings.get(.cursor_right));
+    try expectNumber(0xffff, res.strings.get(.cursor_to_ll));
+    try expectNumber(0x006a, res.strings.get(.cursor_up));
+    try expectNumber(0x006e, res.strings.get(.cursor_visible));
+    try expectNumber(0x0075, res.strings.get(.delete_character));
+    try expectNumber(0x0079, res.strings.get(.delete_line));
+    try expectNumber(0xffff, res.strings.get(.dis_status_line));
+    try expectNumber(0xffff, res.strings.get(.down_half_line));
+    try expectNumber(0x007d, res.strings.get(.enter_alt_charset_mode));
 }
 
-fn expectStringCapability(self: *Self, expected: []const u8, comptime e: StringTag) !void {
+fn expectStringCapability(self: *Self, expected: []const u8, comptime e: String) !void {
     const str = self.getStringCapability(e) orelse return error.InvalidCapabilityName;
     try t.expectEqualSlices(u8, expected, str);
 }

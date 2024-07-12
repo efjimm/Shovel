@@ -335,7 +335,7 @@ pub fn getExtendedString(self: *const Term, name: []const u8) ?[:0]const u8 {
 
 pub fn getFlagCapability(
     self: *const Term,
-    comptime tag: TermInfo.FlagTag,
+    comptime tag: TermInfo.Flag,
 ) bool {
     return if (self.terminfo) |ti|
         ti.getFlagCapability(tag)
@@ -345,7 +345,7 @@ pub fn getFlagCapability(
 
 pub fn getNumberCapability(
     self: *const Term,
-    comptime tag: TermInfo.NumberTag,
+    comptime tag: TermInfo.Number,
 ) ?u31 {
     return if (self.terminfo) |ti|
         ti.getNumberCapability(tag)
@@ -355,7 +355,7 @@ pub fn getNumberCapability(
 
 pub fn getStringCapability(
     self: *const Term,
-    comptime tag: TermInfo.StringTag,
+    comptime tag: TermInfo.String,
 ) ?[:0]const u8 {
     return if (self.terminfo) |ti|
         ti.getStringCapability(tag)
