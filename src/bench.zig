@@ -152,10 +152,6 @@ const BenchVaxis = struct {
     }
 };
 
-const BenchDummy = struct {
-    fn deinit(_: BenchDummy, _: std.mem.Allocator) void {}
-};
-
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     defer _ = gpa.deinit();
@@ -183,7 +179,6 @@ pub fn main() !void {
     const writer = bw.writer();
 
     inline for (&benches) |*bench| {
-        if (@TypeOf(bench) == *BenchDummy) continue;
         try bench.run(alloc);
         try bench.results(writer);
         try bw.flush();
