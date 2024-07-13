@@ -131,7 +131,7 @@ pub inline fn width(canvas: Canvas) u16 {
     return canvas.width;
 }
 
-/// TODO: Make this y/x instead of x/y?
+// TODO: Make this y/x instead of x/y?
 pub fn resize(canvas: *Canvas, new_width: u16, new_height: u16) !void {
     if (new_width == 0 or new_height == 0) {
         canvas.text.items.len = 0;
@@ -613,18 +613,21 @@ pub fn textWidth(bytes: []const u8, method: WidthMethod) usize {
 
 pub fn graphemeWidth(grapheme: []const u8) usize {
     var cp_iter: Utf8Iterator = .{ .bytes = grapheme };
-    return while (cp_iter.nextCodepoint()) |cp| {
+    while (cp_iter.nextCodepoint()) |cp| {
         const w = wcWidth(cp);
         if (w == 0) continue;
 
-        if (cp_iter.nextCodepoint()) |ncp| {
-            // emoji text sequence.
-            if (ncp == 0xFE0E) break 1;
-            if (ncp == 0xFE0F) break 2;
-        }
+        const ncp = cp_iter.nextCodepoint() orelse return w;
 
-        break w;
-    } else 0;
+        return switch (ncp) {
+            0xFE0E => 1, // Variation selector 15 (text)
+            0xFE0F => 2, // Variation selector 16 (emoji)
+            0x1F1E6...0x1F1FF => 2, // Regional indicator (flag sequence)
+            else => w,
+        };
+    }
+
+    return 0;
 }
 
 // TODO: ASCII fast path
@@ -1108,5 +1111,72 @@ test "canvas dump" {
     );
 }
 
-// TODO: Tests for widths of certain weird codepoints, including zero widths
-//       Test allocation failures
+fn testAllocFailures(allocator: std.mem.Allocator) !void {
+    var canvas = init(allocator, .mode_2027);
+    defer canvas.deinit();
+
+    try canvas.resize(400, 100);
+
+    var p = canvas.pen(0, 0);
+    try p.writer().writeAll("one\ntwo\nthree\nfour\nfive\nsix");
+    try p.writer().writeAll("one\ntwo\nthree\nfour\nfive\nsix");
+
+    var dest_canvas = init(allocator, .mode_2027);
+    defer dest_canvas.deinit();
+    try dest_canvas.resize(400, 100);
+
+    try canvas.writeDiff(&dest_canvas, null, std.io.null_writer);
+
+    p.move(0, 0);
+    try p.writer().writeAll("smiling face");
+
+    try canvas.writeDiff(&dest_canvas, null, std.io.null_writer);
+}
+
+test "canvas allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testAllocFailures, .{});
+}
+
+test "wacky characters mode 2027" {
+    var canvas_2027 = init(std.testing.allocator, .mode_2027);
+    defer canvas_2027.deinit();
+
+    var canvas_wcwidth = init(std.testing.allocator, .wcwidth);
+    defer canvas_wcwidth.deinit();
+
+    try canvas_2027.resize(10, 10);
+    try canvas_wcwidth.resize(10, 10);
+
+    var p1 = canvas_2027.pen(0, 0);
+    var p2 = canvas_wcwidth.pen(0, 0);
+
+    inline for (.{
+        // The width of Three-Em dash is not consistent across terminal emulators,
+        // so it should just be 1.
+        .{ "⸻", 1, 1 },
+        .{ "😀", 2, 2 },
+        // Multi codepoint grapheme cluster
+        .{ "🧑‍🌾", 2, 4 },
+        // Zero width joiner
+        .{ "\u{200D}", 0, 0 },
+        .{ "🇮🇪", 2, 2 },
+        .{ "🏳️‍🌈", 2, 3 },
+        .{ "🌈", 2, 2 },
+        // Waving white flag
+        .{ "\u{1F3F3}", 1, 1 },
+        // Waving white flag (text)
+        .{ "\u{1F3F3}\u{FE0E}", 1, 1 },
+        // Waving white flag (emoji)
+        .{ "\u{1F3F3}\u{FE0F}", 2, 1 },
+    }) |data| {
+        const bytes, const expected_2027, const expected_wcwidth = data;
+
+        p1.move(0, 0);
+        try p1.writer().writeAll(bytes);
+        try expectEqual(expected_2027, p1.column);
+
+        p2.move(0, 0);
+        try p2.writer().writeAll(bytes);
+        try expectEqual(expected_wcwidth, p2.column);
+    }
+}
