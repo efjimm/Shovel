@@ -21,8 +21,8 @@
             .hash = "12209ca18504482c93cfe45ffb7a0dd7b17e8e0bff5b7dc1848530fc123e634423cb",
         },
         .@"libgrapheme-zig" = .{
-            .url = "git+https://github.com/efjimm/zig-grapheme?ref=master#a1524e7856e2d05ed691eba74f8a94d6466deadd",
-            .hash = "1220d40635c4d71394c92a9b3674c490b56edf241057a661e550b26e5d34886280d0",
+            .url = "git+https://github.com/efjimm/zig-grapheme?ref=master#c45db5226a353a9724dc6d7ddc4531ec2078e1a5",
+            .hash = "1220c85239ceb9f6acc0ba2b0f93651c6079b70fb7145dc83b0de77cb9d5732dee8f",
         },
         .vaxis = .{
             .url = "git+https://github.com/rockorager/libvaxis#40e51ad0542ea964190db411292660c274e2a984",
