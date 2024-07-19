@@ -10,12 +10,15 @@ const wcWidth = @import("wcwidth").wcWidth;
 const Utf8Iterator = @import("grapheme").utf8.Iterator;
 const TermInfo = @import("TermInfo.zig");
 
-text: std.ArrayListUnmanaged(u8) = .{},
 cells: std.MultiArrayList(Cell) = .{},
-line_lens: std.ArrayListUnmanaged(usize) = .{},
+lines: std.ArrayListUnmanaged(Line) = .{},
 width: u16,
 width_method: WidthMethod,
 allocator: Allocator,
+
+pub const Line = struct {
+    text: std.ArrayListUnmanaged(u8),
+};
 
 pub const WidthMethod = enum {
     wcwidth,
@@ -32,25 +35,15 @@ pub const Cell = struct {
     pub const empty: Cell = .{ .text_len = 0, .width = .single };
 };
 
-pub fn lineTextOffset(canvas: *const Canvas, line: u16) usize {
-    var offset: usize = 0;
-    for (canvas.line_lens.items[0..line]) |len| offset += len;
-    return offset;
-}
-
 pub fn textOffset(canvas: *const Canvas, line: u16, column: u16) usize {
+    const text_lens = canvas.cells.items(.text_len)[@as(u32, line) * canvas.width ..][0..canvas.width];
     var offset: usize = 0;
-    for (canvas.line_lens.items[0..line]) |len|
-        offset += len;
-    for (canvas.cells.items(.text_len)[@as(u32, line) * canvas.width ..][0..column]) |len|
-        offset += len;
+    for (text_lens[0..column]) |text_len| offset += text_len;
     return offset;
 }
 
 pub fn lineText(canvas: *const Canvas, line: u16) []u8 {
-    const offset = canvas.lineTextOffset(line);
-    const len = canvas.line_lens.items[line];
-    return canvas.text.items[offset..][0..len];
+    return canvas.lines.items[line].text.items;
 }
 
 pub fn dumpLine(
@@ -59,9 +52,8 @@ pub fn dumpLine(
     options: DumpOptions,
     writer: anytype,
 ) !void {
-    if (canvas.line_lens.items[line] == 0) return;
-
     const line_text = canvas.lineText(line);
+    if (line_text.len == 0) return;
 
     const cells_slice = canvas.cells.slice();
     const cells_start = @as(u32, line) * canvas.width;
@@ -90,6 +82,7 @@ pub fn dumpLine(
 pub fn dumpLineRaw(canvas: *Canvas, line: u16, writer: anytype) !void {
     const line_text = canvas.lineText(line);
     if (line_text.len == 0) return;
+
     const cells_slice = canvas.cells.slice();
     const cells_start = @as(u32, line) * canvas.width;
 
@@ -118,13 +111,13 @@ pub fn init(
 }
 
 pub fn deinit(canvas: *Canvas) void {
-    canvas.text.deinit(canvas.allocator);
-    canvas.line_lens.deinit(canvas.allocator);
+    for (canvas.lines.items) |*line| line.text.deinit(canvas.allocator);
+    canvas.lines.deinit(canvas.allocator);
     canvas.cells.deinit(canvas.allocator);
 }
 
 pub fn height(canvas: Canvas) u16 {
-    return @intCast(canvas.line_lens.items.len);
+    return @intCast(canvas.lines.items.len);
 }
 
 pub inline fn width(canvas: Canvas) u16 {
@@ -134,8 +127,8 @@ pub inline fn width(canvas: Canvas) u16 {
 // TODO: Make this y/x instead of x/y?
 pub fn resize(canvas: *Canvas, new_width: u16, new_height: u16) !void {
     if (new_width == 0 or new_height == 0) {
-        canvas.text.items.len = 0;
-        canvas.line_lens.items.len = 0;
+        for (canvas.lines.items) |*line| line.text.deinit(canvas.allocator);
+        canvas.lines.items.len = 0;
         canvas.cells.len = 0;
         canvas.width = 0;
         return;
@@ -146,14 +139,19 @@ pub fn resize(canvas: *Canvas, new_width: u16, new_height: u16) !void {
     // TODO MultiArrayList performs a new allocation on resize,
     //      so there is a redundant memcpy here
     try canvas.cells.ensureTotalCapacity(canvas.allocator, @as(u32, new_width) * new_height);
-    try canvas.line_lens.ensureTotalCapacity(canvas.allocator, new_height);
+    try canvas.lines.ensureTotalCapacity(canvas.allocator, new_height);
+
     errdefer comptime unreachable;
 
-    canvas.line_lens.items.len = new_height;
-
-    if (new_height > old_height) {
-        @memset(canvas.line_lens.items[old_height..], 0);
+    if (new_height < old_height) {
+        // TODO: Reuse line buffers
+        for (canvas.lines.items[new_height..old_height]) |*line|
+            line.text.deinit(canvas.allocator);
+    } else {
+        @memset(canvas.lines.items.ptr[old_height..new_height], .{ .text = .{} });
     }
+
+    canvas.lines.items.len = new_height;
 
     if (new_width > old_width) {
         canvas.cells.len = @as(u32, new_width) * new_height;
@@ -194,15 +192,13 @@ pub fn resize(canvas: *Canvas, new_width: u16, new_height: u16) !void {
 
         // Truncate text on each line
         const text_lens = cells_slice.items(.text_len);
-        var src_offset: usize = 0;
-        var dest_offset: usize = 0;
-        for (canvas.line_lens.items, 0..) |*line_len, i| {
+        for (canvas.lines.items, 0..) |*line, i| {
             var len: usize = 0;
             for (text_lens[i * new_width ..][0 .. new_width - 1]) |text_len|
                 len += text_len;
 
             const last_char_len = text_lens[i * new_width ..][new_width - 1];
-            const last_char = canvas.text.items[src_offset + len ..][0..last_char_len];
+            const last_char = line.text.items[0..last_char_len];
             if (textWidth(last_char, canvas.width_method) > 1) {
                 // Last cell contains a wide character which will be cut in half by the resize,
                 // so erase it!
@@ -211,17 +207,8 @@ pub fn resize(canvas: *Canvas, new_width: u16, new_height: u16) !void {
                 len += last_char_len;
             }
 
-            std.mem.copyForwards(
-                u8,
-                canvas.text.items[dest_offset..][0..len],
-                canvas.text.items[src_offset..][0..len],
-            );
-
-            src_offset += line_len.*;
-            dest_offset += len;
-            line_len.* = len;
+            line.text.items.len = len;
         }
-        canvas.text.items.len = dest_offset;
     }
 
     canvas.width = new_width;
@@ -338,18 +325,18 @@ pub const Pen = struct {
                         replace_len += text_len.*;
                         text_len.* = 0;
                     }
-                    p.canvas.text.replaceRange(
+                    p.canvas.lines.items[p.line].text.replaceRange(
                         p.canvas.allocator,
                         p.text_offset,
                         replace_len,
                         &.{},
                     ) catch unreachable;
-                    p.canvas.line_lens.items[p.line] -= replace_len;
                 }
 
                 p.column = 0;
                 p.line += 1;
                 start_col = 0;
+                p.text_offset = 0;
                 if (p.line >= p.canvas.height() and bytes_written + len < bytes.len)
                     return error.EndOfCanvas;
             }
@@ -366,6 +353,7 @@ pub const Pen = struct {
                         p.canvas.setStyleRect(p.line, start_col, p.column - start_col, p.style);
                         p.line += 1;
                         p.column = 0;
+                        p.text_offset = 0;
                     },
                     else => try bw.writer().print("^{c}", .{c | 0x40}),
                 }
@@ -388,7 +376,7 @@ pub const Pen = struct {
         p.line = line;
         p.column = column;
         p.text_offset = p.canvas.textOffset(line, column);
-        p.first_write = true;
+        p.first_write = column != 0;
     }
 };
 
@@ -403,7 +391,9 @@ pub fn pen(canvas: *Canvas, line: u16, column: u16) Pen {
 
 /// Clears the canvas, maintaining memory allocations for cells and text.
 pub fn clearRetainingCapacity(canvas: *Canvas) void {
-    canvas.text.clearRetainingCapacity();
+    for (canvas.lines.items) |*line| {
+        line.text.clearRetainingCapacity();
+    }
 
     const cells_slice = canvas.cells.slice();
     inline for (@typeInfo(Cell).Struct.fields) |field| {
@@ -419,8 +409,8 @@ pub const WriteOptions = struct {
     /// If true, assume that we aren't writing over half of a double width character at the start of
     /// the write. Reduces the amount of work required to write.
     no_start_adjust: bool = false,
-    /// Assume that the text at `line` and `col` in the canvas is at this offset in `canvas.text`.
     text_offset: ?usize = null,
+    width: ?u16 = null,
 };
 
 // Returns true if `bytes` consists entirely of ASCII characters.
@@ -451,20 +441,24 @@ pub fn write(
 
     // Need to do this before modifying anything so we
     // don't end up with an inconsistent state on error.
-    try canvas.text.ensureUnusedCapacity(canvas.allocator, bytes.len);
+    try canvas.lines.items[line].text.ensureUnusedCapacity(canvas.allocator, bytes.len);
     errdefer comptime unreachable;
 
-    const text = canvas.text.items[options.text_offset orelse canvas.lineTextOffset(line) ..];
+    const l = &canvas.lines.items[line];
+    const text = l.text.items;
 
     var cells_slice = canvas.cells.slice();
-    const text_lens = cells_slice.items(.text_len)[line * canvas.width ..][0..canvas.width];
+    const cell_off = @as(u32, line) * canvas.width;
+    const text_lens = cells_slice.items(.text_len)[cell_off..][0..canvas.width];
 
     // Set cells and get display width of `bytes`, truncating it if necessary.
-    const remaining_width = canvas.width - column;
+    const remaining_width = options.width orelse canvas.width - column;
 
     // If the first column is the right side of a double width character we need to erase
     // the whole character. `start_adjust` handles this.
-    const text_start, const start_adjust = if (!options.no_start_adjust and column > 0) blk: {
+    const text_start, const start_adjust = if (options.no_start_adjust or column == 0)
+        .{ options.text_offset orelse canvas.textOffset(line, column), 0 }
+    else blk: {
         var start: usize = 0;
         for (text_lens[0 .. column - 1]) |text_len| start += text_len;
 
@@ -472,16 +466,17 @@ pub fn write(
         const str = text[start..][0..text_lens[column - 1]];
         start += text_lens[column - 1];
 
-        const start_adjust = if (textWidth(str, canvas.width_method) == 2) blk2: {
-            cells_slice.set(line * canvas.width + (column - 1), .{
+        if (textWidth(str, canvas.width_method) == 2) {
+            // Blank the previous cell
+            cells_slice.set(cell_off + (column - 1), .{
                 .text_len = 0,
                 .width = .single,
             });
-            break :blk2 str.len;
-        } else 0;
+            break :blk .{ start, str.len };
+        }
 
-        break :blk .{ start, start_adjust };
-    } else .{ 0, 0 };
+        break :blk .{ start, 0 };
+    };
 
     const write_len, const replace_len, const w = switch (canvas.width_method) {
         inline else => |tag| blk: {
@@ -502,10 +497,7 @@ pub fn write(
                         };
 
                     replace_len += text_lens[i];
-                    cells_slice.set(line * canvas.width + i, .{
-                        .text_len = 1,
-                        .width = .single,
-                    });
+                    cells_slice.set(cell_off + i, .{ .text_len = 1, .width = .single });
 
                     i += ch_width;
                 }
@@ -532,14 +524,14 @@ pub fn write(
                 };
 
                 replace_len += text_lens[i];
-                cells_slice.set(line * canvas.width + i, .{
+                cells_slice.set(cell_off + i, .{
                     .text_len = @intCast(ch.bytes.len),
                     .width = ch_width,
                 });
 
                 if (ch_width == .double) {
                     replace_len += text_lens[i + 1];
-                    cells_slice.set(line * canvas.width + i + 1, .{ .text_len = 0, .width = .double });
+                    cells_slice.set(cell_off + i + 1, .{ .text_len = 0, .width = .double });
                 }
 
                 i += ch.width;
@@ -549,14 +541,11 @@ pub fn write(
         },
     };
 
-    canvas.text.replaceRangeAssumeCapacity(
-        (options.text_offset orelse canvas.lineTextOffset(line)) + text_start - start_adjust,
+    l.text.replaceRangeAssumeCapacity(
+        text_start - start_adjust,
         replace_len + start_adjust,
         bytes[0..write_len],
     );
-
-    canvas.line_lens.items[line] -= replace_len + start_adjust;
-    canvas.line_lens.items[line] += write_len;
 
     return .{ write_len, w };
 }
@@ -585,22 +574,22 @@ pub fn dump(
         };
     };
 
-    for (0..canvas.height()) |line| {
-        if (canvas.line_lens.items[line] == 0) continue;
+    for (canvas.lines.items, 0..) |*line, y| {
+        if (line.text.items.len == 0) continue;
 
-        try TermInfo.writeParamSequence(move_to, writer, .{ @as(u16, @intCast(line)), 0 });
+        try TermInfo.writeParamSequence(move_to, writer, .{ @as(u16, @intCast(y)), 0 });
         try writer.writeAll(clear_to_eol);
 
-        try canvas.dumpLine(@intCast(line), options, writer);
+        try canvas.dumpLine(@intCast(y), options, writer);
     }
 }
 
 /// Dump without outputting any escape sequences.
 pub fn dumpRaw(canvas: *Canvas, writer: anytype) !void {
-    for (0..canvas.height()) |line| {
-        if (canvas.line_lens.items[line] == 0) continue;
+    for (canvas.lines.items, 0..) |*line, y| {
+        if (line.text.items.len == 0) continue;
 
-        try canvas.dumpLineRaw(@intCast(line), writer);
+        try canvas.dumpLineRaw(@intCast(y), writer);
     }
 }
 
@@ -678,57 +667,58 @@ pub fn writeDiff(
     assert(new.width == old.width);
     assert(new.height() == old.height());
 
-    try old.text.ensureTotalCapacity(old.allocator, new.text.items.len);
+    try old.lines.ensureTotalCapacity(old.allocator, new.lines.items.len);
     try old.cells.ensureTotalCapacity(old.allocator, new.cells.len);
-    try old.line_lens.ensureTotalCapacity(old.allocator, new.line_lens.items.len);
+    for (new.lines.items, old.lines.items) |new_line, *old_line|
+        try old_line.text.ensureTotalCapacity(old.allocator, new_line.text.items.len);
 
     const move_cursor = if (terminfo) |ti|
         ti.getStringCapability(.cursor_address) orelse spells.move_cursor_fmt
     else
         spells.move_cursor_fmt;
 
-    var new_offset: usize = 0;
-    var old_offset: usize = 0;
-    var last_pos: usize = 0;
-
     const new_cells = new.cells.slice();
     const old_cells = old.cells.slice();
     var last_style: ?Style = null;
 
-    for (
-        new_cells.items(.text_len),
-        old_cells.items(.text_len),
-        new_cells.items(.style),
-        old_cells.items(.style),
-        0..,
-    ) |new_text_len, old_text_len, new_style, old_style, pos| {
-        const new_text = new.text.items[new_offset..][0..new_text_len];
-        const old_text = old.text.items[old_offset..][0..old_text_len];
+    for (new.lines.items, old.lines.items, 0..) |new_line, *old_line, line| {
+        var new_offset: usize = 0;
+        var old_offset: usize = 0;
+        var last_column: usize = 0;
 
-        new_offset += new_text_len;
-        old_offset += old_text_len;
+        for (
+            new_cells.items(.text_len)[line * new.width ..][0..new.width],
+            old_cells.items(.text_len)[line * new.width ..][0..new.width],
+            new_cells.items(.style)[line * new.width ..][0..new.width],
+            old_cells.items(.style)[line * new.width ..][0..new.width],
+            0..,
+        ) |new_text_len, old_text_len, new_style, old_style, column| {
+            const new_text = new_line.text.items[new_offset..][0..new_text_len];
+            const old_text = old_line.text.items[old_offset..][0..old_text_len];
 
-        const dirty = !std.mem.eql(u8, new_text, old_text) or
-            !new_style.eql(old_style) or
-            last_style == null or
-            !new_style.eql(last_style.?);
-        if (!dirty) continue;
+            new_offset += new_text_len;
+            old_offset += old_text_len;
 
-        if (pos != last_pos + 1) {
-            const line = pos / new.width;
-            const column = pos % new.width;
-            try TermInfo.writeParamSequence(move_cursor, writer, .{
-                @as(i32, @intCast(line)),
-                @as(i32, @intCast(column)),
-            });
+            const dirty = !std.mem.eql(u8, new_text, old_text) or
+                !new_style.eql(old_style) or
+                last_style == null or
+                !new_style.eql(last_style.?);
+            if (!dirty) continue;
+
+            if (column != last_column + 1) {
+                try TermInfo.writeParamSequence(move_cursor, writer, .{
+                    @as(i32, @intCast(line)),
+                    @as(i32, @intCast(column)),
+                });
+            }
+            last_column = column;
+
+            if (last_style == null or !last_style.?.eql(new_style)) {
+                try new_style.dump(terminfo, writer);
+                last_style = new_style;
+            }
+            try writer.writeAll(new_text);
         }
-        last_pos = pos;
-
-        if (last_style == null or !last_style.?.eql(new_style)) {
-            try new_style.dump(terminfo, writer);
-            last_style = new_style;
-        }
-        try writer.writeAll(new_text);
     }
 
     new.copyTo(old) catch unreachable;
@@ -737,17 +727,42 @@ pub fn writeDiff(
 /// Deep-copies all text, cells, and lines from `src` to `dest`. Also copies the `width` and
 /// `width_method` fields.
 pub fn copyTo(src: *const Canvas, dest: *Canvas) !void {
-    try dest.text.ensureTotalCapacity(dest.allocator, src.text.items.len);
     try dest.cells.ensureTotalCapacity(dest.allocator, src.cells.len);
-    try dest.line_lens.ensureTotalCapacity(dest.allocator, src.line_lens.items.len);
+    try dest.lines.ensureTotalCapacity(dest.allocator, src.lines.items.len);
+
+    if (dest.lines.items.len < src.lines.items.len) {
+        for (src.lines.items[0..dest.lines.items.len], dest.lines.items) |src_line, *dest_line|
+            try dest_line.text.ensureTotalCapacity(dest.allocator, src_line.text.items.len);
+
+        const len = dest.lines.items.len;
+        errdefer {
+            for (dest.lines.items[len..]) |*line| line.text.deinit(dest.allocator);
+            dest.lines.items.len = len;
+        }
+        for (src.lines.items[len..]) |src_line|
+            dest.lines.appendAssumeCapacity(.{
+                .text = try std.ArrayListUnmanaged(u8).initCapacity(
+                    dest.allocator,
+                    src_line.text.items.len,
+                ),
+            });
+    } else {
+        for (src.lines.items, dest.lines.items[0..]) |src_line, *dest_line|
+            try dest_line.text.ensureTotalCapacity(dest.allocator, src_line.text.items.len);
+
+        for (dest.lines.items[src.lines.items.len..]) |*line|
+            line.text.deinit(dest.allocator);
+
+        dest.lines.items.len = src.lines.items.len;
+    }
+
     errdefer comptime unreachable;
 
-    dest.text.items.len = src.text.items.len;
-    @memcpy(dest.text.items, src.text.items);
-
     multiArrayListCopyAssumeCapacity(src.cells, &dest.cells);
-    dest.line_lens.items.len = src.line_lens.items.len;
-    @memcpy(dest.line_lens.items, src.line_lens.items);
+    for (src.lines.items, dest.lines.items) |src_line, *dest_line| {
+        dest_line.text.clearRetainingCapacity();
+        dest_line.text.appendSliceAssumeCapacity(src_line.text.items);
+    }
 
     dest.width = src.width;
     dest.width_method = src.width_method;
@@ -785,7 +800,7 @@ const expectError = std.testing.expectError;
 
 test "canvas write wcwidth" {
     var canvas = init(std.testing.allocator, .wcwidth);
-    defer deinit(&canvas);
+    defer canvas.deinit();
 
     try canvas.resize(80, 24);
     const str = "🧑‍🌾 one two";
@@ -1072,6 +1087,10 @@ test "canvas double buffering" {
     try writer.writeAll("line3\n");
 
     try expectEqualSlices(Style, &[_]Style{.{ .fg = .red }} ** 5, c1.cells.items(.style)[0..5]);
+
+    for (c1.cells.items(.text_len)[5..c1.width]) |text_len| {
+        try expectEqual(0, text_len);
+    }
 
     var buf: [1024]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
