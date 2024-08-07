@@ -23,8 +23,8 @@ pub const Colour = union(enum(u5)) {
     pub const fromDescription = colour_desc.parseColourDescription;
 
     // TODO since the default colours are also part of the 256 colour spec,
-    //	  maybe we should just use that. The dump function would then special
-    //	  case them and use legacy escape sequences.
+    //      maybe we should just use that. The dump function would then special
+    //      case them and use legacy escape sequences.
     none,
     black,
     red,

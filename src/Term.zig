@@ -386,26 +386,26 @@ pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
 
         //   ECHO: Stop the terminal from displaying pressed keys.
         // ICANON: Disable canonical ("cooked") mode. Allows us to read inputs
-        //		 byte-wise instead of line-wise.
+        //         byte-wise instead of line-wise.
         //   ISIG: Disable signals for Ctrl-C (SIGINT) and Ctrl-Z (SIGTSTP), so we
-        //		 can handle them as normal escape sequences.
+        //         can handle them as normal escape sequences.
         // IEXTEN: Disable input preprocessing. This allows us to handle Ctrl-V,
-        //		 which would otherwise be intercepted by some terminals.
+        //         which would otherwise be intercepted by some terminals.
         raw.lflag.ECHO = false;
         raw.lflag.ICANON = false;
         raw.lflag.ISIG = false;
         raw.lflag.IEXTEN = false;
 
         //   IXON: Disable software control flow. This allows us to handle Ctrl-S
-        //		 and Ctrl-Q.
+        //         and Ctrl-Q.
         //  ICRNL: Disable converting carriage returns to newlines. Allows us to
-        //		 handle Ctrl-J and Ctrl-M.
+        //         handle Ctrl-J and Ctrl-M.
         // BRKINT: Disable converting sending SIGINT on break conditions. Likely has
-        //		 no effect on anything remotely modern.
+        //         no effect on anything remotely modern.
         //  INPCK: Disable parity checking. Likely has no effect on anything
-        //		 remotely modern.
+        //         remotely modern.
         // ISTRIP: Disable stripping the 8th bit of characters. Likely has no effect
-        //		 on anything remotely modern.
+        //         on anything remotely modern.
         raw.iflag.IXON = false;
         raw.iflag.ICRNL = false;
         raw.iflag.BRKINT = false;

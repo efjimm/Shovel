@@ -13,8 +13,8 @@
     },
     .dependencies = .{
         .wcwidth = .{
-            .url = "git+https://github.com/efjimm/zig-wcwidth#98e99689a52fe357bbf2055245f4482b72f24d3d",
-            .hash = "1220cc83e32bc6a56437ef85404f52f7281a03912e3d8f4ccbdbcb54a5fc0356af35",
+            .url = "git+https://github.com/efjimm/zig-wcwidth#d3fde4f6d76d6208cee59ac570772275339d3c10",
+            .hash = "12200686ad8c1d0cb234f282a6ac3cfd38071b81fab2b7c74654d7a2bf3655575929",
         },
         .@"critbit-zig" = .{
             .url = "git+https://github.com/efjimm/critbit-zig?ref=master#ea05f1ed7b5a16164359c1ad455173ff47851f0b",

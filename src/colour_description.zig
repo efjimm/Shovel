@@ -30,12 +30,12 @@ pub const ParseError = error{
 /// ANSI colours: A string equal to one of Colour fields (case sensitive)
 ///
 /// Examples:
-///	 var rgb = try parseColourDescription("0x2b45a7");
-///		 -> Style{ .rgb = { 43, 69, 167 } };
-///	 var 256 = try parseColourDescription("234");
-///		 -> Style{ .@"256" = 234 };
-///	 var ansi = try parseColourDescription("red");
-///		 -> Style{ .red };
+///  var rgb = try parseColourDescription("0x2b45a7");
+///      -> Style{ .rgb = { 43, 69, 167 } };
+///  var 256 = try parseColourDescription("234");
+///      -> Style{ .@"256" = 234 };
+///  var ansi = try parseColourDescription("red");
+///      -> Style{ .red };
 pub fn parseColourDescription(s: []const u8) ParseError!Colour {
     if (s.len == 0)
         return error.BadColourDescription;
