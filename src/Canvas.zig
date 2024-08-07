@@ -601,7 +601,9 @@ pub fn textWidth(bytes: []const u8, method: WidthMethod) usize {
 }
 
 pub fn graphemeWidth(grapheme: []const u8) usize {
-    var cp_iter: Utf8Iterator = .{ .bytes = grapheme };
+    var view = std.unicode.Utf8View.init(grapheme) catch unreachable;
+    // var cp_iter: Utf8Iterator = .{ .bytes = grapheme };
+    var cp_iter = view.iterator();
     while (cp_iter.nextCodepoint()) |cp| {
         const w = wcWidth(cp);
         if (w == 0) continue;
@@ -790,7 +792,7 @@ pub fn setStyleRect(
     assert(line < canvas.height());
     assert(column_start < canvas.width);
     assert(column_start + len <= canvas.width);
-    @memset(canvas.cells.items(.style)[line * canvas.width + column_start ..][0..len], style);
+    @memset(canvas.cells.items(.style)[@as(u32, line) * canvas.width + column_start ..][0..len], style);
 }
 
 const expectEqual = std.testing.expectEqual;
@@ -1198,4 +1200,38 @@ test "wacky characters mode 2027" {
         try p2.writer().writeAll(bytes);
         try expectEqual(expected_wcwidth, p2.column);
     }
+}
+
+test "fuzz canvas write" {
+    const input = std.testing.fuzzInput(.{});
+
+    var canvas = init(std.testing.allocator, .mode_2027);
+    defer canvas.deinit();
+
+    try canvas.resize(1024, 1024);
+
+    var p = canvas.pen(0, 0);
+    const writer = p.writer();
+
+    const T = extern struct {
+        cp: u32,
+        x: u16,
+        y: u16,
+    };
+
+    const values = std.mem.bytesAsSlice(T, input[0 .. input.len - input.len % @sizeOf(T)]);
+    for (values) |value| {
+        p.move(@min(canvas.height() - 1, value.y), @min(canvas.width - 1, value.x));
+
+        const cp: u21 = @truncate(value.cp);
+        writer.print("{u}", .{cp}) catch |err| switch (err) {
+            error.EndOfCanvas => break,
+            else => |e| return e,
+        };
+    }
+
+    // writer.writeAll(input) catch |err| switch (err) {
+    //     error.EndOfCanvas => {},
+    //     else => |e| return e,
+    // };
 }

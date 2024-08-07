@@ -546,13 +546,13 @@ pub fn fetchSize(self: *Term) posix.UnexpectedError!void {
     if (self.isCooked())
         return;
 
-    var size = mem.zeroes(constants.winsize);
+    var size = mem.zeroes(std.posix.winsize);
     const err = posix.system.ioctl(self.tty, constants.T.IOCGWINSZ, @intFromPtr(&size));
     if (posix.errno(err) != .SUCCESS) {
         return posix.unexpectedErrno(@enumFromInt(err));
     }
-    self.height = size.ws_row;
-    self.width = size.ws_col;
+    self.height = size.row;
+    self.width = size.col;
 }
 
 /// Set window title using OSC 2. Shall not be called while rendering.
