@@ -46,6 +46,15 @@ pub fn lineText(canvas: *const Canvas, line: u16) []u8 {
     return canvas.lines.items[line].text.items;
 }
 
+pub fn cellText(canvas: *const Canvas, line: u16, column: u16) []u8 {
+    const line_text = canvas.lineText(line);
+    var len: usize = 0;
+    const lens = canvas.cells.items(.text_len);
+    for (lens[@as(u32, line) * canvas.width ..][0..column]) |text_len|
+        len += text_len;
+    return line_text[len..][0..lens[column]];
+}
+
 pub fn dumpLine(
     canvas: *const Canvas,
     line: u16,
@@ -120,8 +129,25 @@ pub fn height(canvas: Canvas) u16 {
     return @intCast(canvas.lines.items.len);
 }
 
-pub inline fn width(canvas: Canvas) u16 {
-    return canvas.width;
+/// Resize the canvas to `new_width` * `new_height`.
+/// The contents of the canvas is undefined after this operation.
+pub fn resizeUndefined(canvas: *Canvas, new_width: u16, new_height: u16) !void {
+    const old_height = canvas.height();
+
+    try canvas.cells.ensureTotalCapacity(canvas.allocator, @as(u32, new_width) * new_height);
+    try canvas.lines.ensureTotalCapacity(canvas.allocator, new_height);
+    errdefer comptime unreachable;
+
+    if (new_height < old_height) {
+        for (canvas.lines.items[new_height..old_height]) |*line|
+            line.text.deinit(canvas.allocator);
+    } else {
+        @memset(canvas.lines.items.ptr[old_height..new_height], .{ .text = .{} });
+    }
+
+    canvas.cells.len = @as(u32, new_width) * new_height;
+    canvas.lines.items.len = new_height;
+    canvas.width = new_width;
 }
 
 // TODO: Make this y/x instead of x/y?
@@ -158,7 +184,7 @@ pub fn resize(canvas: *Canvas, new_width: u16, new_height: u16) !void {
 
         // Loop through each slice in the MultiArrayList and copy old lines to new lines
         const cells_slice = canvas.cells.slice();
-        inline for (@typeInfo(Cell).Struct.fields) |field| {
+        inline for (@typeInfo(Cell).@"struct".fields) |field| {
             const tag = @field(std.MultiArrayList(Cell).Field, field.name);
             const slice = cells_slice.items(tag);
 
@@ -177,7 +203,7 @@ pub fn resize(canvas: *Canvas, new_width: u16, new_height: u16) !void {
         }
     } else if (new_width < old_width) {
         const cells_slice = canvas.cells.slice();
-        inline for (@typeInfo(Cell).Struct.fields) |field| {
+        inline for (@typeInfo(Cell).@"struct".fields) |field| {
             const tag = @field(std.MultiArrayList(Cell).Field, field.name);
             const slice = cells_slice.items(tag);
 
@@ -222,7 +248,7 @@ const Character = struct {
 /// Iterator over what a terminal would consider a single character. For terminals that do not
 /// support mode 2027, this is a single codepoint. Otherwise this is grapheme clusters.
 /// Returns the bytes of the character along with its display width.
-fn CharacterIterator(comptime width_method: WidthMethod) type {
+pub fn CharacterIterator(comptime width_method: WidthMethod) type {
     return struct {
         bytes: []const u8,
         child_iter: switch (width_method) {
@@ -230,20 +256,20 @@ fn CharacterIterator(comptime width_method: WidthMethod) type {
             .mode_2027 => Utf8Iterator,
         },
 
-        fn init(
+        pub fn init(
             bytes: []const u8,
         ) @This() {
+            assert(std.unicode.utf8ValidateSlice(bytes));
             return .{
                 .bytes = bytes,
                 .child_iter = switch (width_method) {
                     .wcwidth => .{ .bytes = bytes, .i = 0 },
-                    // `data.data` is a pointer, this is safe
                     .mode_2027 => Utf8Iterator{ .bytes = bytes },
                 },
             };
         }
 
-        fn next(iter: *@This()) ?Character {
+        pub fn next(iter: *@This()) ?Character {
             return switch (width_method) {
                 .wcwidth => iter.nextWcWidth(),
                 .mode_2027 => iter.next2027(),
@@ -396,7 +422,7 @@ pub fn clearRetainingCapacity(canvas: *Canvas) void {
     }
 
     const cells_slice = canvas.cells.slice();
-    inline for (@typeInfo(Cell).Struct.fields) |field| {
+    inline for (@typeInfo(Cell).@"struct".fields) |field| {
         const tag = @field(std.MultiArrayList(Cell).Field, field.name);
         const slice = cells_slice.items(tag);
         @memset(slice, @field(Cell.empty, field.name));
@@ -414,7 +440,7 @@ pub const WriteOptions = struct {
 };
 
 // Returns true if `bytes` consists entirely of ASCII characters.
-fn isAllAscii(bytes: []const u8) bool {
+pub fn isAllAscii(bytes: []const u8) bool {
     for (bytes) |c| {
         if (c >= 128) return false;
     }
@@ -649,7 +675,7 @@ fn multiArrayListCopyAssumeCapacity(src: anytype, dest: *@TypeOf(src)) void {
     const src_slice = src.slice();
     const dest_slice = dest.slice();
 
-    inline for (@typeInfo(T.Field).Enum.fields) |field| {
+    inline for (@typeInfo(T.Field).@"enum".fields) |field| {
         const tag = @field(T.Field, field.name);
         const src_items = src_slice.items(tag);
         const dest_items = dest_slice.items(tag);

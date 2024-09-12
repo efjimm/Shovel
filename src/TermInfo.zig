@@ -1,5 +1,4 @@
 // TODO: Investigate using terminfo for mouse support
-// TODO: Ues enum arrays
 const std = @import("std");
 const log = @import("log.zig");
 const getenv = std.posix.getenv;
