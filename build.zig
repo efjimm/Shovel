@@ -105,47 +105,6 @@ pub fn build(b: *Build) void {
         check_step.dependOn(&check_example.step);
     }
 
-    const bench_step = b.step("bench", "Run benchmarks");
-    const bench_install = b.step("bench-install", "Install benchmark executables");
-
-    const bench_vaxis = b.option(bool, "bench-vaxis", "Benchmark against libvaxis") orelse false;
-
-    const vaxis: ?*Build.Dependency = if (bench_vaxis)
-        b.lazyDependency("vaxis", .{
-            .target = target,
-            .optimize = optimize,
-        }) orelse return
-    else
-        null;
-
-    const bench_options = b.addOptions();
-    bench_options.addOption(bool, "vaxis", bench_vaxis);
-    const bench_options_module = bench_options.createModule();
-
-    inline for (.{
-        .{ "canvas", "src/bench.zig" },
-    }) |data| {
-        const name, const path = data;
-        const exe = b.addExecutable(.{
-            .name = name,
-            .root_source_file = b.path(path),
-            .target = target,
-            .optimize = optimize,
-            .use_llvm = use_llvm,
-            .use_lld = use_llvm,
-            .strip = false,
-        });
-        if (vaxis) |dep| exe.root_module.addImport("vaxis", dep.module("vaxis"));
-        exe.root_module.addImport("shovel", shovel_module);
-        exe.root_module.addImport("benchmark_options", bench_options_module);
-        const run = b.addRunArtifact(exe);
-        bench_step.dependOn(&run.step);
-        const install = b.addInstallArtifact(exe, .{
-            .dest_dir = .{ .override = .{ .custom = "bench" } },
-        });
-        bench_install.dependOn(&install.step);
-    }
-
     const run_coverage = b.addSystemCommand(&.{ "kcov", "kcov-out", "--include-path", "src" });
     run_coverage.addArtifactArg(tests);
 

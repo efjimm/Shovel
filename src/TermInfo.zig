@@ -1239,8 +1239,8 @@ pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void
     };
 
     var stack: std.BoundedArray(Parameter, 123) = .{};
-    var dynamic_variables: [26]Parameter = .{.{ .number = 0 }} ** 26;
-    var static_variables: [26]Parameter = .{.{ .number = 0 }} ** 26;
+    var dynamic_variables: [26]Parameter = [_]Parameter{.{ .number = 0 }} ** 26;
+    var static_variables: [26]Parameter = [_]Parameter{.{ .number = 0 }} ** 26;
 
     var i: usize = 0;
     while (i < str.len) : (i += 1) {

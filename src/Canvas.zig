@@ -1229,32 +1229,36 @@ test "wacky characters mode 2027" {
 }
 
 test "fuzz canvas write" {
-    const input = std.testing.fuzzInput(.{});
+    const fuzzFn = struct {
+        fn fuzzFn(input: []const u8) anyerror!void {
+            var canvas = init(std.testing.allocator, .mode_2027);
+            defer canvas.deinit();
 
-    var canvas = init(std.testing.allocator, .mode_2027);
-    defer canvas.deinit();
+            try canvas.resize(1024, 1024);
 
-    try canvas.resize(1024, 1024);
+            var p = canvas.pen(0, 0);
+            const writer = p.writer();
 
-    var p = canvas.pen(0, 0);
-    const writer = p.writer();
+            const T = extern struct {
+                cp: u32,
+                x: u16,
+                y: u16,
+            };
 
-    const T = extern struct {
-        cp: u32,
-        x: u16,
-        y: u16,
-    };
+            const values = std.mem.bytesAsSlice(T, input[0 .. input.len - input.len % @sizeOf(T)]);
+            for (values) |value| {
+                p.move(@min(canvas.height() - 1, value.y), @min(canvas.width - 1, value.x));
 
-    const values = std.mem.bytesAsSlice(T, input[0 .. input.len - input.len % @sizeOf(T)]);
-    for (values) |value| {
-        p.move(@min(canvas.height() - 1, value.y), @min(canvas.width - 1, value.x));
+                const cp: u21 = @truncate(value.cp);
+                writer.print("{u}", .{cp}) catch |err| switch (err) {
+                    error.EndOfCanvas => break,
+                    else => |e| return e,
+                };
+            }
+        }
+    }.fuzzFn;
 
-        const cp: u21 = @truncate(value.cp);
-        writer.print("{u}", .{cp}) catch |err| switch (err) {
-            error.EndOfCanvas => break,
-            else => |e| return e,
-        };
-    }
+    try std.testing.fuzz(fuzzFn, .{});
 
     // writer.writeAll(input) catch |err| switch (err) {
     //     error.EndOfCanvas => {},
