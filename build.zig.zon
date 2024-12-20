@@ -13,16 +13,16 @@
     },
     .dependencies = .{
         .wcwidth = .{
-            .url = "git+https://github.com/efjimm/zig-wcwidth#d3fde4f6d76d6208cee59ac570772275339d3c10",
-            .hash = "12200686ad8c1d0cb234f282a6ac3cfd38071b81fab2b7c74654d7a2bf3655575929",
+            .url = "git+https://github.com/efjimm/zig-wcwidth?ref=master#e5ddf84c38eb74098a662689ef2c4ad7be869d96",
+            .hash = "1220bf334f40b807082c33e338c04f2262165dfa97111eefb2d22f96d90a68404b5f",
         },
         .@"critbit-zig" = .{
             .url = "git+https://github.com/efjimm/critbit-zig?ref=master#ea05f1ed7b5a16164359c1ad455173ff47851f0b",
             .hash = "12209ca18504482c93cfe45ffb7a0dd7b17e8e0bff5b7dc1848530fc123e634423cb",
         },
         .@"libgrapheme-zig" = .{
-            .url = "git+https://github.com/efjimm/zig-grapheme?ref=master#534e289d328e77510e19025ff4ce6de0bc6adac2",
-            .hash = "122002f29a5a12852b772cec4d3a5c03cecc3eba39ec4992262bccf0b31fad63ec95",
+            .url = "git+https://github.com/efjimm/zig-grapheme?ref=master#af6204ed6bfb9ec2d993799cf6a91c0c40a7720c",
+            .hash = "1220d1d4934f14c397d72830d47bdfec68f25be09f7430e88e2de16f9b6db48fbb69",
         },
     },
 }
