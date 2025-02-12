@@ -14,12 +14,12 @@ pub fn isZigString(comptime T: type) bool {
         if (ptr.is_volatile or ptr.is_allowzero) break :blk false;
 
         // If it's already a slice, simple check.
-        if (ptr.size == .Slice) {
+        if (ptr.size == .slice) {
             break :blk ptr.child == u8;
         }
 
         // Otherwise check if it's an array type that coerces to slice.
-        if (ptr.size == .One) {
+        if (ptr.size == .one) {
             const child = @typeInfo(ptr.child);
             if (child == .array) {
                 const arr = &child.array;

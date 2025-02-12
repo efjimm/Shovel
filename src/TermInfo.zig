@@ -1263,7 +1263,7 @@ pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void
             // Set dynamic/static variable to pop()
             'P' => {
                 i += 1;
-                const value = stack.pop();
+                const value = stack.pop().?;
                 switch (str[i]) {
                     'a'...'z' => dynamic_variables[str[i] - 'a'] = value,
                     'A'...'Z' => static_variables[str[i] - 'A'] = value,
@@ -1280,7 +1280,7 @@ pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void
                 stack.appendAssumeCapacity(value);
             },
             'c' => {
-                const arg = stack.pop();
+                const arg = stack.pop().?;
                 const char: u8 = switch (arg) {
                     .number => |int| @intCast(int),
                     .string => |s| s[0],
@@ -1348,7 +1348,7 @@ pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void
 
                 switch (str[i]) {
                     inline 'd', 'o', 'x', 'X' => |f| {
-                        const value: Parameter = stack.pop();
+                        const value: Parameter = stack.pop().?;
                         assert(value == .number);
                         const base, const case = switch (f) {
                             'd' => .{ 10, .lower },
@@ -1359,7 +1359,7 @@ pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void
                         };
                         try util.formatInt(value.number, base, case, fmt_opts, writer);
                     },
-                    's' => switch (stack.pop()) {
+                    's' => switch (stack.pop().?) {
                         .number => |int| try util.formatInt(int, 10, .lower, fmt_opts, writer),
                         .string => |s| try std.fmt.formatBuf(s, .{
                             .precision = fmt_opts.precision,
@@ -1395,7 +1395,7 @@ pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void
                 stack.appendAssumeCapacity(.{ .number = int_value });
             },
             'l' => {
-                const value = stack.pop();
+                const value = stack.pop().?;
                 const len: i32 = switch (value) {
                     .number => |int| if (int == 0)
                         1
@@ -1406,8 +1406,8 @@ pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void
                 stack.appendAssumeCapacity(.{ .number = len });
             },
             inline '+', '-', '*', '/', 'm', '&', '|', '^', '=', '>', '<' => |op| {
-                const rhs = stack.pop().number;
-                const lhs = stack.pop().number;
+                const rhs = stack.pop().?.number;
+                const lhs = stack.pop().?.number;
                 const value: i32 = switch (op) {
                     '+' => lhs +% rhs,
                     '-' => lhs -% rhs,
@@ -1427,7 +1427,7 @@ pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void
                 stack.appendAssumeCapacity(.{ .number = value });
             },
             inline '!', '~' => |op| {
-                const operand = stack.pop().number;
+                const operand = stack.pop().?.number;
                 const value: i32 = switch (op) {
                     '!' => @intFromBool(operand == 0),
                     '~' => ~operand,
@@ -1445,7 +1445,7 @@ pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void
             },
             '?' => {},
             // 't' and 'e' implementation based on unibilium
-            't' => if (stack.pop().number == 0) {
+            't' => if (stack.pop().?.number == 0) {
                 // Condition was false, skip until the end of contion or 'else.'
                 var nesting: usize = 0;
                 while (i < str.len) : (i += 1) {
