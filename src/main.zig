@@ -26,7 +26,6 @@ pub const cellWriter = @import("cell_writer.zig").cellWriter;
 pub const CellWriter = @import("cell_writer.zig").CellWriter;
 pub const TermInfo = @import("TermInfo.zig");
 pub const InputMap = @import("input.zig").InputMap;
-pub const Canvas = @import("Canvas.zig");
 
 test {
     @import("std").testing.refAllDeclsRecursive(@This());
