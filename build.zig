@@ -10,11 +10,11 @@ pub fn build(b: *Build) void {
         .target = target,
         .optimize = optimize,
     }).module("wcwidth");
-    const critbit = b.dependency("critbit-zig", .{
+    const critbit = b.dependency("critbit", .{
         .target = target,
         .optimize = optimize,
     }).module("critbit");
-    const grapheme = b.dependency("libgrapheme-zig", .{
+    const grapheme = b.dependency("libgrapheme_zig", .{
         .target = target,
         .optimize = optimize,
     });

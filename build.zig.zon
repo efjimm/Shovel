@@ -1,6 +1,7 @@
 .{
-    .name = "shovel",
+    .name = .shovel,
     .version = "0.1.0",
+    .fingerprint = 0xfa81a366cc580958,
     .paths = .{
         "src",
         "example",
@@ -13,16 +14,16 @@
     },
     .dependencies = .{
         .wcwidth = .{
-            .url = "git+https://github.com/efjimm/zig-wcwidth?ref=master#e5ddf84c38eb74098a662689ef2c4ad7be869d96",
-            .hash = "1220bf334f40b807082c33e338c04f2262165dfa97111eefb2d22f96d90a68404b5f",
+            .url = "git+https://github.com/efjimm/zig-wcwidth?ref=master#2872d6dfd5b4c6e2785065a851d744fd3b670ca1",
+            .hash = "wcwidth-1.0.0--VafOOvKAABO48aMATSMlqEhATb_QqKgJ6Pjz_JqMBPU",
         },
-        .@"critbit-zig" = .{
-            .url = "git+https://github.com/efjimm/critbit-zig?ref=master#ea05f1ed7b5a16164359c1ad455173ff47851f0b",
-            .hash = "12209ca18504482c93cfe45ffb7a0dd7b17e8e0bff5b7dc1848530fc123e634423cb",
+        .critbit = .{
+            .url = "git+https://github.com/efjimm/critbit-zig#887989b2faa1a88210b6d3315e3957da961fee3b",
+            .hash = "critbit-0.0.1-In1cd6MxAAAebNcsHCEngYnwxKHSO9EwN4DMyCDcbIpL",
         },
-        .@"libgrapheme-zig" = .{
-            .url = "git+https://github.com/efjimm/zig-grapheme?ref=master#af6204ed6bfb9ec2d993799cf6a91c0c40a7720c",
-            .hash = "1220d1d4934f14c397d72830d47bdfec68f25be09f7430e88e2de16f9b6db48fbb69",
+        .libgrapheme_zig = .{
+            .url = "git+https://github.com/efjimm/zig-grapheme?ref=master#632452e8f2c5c3958ced0cb51330f26e132b8002",
+            .hash = "libgrapheme_zig-0.0.1-vo5eAVh1AAAMrUnMVXO2u0SDuvlYTChnYmgiqOh4rDv2",
         },
     },
 }
