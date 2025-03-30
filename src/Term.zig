@@ -117,6 +117,7 @@ pub const InitError = error{
     SymLinkLoop,
     SystemFdQuotaExceeded,
     SystemResources,
+    PermissionDenied,
     Unexpected,
 } || Allocator.Error;
 
@@ -147,6 +148,7 @@ pub fn init(allocator: Allocator, term_config: TermConfig) InitError!Term {
             error.SymLinkLoop,
             error.SystemFdQuotaExceeded,
             error.SystemResources,
+            error.PermissionDenied,
             error.Unexpected,
             => |e| return e,
         },
