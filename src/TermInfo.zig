@@ -1,4 +1,5 @@
 // TODO: Investigate using terminfo for mouse support
+//       Validate all sequences on load
 const std = @import("std");
 const log = @import("log.zig");
 const getenv = std.posix.getenv;
@@ -1219,10 +1220,12 @@ pub fn validateParamSequence(sequence: []const u8, param_count: usize) ParamSequ
     }
 }
 
-/// Writes a paramterized escape sequence to the given writer, with the specified arguments. This
-/// function does no error checking. It is recommended to first validate parameterized sequences by
-/// calling `validateParamSequence`.
+pub const FormatError = error{InvalidFormat};
+
+/// Writes a paramterized escape sequence to the given writer, with the specified arguments.
 pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void {
+    // TODO: Move the validation from here to the loading of terminfo definitions.
+    validateParamSequence(str, args.len) catch return error.InvalidFormat;
     const PrintFlags = packed struct(u4) {
         minus: bool = false,
         plus: bool = false,

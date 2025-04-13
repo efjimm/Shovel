@@ -38,7 +38,7 @@ pub fn main() !void {
     term = try shovel.Term.init(allocator, .{});
     defer term.deinit(allocator);
 
-    try posix.sigaction(posix.SIG.WINCH, &.{
+    posix.sigaction(posix.SIG.WINCH, &.{
         .handler = .{ .handler = handleSigWinch },
         .mask = posix.empty_sigset,
         .flags = 0,
@@ -222,8 +222,10 @@ fn handleSigWinch(_: c_int) callconv(.C) void {
 
 /// Custom panic handler, so that we can try to cook the terminal on a crash,
 /// as otherwise all messages will be mangled.
-pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
-    @setCold(true);
+fn panic(msg: []const u8, ret_addr: ?usize) noreturn {
+    @branchHint(.cold);
     term.cook() catch {};
-    std.builtin.default_panic(msg, trace, ret_addr);
+    std.debug.defaultPanic(msg, ret_addr);
 }
+
+pub const Panic = std.debug.FullPanic(panic);

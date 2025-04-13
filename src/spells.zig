@@ -34,7 +34,7 @@ pub const CursorShape = enum(u3) {
     bar = 6,
 };
 
-pub const change_cursor = "\x1B[%d q";
+pub const change_cursor = "\x1B[%p1%d q";
 
 // https://sw.kovidgoyal.net/kitty/keyboard-protocol/
 // This enables an alternative input mode, that makes it possible, among

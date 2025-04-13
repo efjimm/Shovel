@@ -86,7 +86,7 @@ pub fn inputParser(term: *Term, bytes: []const u8) InputParser {
     return input.inputParser(bytes, term);
 }
 
-pub const WriteError = posix.WriteError;
+pub const WriteError = posix.WriteError || TermInfo.FormatError;
 
 const Writer = io.Writer(posix.fd_t, posix.WriteError, posix.write);
 pub fn unbufferedWriter(self: Term) Writer {
