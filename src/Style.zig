@@ -57,6 +57,8 @@ pub const Attribute = packed struct {
     reverse: bool = false,
     hidden: bool = false,
     strikethrough: bool = false,
+
+    pub const none: Attribute = .{};
 };
 
 fg: Colour = .none,
