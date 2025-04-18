@@ -6,6 +6,10 @@ const io = std.io;
 
 const shovel = @import("shovel");
 
+pub const std_options: std.Options = .{
+    .log_level = .err,
+};
+
 const red = shovel.Style{ .fg = .red, .attrs = .{ .italic = true } };
 const green = shovel.Style{ .fg = .green, .attrs = .{ .blinking = true } };
 const blue = shovel.Style{ .fg = .blue, .attrs = .{ .bold = true } };
@@ -18,16 +22,16 @@ const reset = shovel.Style{};
 pub fn main() !void {
     const writer = io.getStdOut().writer();
 
-    try red.dumpRaw(writer);
+    try red.dump(writer, .{});
     try writer.writeAll("foo ");
-    try green.dumpRaw(writer);
+    try green.dump(writer, .{});
     try writer.writeAll("bar ");
-    try blue.dumpRaw(writer);
+    try blue.dump(writer, .{});
     try writer.writeAll("baz ");
-    try magenta.dumpRaw(writer);
+    try magenta.dump(writer, .{});
     try writer.writeAll("zig ");
-    try cyan.dumpRaw(writer);
+    try cyan.dump(writer, .{});
     try writer.writeAll("shovel\n");
 
-    try reset.dumpRaw(writer);
+    try reset.dump(writer, .{});
 }

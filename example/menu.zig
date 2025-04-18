@@ -7,6 +7,10 @@ const posix = std.posix;
 
 const shovel = @import("shovel");
 
+pub const std_options: std.Options = .{
+    .log_level = .err,
+};
+
 var term: shovel.Term = undefined;
 var loop: bool = true;
 

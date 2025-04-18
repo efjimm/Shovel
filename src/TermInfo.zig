@@ -13,21 +13,21 @@ const input = @import("input.zig");
 
 // Maximum length of terminfo definition files
 pub const max_file_length = 32768;
-const Self = @This();
+const TermInfo = @This();
 
 input_map: ?input.InputMap = null,
 
-names: [:0]const u8 = "",
-string_table: []const u8 = "",
-ext_string_table: []u8 = "",
+names: [:0]const u8 = &.{},
+string_table: []const u8 = &.{},
+ext_string_table: []u8 = &.{},
 
 flags: std.EnumArray(Flag, bool) = std.EnumArray(Flag, bool).initFill(false),
 numbers: std.EnumArray(Number, i32) = std.EnumArray(Number, i32).initFill(-1),
 strings: std.EnumArray(String, i16) = std.EnumArray(String, i16).initFill(-1),
 
-ext_flags: std.StringHashMapUnmanaged(void) = .{},
-ext_nums: std.StringHashMapUnmanaged(u31) = .{},
-ext_strs: std.StringHashMapUnmanaged(u15) = .{},
+ext_flags: std.StringHashMapUnmanaged(void) = .empty,
+ext_nums: std.StringHashMapUnmanaged(u31) = .empty,
+ext_strs: std.StringHashMapUnmanaged(u15) = .empty,
 
 fn searchTermInfoDirectory(term: []const u8) ?std.fs.File {
     std.debug.assert(term.len > 0);
@@ -194,15 +194,15 @@ fn readNonNegative(src: *const [2]u8) ParseError!u15 {
     return std.math.cast(u15, readInt(i16, src, .little)) orelse error.InvalidFormat;
 }
 
-pub fn destroy(self: *Self, allocator: Allocator) void {
-    if (self.input_map) |*map| map.deinit(allocator);
-    allocator.free(self.names);
-    allocator.free(self.string_table);
-    allocator.free(self.ext_string_table);
-    self.ext_flags.deinit(allocator);
-    self.ext_nums.deinit(allocator);
-    self.ext_strs.deinit(allocator);
-    allocator.destroy(self);
+pub fn destroy(ti: *TermInfo, allocator: Allocator) void {
+    if (ti.input_map) |*map| map.deinit(allocator);
+    allocator.free(ti.names);
+    allocator.free(ti.string_table);
+    allocator.free(ti.ext_string_table);
+    ti.ext_flags.deinit(allocator);
+    ti.ext_nums.deinit(allocator);
+    ti.ext_strs.deinit(allocator);
+    allocator.destroy(ti);
 }
 
 const keys = [_]struct { []const u8, input.Input }{
@@ -290,7 +290,7 @@ const keys = [_]struct { []const u8, input.Input }{
 
 // TODO: Test this
 pub fn createInputMap(
-    self: *Self,
+    ti: *TermInfo,
     allocator: Allocator,
 ) !input.InputMap {
     const print = std.fmt.comptimePrint;
@@ -298,14 +298,14 @@ pub fn createInputMap(
     var map = input.InputMap.init();
     errdefer map.deinit(allocator);
 
-    if (self.getStringCapability(.delete_character)) |str| {
+    if (ti.getStringCapability(.delete_character)) |str| {
         map.put(allocator, str, .{ .content = .delete }) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             error.IsPrefix => {},
         };
     }
 
-    if (self.getStringCapability(.cursor_left)) |str| {
+    if (ti.getStringCapability(.cursor_left)) |str| {
         map.put(allocator, str, .{ .content = .backspace }) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             error.IsPrefix => {},
@@ -316,7 +316,7 @@ pub fn createInputMap(
         const key_name, const in = k;
         const name = comptime print("key_{s}", .{key_name});
         const tag = comptime std.meta.stringToEnum(String, name).?;
-        if (self.getStringCapability(tag)) |str| {
+        if (ti.getStringCapability(tag)) |str| {
             map.put(allocator, str, in) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 error.IsPrefix => {},
@@ -327,7 +327,7 @@ pub fn createInputMap(
     inline for (0..64) |i| {
         const name = comptime print("key_f{d}", .{i});
         const tag = comptime std.meta.stringToEnum(String, name).?;
-        if (self.getStringCapability(tag)) |str| {
+        if (ti.getStringCapability(tag)) |str| {
             map.put(allocator, str, .{
                 .content = .{ .function = i },
             }) catch |err| switch (err) {
@@ -339,7 +339,7 @@ pub fn createInputMap(
 
     // TODO: Handle `key_mouse`?
 
-    self.input_map = map;
+    ti.input_map = map;
     return map;
 }
 
@@ -352,7 +352,7 @@ fn readU15(reader: anytype) !u15 {
     return std.math.cast(u15, int) orelse error.InvalidFormat;
 }
 
-pub fn parse(allocator: Allocator, bytes: []const u8) ParseError!*Self {
+pub fn parse(allocator: Allocator, bytes: []const u8) ParseError!*TermInfo {
     return parseInternal(allocator, bytes) catch |err| switch (err) {
         error.EndOfStream => error.InvalidFormat,
         else => |e| e,
@@ -364,11 +364,11 @@ const Format = enum(i16) {
     extended = 0o1036,
 };
 
-fn parseInternal(allocator: Allocator, bytes: []const u8) !*Self {
+fn parseInternal(allocator: Allocator, bytes: []const u8) !*TermInfo {
     var fbs = std.io.fixedBufferStream(bytes);
     const reader = fbs.reader();
 
-    const ret = try allocator.create(Self);
+    const ret = try allocator.create(TermInfo);
     errdefer allocator.destroy(ret);
     ret.* = .{};
 
@@ -503,31 +503,31 @@ fn parseInternal(allocator: Allocator, bytes: []const u8) !*Self {
     return ret;
 }
 
-pub fn getFlagCapability(self: *const Self, tag: Flag) bool {
-    return self.flags.get(tag);
+pub fn getFlagCapability(ti: *const TermInfo, tag: Flag) bool {
+    return ti.flags.get(tag);
 }
 
-pub fn getNumberCapability(self: *const Self, tag: Number) ?u31 {
-    const v = self.numbers.get(tag);
+pub fn getNumberCapability(ti: *const TermInfo, tag: Number) ?u31 {
+    const v = ti.numbers.get(tag);
     return if (v < 0) null else @intCast(v);
 }
 
-pub fn getStringCapability(self: *const Self, tag: String) ?[:0]const u8 {
-    const v = std.math.cast(u16, self.strings.get(tag)) orelse return null;
-    return std.mem.span(@as([*:0]const u8, @ptrCast(self.string_table[v..].ptr)));
+pub fn getStringCapability(ti: *const TermInfo, tag: String) ?[:0]const u8 {
+    const v = std.math.cast(u16, ti.strings.get(tag)) orelse return null;
+    return std.mem.span(@as([*:0]const u8, @ptrCast(ti.string_table[v..].ptr)));
 }
 
-pub fn getExtendedFlag(self: *const Self, name: []const u8) bool {
-    return self.ext_flags.contains(name);
+pub fn getExtendedFlag(ti: *const TermInfo, name: []const u8) bool {
+    return ti.ext_flags.contains(name);
 }
 
-pub fn getExtendedNumber(self: *const Self, name: []const u8) ?u31 {
-    return self.ext_nums.get(name);
+pub fn getExtendedNumber(ti: *const TermInfo, name: []const u8) ?u31 {
+    return ti.ext_nums.get(name);
 }
 
-pub fn getExtendedString(self: *const Self, name: []const u8) ?[:0]const u8 {
-    if (self.ext_strs.get(name)) |index| {
-        return std.mem.span(@as([*:0]const u8, @ptrCast(self.ext_string_table[index..].ptr)));
+pub fn getExtendedString(ti: *const TermInfo, name: []const u8) ?[:0]const u8 {
+    if (ti.ext_strs.get(name)) |index| {
+        return std.mem.span(@as([*:0]const u8, @ptrCast(ti.ext_string_table[index..].ptr)));
     }
     return null;
 }
@@ -1629,13 +1629,13 @@ test "String capabilities" {
     try expectNumber(0x007d, res.strings.get(.enter_alt_charset_mode));
 }
 
-fn expectStringCapability(self: *Self, expected: []const u8, comptime e: String) !void {
-    const str = self.getStringCapability(e) orelse return error.InvalidCapabilityName;
+fn expectStringCapability(ti: *TermInfo, expected: []const u8, comptime e: String) !void {
+    const str = ti.getStringCapability(e) orelse return error.InvalidCapabilityName;
     try t.expectEqualSlices(u8, expected, str);
 }
 
-fn expectExtendedString(self: *Self, expected: []const u8, name: []const u8) !void {
-    const str = self.getExtendedString(name) orelse return error.InvalidCapabilityName;
+fn expectExtendedString(ti: *TermInfo, expected: []const u8, name: []const u8) !void {
+    const str = ti.getExtendedString(name) orelse return error.InvalidCapabilityName;
     try t.expectEqualSlices(u8, expected, str);
 }
 

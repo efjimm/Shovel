@@ -14,6 +14,7 @@
 
 const builtin = @import("builtin");
 const std = @import("std");
+// const log = @import("log.zig");
 const log = @import("log.zig");
 const Allocator = std.mem.Allocator;
 const ascii = std.ascii;
@@ -45,6 +46,20 @@ const UncookOptions = struct {
 const TermConfig = struct {
     use_terminfo: bool = true,
     terminfo_inputs: bool = true,
+
+    /// How to handle 24 bit color support
+    truecolour: enum {
+        /// Disable 24 bit color
+        disable,
+        /// Check for 24 bit color and enable or disable it based on these checks. May result in
+        /// false negatives, as many terminal emulators don't correctly advertise truecolor support.
+        check,
+        /// Force enable 24 bit color. Most terminals support truecolor, and most terminals that
+        /// don't support it will still accept the truecolor escape sequences and display an
+        /// approximation of that color instead. A notable exception to this is Terminal.app, the
+        /// default terminal on MacOS, which apparently does not support truecolor at all.
+        force,
+    } = .check,
 };
 
 /// The original termios configuration saved when entering raw mode. null if in cooked mode,
@@ -74,6 +89,16 @@ kitty_enabled: bool = false,
 /// True if mode 2027 is active.
 mode_2027_enabled: bool = false,
 
+truecolor_enabled: bool = false,
+
+cw: switch (mode) {
+    .Debug => CountingWriter,
+    else => void,
+},
+
+const CountingWriter = std.io.CountingWriter(PosixWriter);
+const mode = @import("builtin").mode;
+
 pub const CursorShape = spells.CursorShape;
 
 const InputMap = @import("input.zig").InputMap;
@@ -88,16 +113,24 @@ pub fn inputParser(term: *Term, bytes: []const u8) InputParser {
 
 pub const WriteError = posix.WriteError || TermInfo.FormatError;
 
-const Writer = io.Writer(posix.fd_t, posix.WriteError, posix.write);
-pub fn unbufferedWriter(self: Term) Writer {
-    return .{ .context = self.tty };
+const PosixWriter = io.Writer(posix.fd_t, posix.WriteError, posix.write);
+const Writer = switch (mode) {
+    .Debug => CountingWriter.Writer,
+    else => PosixWriter,
+};
+
+pub fn unbufferedWriter(term: *Term) Writer {
+    return switch (mode) {
+        .Debug => term.cw.writer(),
+        else => .{ .context = term.tty },
+    };
 }
 
-pub fn bufferedWriter(
-    self: Term,
+pub inline fn bufferedWriter(
+    term: *Term,
     comptime buffer_size: usize,
 ) io.BufferedWriter(buffer_size, Writer) {
-    return .{ .unbuffered_writer = self.unbufferedWriter() };
+    return .{ .unbuffered_writer = term.unbufferedWriter() };
 }
 
 // NotATerminal + a subset of posix.OpenError, removing all errors which aren't reachable due to how
@@ -133,6 +166,7 @@ pub fn init(allocator: Allocator, term_config: TermConfig) InitError!Term {
             error.WouldBlock,
             error.NetworkNotFound,
             error.InvalidWtf8,
+            error.ProcessNotFound,
             => unreachable,
 
             error.AccessDenied,
@@ -153,8 +187,13 @@ pub fn init(allocator: Allocator, term_config: TermConfig) InitError!Term {
             => |e| return e,
         },
         .terminfo = null,
+        .cw = undefined,
     };
     errdefer posix.close(ret.tty);
+
+    if (mode == .Debug) {
+        ret.cw = std.io.countingWriter(PosixWriter{ .context = ret.tty });
+    }
 
     if (!posix.isatty(ret.tty))
         return error.NotATerminal;
@@ -174,21 +213,44 @@ pub fn init(allocator: Allocator, term_config: TermConfig) InitError!Term {
         }
     }
 
+    ret.truecolor_enabled = sw: switch (term_config.truecolour) {
+        .disable => false,
+        .check => {
+            if (posix.getenv("COLORTERM")) |colorterm| {
+                if (std.mem.eql(u8, colorterm, "truecolor") or
+                    std.mem.eql(u8, colorterm, "24bit"))
+                {
+                    break :sw true;
+                }
+            }
+
+            if (ret.terminfo) |ti| {
+                if (ti.getNumberCapability(.max_colors)) |colors| {
+                    if (colors >= comptime std.math.pow(u32, 2, 24))
+                        break :sw true;
+                }
+            }
+
+            break :sw false;
+        },
+        .force => true,
+    };
+
     return ret;
 }
 
-pub fn deinit(self: *Term, allocator: Allocator) void {
-    assert(!self.currently_rendering);
+pub fn deinit(term: *Term, allocator: Allocator) void {
+    assert(!term.currently_rendering);
 
     // It's probably a good idea to cook the terminal on exit.
-    if (!self.isCooked())
-        self.cook() catch {};
+    if (!term.isCooked())
+        term.cook() catch {};
 
-    if (self.terminfo) |ti|
+    if (term.terminfo) |ti|
         ti.destroy(allocator);
 
-    posix.close(self.tty);
-    self.* = undefined;
+    posix.close(term.tty);
+    term.* = undefined;
 }
 
 fn getTermInfo(allocator: Allocator) !*TermInfo {
@@ -234,9 +296,9 @@ pub fn useTermInfoInputs(term: *Term, allocator: Allocator) !void {
 
 const SetBlockingReadError = posix.TermiosGetError || posix.TermiosSetError;
 
-pub fn setBlockingRead(self: Term, enabled: bool) SetBlockingReadError!void {
+pub fn setBlockingRead(term: Term, enabled: bool) SetBlockingReadError!void {
     const termios = blk: {
-        var raw = try posix.tcgetattr(self.tty);
+        var raw = try posix.tcgetattr(term.tty);
 
         if (enabled) {
             raw.cc[@intFromEnum(constants.V.TIME)] = 0;
@@ -249,28 +311,28 @@ pub fn setBlockingRead(self: Term, enabled: bool) SetBlockingReadError!void {
         break :blk raw;
     };
 
-    try posix.tcsetattr(self.tty, .FLUSH, termios);
+    try posix.tcsetattr(term.tty, .FLUSH, termios);
 }
 
 // Reads from stdin to the supplied buffer. Asserts that `buf.len >= 8`.
-pub fn readInput(self: *Term, buf: []u8) ![]u8 {
+pub fn readInput(term: *Term, buf: []u8) ![]u8 {
     assert(buf.len >= 8); // Ensures that at least one full escape sequence can be handled
-    assert(!self.currently_rendering);
-    assert(!self.isCooked());
+    assert(!term.currently_rendering);
+    assert(!term.isCooked());
 
     // If we have a partial codepoint from the last read, append it to the buffer
     const buffer = blk: {
-        const len = self.codepoint_len;
+        const len = term.codepoint_len;
         if (len > 0) {
-            @memcpy(buf[0..len], self.codepoint[0..len]);
-            self.codepoint_len = 0;
+            @memcpy(buf[0..len], term.codepoint[0..len]);
+            term.codepoint_len = 0;
             break :blk buf[len..];
         }
         break :blk buf;
     };
 
     // Use system.read instead of posix.read so it won't restart on signals.
-    const rc = posix.system.read(self.tty, buffer.ptr, buffer.len);
+    const rc = posix.system.read(term.tty, buffer.ptr, buffer.len);
 
     const bytes_read: usize = switch (posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
@@ -303,8 +365,8 @@ pub fn readInput(self: *Term, buf: []u8) ![]u8 {
         if (codepoint_len <= len) return slice; // Have invalid utf-8
 
         // Copy unfinished codepoint into internal buffer
-        @memcpy(self.codepoint[0..len], buffer[i..]);
-        self.codepoint_len = @intCast(len);
+        @memcpy(term.codepoint[0..len], buffer[i..]);
+        term.codepoint_len = @intCast(len);
         // Return the buffer without the trailing unfinished codepoint
         return buffer[0..i];
     }
@@ -314,77 +376,77 @@ pub fn readInput(self: *Term, buf: []u8) ![]u8 {
 
 // TODO: Make this ?bool
 
-pub fn getExtendedFlag(self: *const Term, name: []const u8) bool {
-    return if (self.terminfo) |ti|
+pub fn getExtendedFlag(term: *const Term, name: []const u8) bool {
+    return if (term.terminfo) |ti|
         ti.getExtendedFlag(name)
     else
         false;
 }
 
-pub fn getExtendedNumber(self: *const Term, name: []const u8) ?u31 {
-    return if (self.terminfo) |ti|
+pub fn getExtendedNumber(term: *const Term, name: []const u8) ?u31 {
+    return if (term.terminfo) |ti|
         ti.getExtendedNumber(name)
     else
         null;
 }
 
-pub fn getExtendedString(self: *const Term, name: []const u8) ?[:0]const u8 {
-    return if (self.terminfo) |ti|
+pub fn getExtendedString(term: *const Term, name: []const u8) ?[:0]const u8 {
+    return if (term.terminfo) |ti|
         ti.getExtendedString(name)
     else
         null;
 }
 
 pub fn getFlagCapability(
-    self: *const Term,
+    term: *const Term,
     comptime tag: TermInfo.Flag,
 ) bool {
-    return if (self.terminfo) |ti|
+    return if (term.terminfo) |ti|
         ti.getFlagCapability(tag)
     else
         null;
 }
 
 pub fn getNumberCapability(
-    self: *const Term,
+    term: *const Term,
     comptime tag: TermInfo.Number,
 ) ?u31 {
-    return if (self.terminfo) |ti|
+    return if (term.terminfo) |ti|
         ti.getNumberCapability(tag)
     else
         null;
 }
 
 pub fn getStringCapability(
-    self: *const Term,
+    term: *const Term,
     comptime tag: TermInfo.String,
 ) ?[:0]const u8 {
-    return if (self.terminfo) |ti|
+    return if (term.terminfo) |ti|
         ti.getStringCapability(tag)
     else
         null;
 }
 
-pub inline fn isCooked(self: *const Term) bool {
-    return self.cooked_termios == null;
+pub inline fn isCooked(term: *const Term) bool {
+    return term.cooked_termios == null;
 }
 
 pub const UncookError = posix.TermiosGetError || posix.TermiosSetError || posix.WriteError || posix.FcntlError || posix.ReadError || posix.PollError;
 
 /// Enter raw mode.
-pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
-    if (!self.isCooked())
+pub fn uncook(term: *Term, options: UncookOptions) UncookError!void {
+    if (!term.isCooked())
         return;
 
     // The information on the various flags and escape sequences is pieced
     // together from various sources, including termios(3) and
     // https://viewsourcecode.org/snaptoken/kilo/02.enteringRawMode.html.
 
-    self.cooked_termios = try posix.tcgetattr(self.tty);
-    errdefer self.cook() catch {};
+    term.cooked_termios = try posix.tcgetattr(term.tty);
+    errdefer term.cook() catch {};
 
     const raw_termios = blk: {
-        var raw = self.cooked_termios.?;
+        var raw = term.cooked_termios.?;
 
         //   ECHO: Stop the terminal from displaying pressed keys.
         // ICANON: Disable canonical ("cooked") mode. Allows us to read inputs
@@ -429,24 +491,24 @@ pub fn uncook(self: *Term, options: UncookOptions) UncookError!void {
         break :blk raw;
     };
 
-    try posix.tcsetattr(self.tty, .FLUSH, raw_termios);
+    try posix.tcsetattr(term.tty, .FLUSH, raw_termios);
 
-    var buffered_writer = self.bufferedWriter(256);
+    var buffered_writer = term.bufferedWriter(256);
     const writer = buffered_writer.writer();
     inline for (.{
-        self.getStringCapability(.save_cursor) orelse spells.save_cursor_position,
-        self.getStringCapability(.enter_ca_mode) orelse spells.enter_alt_buffer,
-        self.getStringCapability(.exit_insert_mode) orelse spells.overwrite_mode,
-        self.getStringCapability(.exit_am_mode) orelse spells.reset_auto_wrap,
-        self.getStringCapability(.cursor_invisible) orelse spells.hide_cursor,
+        term.getStringCapability(.save_cursor) orelse spells.save_cursor_position,
+        term.getStringCapability(.enter_ca_mode) orelse spells.enter_alt_buffer,
+        term.getStringCapability(.exit_insert_mode) orelse spells.overwrite_mode,
+        term.getStringCapability(.exit_am_mode) orelse spells.reset_auto_wrap,
+        term.getStringCapability(.cursor_invisible) orelse spells.hide_cursor,
     }) |str| try writer.writeAll(str);
 
     if (options.request_kitty_keyboard_protocol) {
-        try self.enableKittyKeyboard(&buffered_writer);
+        try term.enableKittyKeyboard(&buffered_writer);
     }
 
     if (options.request_mode_2027) {
-        try self.enableMode2027(&buffered_writer);
+        try term.enableMode2027(&buffered_writer);
     }
 
     if (options.request_mouse_tracking) {
@@ -518,63 +580,63 @@ fn enableKittyKeyboard(term: *Term, buffered_writer: anytype) !void {
 pub const CookError = posix.WriteError || posix.TermiosSetError;
 
 /// Enter cooked mode.
-pub fn cook(self: *Term) CookError!void {
-    if (self.isCooked())
+pub fn cook(term: *Term) CookError!void {
+    if (term.isCooked())
         return;
 
-    try posix.tcsetattr(self.tty, .FLUSH, self.cooked_termios.?);
-    self.cooked_termios = null;
+    try posix.tcsetattr(term.tty, .FLUSH, term.cooked_termios.?);
+    term.cooked_termios = null;
 
-    var buffered_writer = self.bufferedWriter(128);
+    var buffered_writer = term.bufferedWriter(128);
     const writer = buffered_writer.writer();
 
-    if (self.kitty_enabled) {
+    if (term.kitty_enabled) {
         try writer.writeAll(spells.disable_kitty_keyboard);
-        self.kitty_enabled = false;
+        term.kitty_enabled = false;
     }
 
     inline for (.{
         spells.disable_mouse_tracking,
-        self.getStringCapability(.clear_screen) orelse "",
-        self.getStringCapability(.exit_ca_mode) orelse "",
-        self.getStringCapability(.cursor_visible) orelse "",
-        self.getStringCapability(.exit_attribute_mode) orelse "",
-        self.getStringCapability(.enter_am_mode) orelse spells.enable_auto_wrap,
+        term.getStringCapability(.clear_screen) orelse "",
+        term.getStringCapability(.exit_ca_mode) orelse "",
+        term.getStringCapability(.cursor_visible) orelse "",
+        term.getStringCapability(.exit_attribute_mode) orelse "",
+        term.getStringCapability(.enter_am_mode) orelse spells.enable_auto_wrap,
     }) |str| try writer.writeAll(str);
     try buffered_writer.flush();
 }
 
-pub fn fetchSize(self: *Term) posix.UnexpectedError!void {
-    if (self.isCooked())
+pub fn fetchSize(term: *Term) posix.UnexpectedError!void {
+    if (term.isCooked())
         return;
 
     var size = mem.zeroes(std.posix.winsize);
-    const err = posix.system.ioctl(self.tty, constants.T.IOCGWINSZ, @intFromPtr(&size));
+    const err = posix.system.ioctl(term.tty, constants.T.IOCGWINSZ, @intFromPtr(&size));
     if (posix.errno(err) != .SUCCESS) {
         return posix.unexpectedErrno(@enumFromInt(err));
     }
-    self.height = size.row;
-    self.width = size.col;
+    term.height = size.row;
+    term.width = size.col;
 }
 
 /// Set window title using OSC 2. Shall not be called while rendering.
-pub fn setWindowTitle(self: *Term, comptime fmt: []const u8, args: anytype) WriteError!void {
-    assert(!self.currently_rendering);
-    var bw = self.bufferedWriter(1024);
+pub fn setWindowTitle(term: *Term, comptime fmt: []const u8, args: anytype) WriteError!void {
+    assert(!term.currently_rendering);
+    var bw = term.bufferedWriter(1024);
     bw.writer().print("\x1b]2;" ++ fmt ++ "\x1b\\", args) catch unreachable;
     try bw.flush();
 }
 
 pub fn getRenderContext(
-    self: *Term,
+    term: *Term,
     comptime buffer_size: usize,
 ) WriteError!RenderContext(buffer_size) {
-    assert(!self.currently_rendering);
-    assert(!self.isCooked());
+    assert(!term.currently_rendering);
+    assert(!term.isCooked());
 
     var rc: RenderContext(buffer_size) = .{
-        .term = self,
-        .buffer = self.bufferedWriter(buffer_size),
+        .term = term,
+        .buffer = term.bufferedWriter(buffer_size),
     };
 
     const writer = rc.buffer.writer();
@@ -582,10 +644,12 @@ pub fn getRenderContext(
     if (rc.term.getExtendedString("Sync")) |sync|
         try TermInfo.writeParamSequence(sync, writer, .{1});
 
-    if (self.getStringCapability(.exit_attribute_mode)) |srg0|
+    if (term.getStringCapability(.exit_attribute_mode)) |srg0|
         try writer.writeAll(srg0);
 
-    self.currently_rendering = true;
+    term.currently_rendering = true;
+    if (mode == .Debug)
+        term.cw.bytes_written = 0;
     return rc;
 }
 
@@ -609,6 +673,8 @@ pub fn RenderContext(comptime buffer_size: usize) type {
                 try TermInfo.writeParamSequence(sync, writer, .{2});
             }
             try rc.buffer.flush();
+            if (mode == .Debug)
+                log.perf.debug("{d} bytes written in render", .{rc.term.cw.bytes_written});
         }
 
         /// Clears all content. Avoid calling often, as fully clearing and redrawing the screen can
@@ -675,7 +741,10 @@ pub fn RenderContext(comptime buffer_size: usize) type {
         pub fn setStyle(rc: *Self, attr: Style) WriteError!void {
             assert(rc.term.currently_rendering);
             const writer = rc.buffer.writer();
-            try attr.dump(rc.term.terminfo, writer);
+            try attr.dump(writer, .{
+                .terminfo = rc.term.terminfo,
+                .truecolor = rc.term.truecolor_enabled,
+            });
         }
 
         pub fn cellWriter(rc: *Self, width: u16) CellWriter {

@@ -13,9 +13,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+// TODO: Standardize spelling of color/colour
+
 const std = @import("std");
 const Style = @This();
 const TermInfo = @import("TermInfo.zig");
+const log = @import("log.zig");
 
 pub const Colour = union(enum(u5)) {
     const colour_desc = @import("colour_description.zig");
@@ -77,9 +80,16 @@ pub fn eql(a: Style, b: Style) bool {
     return std.meta.eql(a, b);
 }
 
+pub const DumpOptions = struct {
+    /// When set to false, truecolor colors will be approximated to the standard 256-color pallette
+    /// instead.
+    truecolor: bool = true,
+    terminfo: ?*const TermInfo = null,
+};
+
 /// Dumps the attributes to `writer`, using the capabilities reported by `ti`.
-pub fn dump(style: Style, terminfo: ?*const TermInfo, writer: anytype) !void {
-    const ti = terminfo orelse return style.dumpRaw(writer);
+pub fn dump(style: Style, writer: anytype, opts: DumpOptions) !void {
+    const ti = opts.terminfo orelse return style.dumpRaw(writer);
 
     if (ti.getStringCapability(.set_attributes)) |sgr| {
         try TermInfo.writeParamSequence(sgr, writer, .{
@@ -181,20 +191,17 @@ pub fn dump(style: Style, terminfo: ?*const TermInfo, writer: anytype) !void {
             }
         },
         .rgb => |rgb| {
-            // The standard way for terminals to report 24-bit color support is by using an
-            // extended integer format terminfo file with `max_colors` set to 2^24. Unfortunately,
-            // very few terminal emulators actually do this, even if they support it.
-            //
-            // So we are left with two options here:
-            //  - be strict and only output 24-bit color if support is reported, which will disallow
-            //    24-bit color on the majority of popular terminal emulators
-            //  - output 24-bit color regardless of reporting, which will allow 24-bit color on
-            //    all terminals that support it but possibly break older terminals that don't
-            //
-            // The second option is used here, as the majority of terminals actually in use
-            // support it.
-            const r, const g, const b = rgb;
-            try writer.print("\x1b[38;2;{d};{d};{d}m", .{ r, g, b });
+            if (opts.truecolor) {
+                try dump24BitColour(rgb, .fg, writer);
+            } else {
+                const index = approximateTruecolor(rgb);
+                const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
+                if (num_colors >= 256) {
+                    if (ti.getStringCapability(.set_a_foreground)) |setaf| {
+                        try TermInfo.writeParamSequence(setaf, writer, .{index});
+                    }
+                }
+            }
         },
     }
 
@@ -245,15 +252,39 @@ pub fn dump(style: Style, terminfo: ?*const TermInfo, writer: anytype) !void {
             }
         },
         .rgb => |rgb| {
-            const r, const g, const b = rgb;
-            try writer.print("\x1b[38;2;{d};{d};{d}m", .{ r, g, b });
+            if (opts.truecolor) {
+                try dump24BitColour(rgb, .bg, writer);
+            } else {
+                const index = approximateTruecolor(rgb);
+                const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
+                if (num_colors >= 256) {
+                    if (ti.getStringCapability(.set_a_background)) |setab| {
+                        try TermInfo.writeParamSequence(setab, writer, .{index});
+                    }
+                }
+            }
         },
     }
 }
 
+/// Given a 24 bit color value, return the index of the closest match in the 256 color table.
+pub fn approximateTruecolor(rgb: [3]u8) u8 {
+    const r, const g, const b = rgb;
+    return 16 + (r / 51) * 36 + (g / 51) * 6 + (b / 51);
+}
+
+pub fn dump24BitColour(rgb: [3]u8, comptime kind: enum { fg, bg }, writer: anytype) !void {
+    const fmt = switch (kind) {
+        .fg => "\x1b[38;2;{d};{d};{d}m",
+        .bg => "\x1b[48;2;{d};{d};{d}m",
+    };
+    const r, const g, const b = rgb;
+    try writer.print(fmt, .{ r, g, b });
+}
+
 /// Dumps attributes to `writer` using ANSI escape sequences. For better compatibility, prefer to
 /// use `dump`.
-pub fn dumpRaw(style: Style, writer: anytype) !void {
+fn dumpRaw(style: Style, writer: anytype) !void {
     var buf: std.BoundedArray(u8, 64) = .{};
     buf.appendSliceAssumeCapacity("\x1B[");
 
@@ -284,13 +315,11 @@ pub fn dumpRaw(style: Style, writer: anytype) !void {
         .bright_magenta => buf.appendSliceAssumeCapacity("95;"),
         .bright_cyan => buf.appendSliceAssumeCapacity("96;"),
         .bright_white => buf.appendSliceAssumeCapacity("97;"),
-        .@"256" => {
-            buf.appendSliceAssumeCapacity("38;5;");
-            buf.writer().print("{d};", .{style.fg.@"256"}) catch unreachable;
+        .@"256" => |n| {
+            buf.writer().print("38;5;{d};", .{n}) catch unreachable;
         },
         .rgb => {
-            buf.appendSliceAssumeCapacity("38;2;");
-            buf.writer().print("{d};{d};{d};", .{
+            buf.writer().print("38;2;{d};{d};{d};", .{
                 style.fg.rgb[0],
                 style.fg.rgb[1],
                 style.fg.rgb[2],
@@ -315,13 +344,11 @@ pub fn dumpRaw(style: Style, writer: anytype) !void {
         .bright_magenta => buf.appendSliceAssumeCapacity("105;"),
         .bright_cyan => buf.appendSliceAssumeCapacity("106;"),
         .bright_white => buf.appendSliceAssumeCapacity("107;"),
-        .@"256" => {
-            buf.appendSliceAssumeCapacity("48;5;");
-            buf.writer().print("{d};", .{style.bg.@"256"}) catch unreachable;
+        .@"256" => |n| {
+            buf.writer().print("48;5;{d};", .{n}) catch unreachable;
         },
         .rgb => {
-            buf.appendSliceAssumeCapacity("48;2;");
-            buf.writer().print("{d};{d};{d};", .{
+            buf.writer().print("48;2;{d};{d};{d};", .{
                 style.bg.rgb[0],
                 style.bg.rgb[1],
                 style.bg.rgb[2],
@@ -333,4 +360,5 @@ pub fn dumpRaw(style: Style, writer: anytype) !void {
 
     buf.buffer[buf.len - 1] = 'm';
     try writer.writeAll(buf.constSlice());
+    log.perf.debug("dump style {d} bytes", .{buf.len});
 }

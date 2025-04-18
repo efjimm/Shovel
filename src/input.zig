@@ -92,7 +92,8 @@ pub const InputParser = struct {
     const Self = @This();
 
     bytes: []const u8,
-    term: ?*Term = null,
+    kitty_enabled: bool = false,
+    ti: ?*TermInfo = null,
 
     pub fn next(self: *Self) ?Input {
         if (self.bytes.len == 0) return null;
@@ -101,20 +102,18 @@ pub const InputParser = struct {
         // keyboard protocol can render the terminfo definitions for the terminal incorrect. So
         // if we were able to successfully enable the kitty keyboard protocol, then we should
         // prioritize them first.
-        const kitty_first = self.term != null and self.term.?.kitty_enabled;
+        const kitty_first = self.kitty_enabled;
 
         if (kitty_first and self.bytes[0] == '\x1B') {
             if (self.maybeKittyEscapeSequence()) |in| return in;
         }
 
-        if (self.term) |term| {
-            if (term.terminfo) |ti| if (ti.input_map) |*map| {
-                if (map.getPrefix(self.bytes)) |kv| {
-                    self.advanceBufferBy(kv.key.len);
-                    return kv.value;
-                }
-            };
-        }
+        if (self.ti) |ti| if (ti.input_map) |*map| {
+            if (map.getPrefix(self.bytes)) |kv| {
+                self.advanceBufferBy(kv.key.len);
+                return kv.value;
+            }
+        };
 
         if (self.bytes[0] == '\x1B') {
             return self.maybeEscapeSequence();
@@ -501,7 +500,11 @@ pub const InputParser = struct {
 const Term = @import("Term.zig");
 
 pub fn inputParser(bytes: []const u8, term: ?*Term) InputParser {
-    return .{ .bytes = bytes, .term = term };
+    return .{
+        .bytes = bytes,
+        .kitty_enabled = if (term) |t| t.kitty_enabled else false,
+        .ti = if (term) |t| t.terminfo else null,
+    };
 }
 
 test "input parser: Multiple bytes, legacy escape sequence embedded within" {
@@ -634,10 +637,14 @@ test "input parser: terminfo escape sequences" {
     const t = std.testing;
 
     const Context = struct {
-        term: *Term,
+        ti: *TermInfo,
 
         fn testInput(ctx: *@This(), input: []const u8, expected: Input) !void {
-            var parser = inputParser(input, ctx.term);
+            var parser: InputParser = .{
+                .bytes = input,
+                .kitty_enabled = false,
+                .ti = ctx.ti,
+            };
             try t.expectEqual(expected, parser.next().?);
         }
     };
@@ -645,13 +652,9 @@ test "input parser: terminfo escape sequences" {
     const ti = try TermInfo.parse(t.allocator, @embedFile("descriptions/x/xterm"));
     defer ti.destroy(t.allocator);
 
-    var term = Term{
-        .tty = -1,
-        .terminfo = ti,
-    };
-    try term.useTermInfoInputs(t.allocator);
+    _ = try ti.createInputMap(t.allocator);
 
-    var ctx: Context = .{ .term = &term };
+    var ctx: Context = .{ .ti = ti };
     try ctx.testInput("\x08", .{ .content = .backspace });
     try ctx.testInput("\x1b[3~", .{ .content = .delete });
     try ctx.testInput("\x1bOB", .{ .content = .arrow_down });

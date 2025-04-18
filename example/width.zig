@@ -1,6 +1,10 @@
 const std = @import("std");
 const shovel = @import("shovel");
 
+pub const std_options: std.Options = .{
+    .log_level = .err,
+};
+
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     defer _ = gpa.deinit();

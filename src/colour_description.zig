@@ -40,17 +40,21 @@ pub fn parseColourDescription(s: []const u8) ParseError!Colour {
     if (s.len == 0)
         return error.BadColourDescription;
 
+    if (s.len == "#RRGGBB".len and s[0] == '#') {
+        return .{ .rgb = try hexToRgb(s[1..]) };
+    }
+
     if (ascii.isDigit(s[0])) {
         if (s.len == "0xRRGGBB".len and s[0] == '0' and s[1] == 'x') {
-            return Colour{ .rgb = try hexToRgb(s[2..]) };
-        } else {
-            return Colour{
-                .@"256" = fmt.parseUnsigned(u8, s, 10) catch return error.BadColourDescription,
-            };
+            return .{ .rgb = try hexToRgb(s[2..]) };
         }
-    } else {
-        return colour_names.get(s) orelse error.BadColourDescription;
+
+        return .{
+            .@"256" = fmt.parseUnsigned(u8, s, 10) catch return error.BadColourDescription,
+        };
     }
+
+    return colour_names.get(s) orelse error.BadColourDescription;
 }
 
 /// Convert a string in the format "0xRRGGBB" to [3]u8.
