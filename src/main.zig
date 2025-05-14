@@ -22,8 +22,9 @@ pub const inputParser = @import("input.zig").inputParser;
 pub const Input = @import("input.zig").Input;
 pub const InputContent = @import("input.zig").InputContent;
 
-pub const cellWriter = @import("cell_writer.zig").cellWriter;
-pub const CellWriter = @import("cell_writer.zig").CellWriter;
+pub const terminalCellWriter = @import("terminal_cell_writer.zig").terminalCellWriter;
+pub const terminal_cell_writer = @import("terminal_cell_writer.zig");
+pub const TerminalCellWriter = @import("terminal_cell_writer.zig").TerminalCellWriter;
 pub const TermInfo = @import("TermInfo.zig");
 pub const InputMap = @import("input.zig").InputMap;
 

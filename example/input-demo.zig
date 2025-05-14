@@ -40,7 +40,7 @@ pub fn main() !void {
 
     posix.sigaction(posix.SIG.WINCH, &.{
         .handler = .{ .handler = handleSigWinch },
-        .mask = posix.empty_sigset,
+        .mask = posix.sigemptyset(),
         .flags = 0,
     }, null);
 

@@ -4,7 +4,7 @@ const Build = std.Build;
 pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const use_llvm = !(b.option(bool, "native", "use native codegen backends") orelse false);
+    const use_llvm = !(b.option(bool, "no-llvm", "use native codegen backends") orelse false);
 
     const wcwidth = b.dependency("wcwidth", .{
         .target = target,

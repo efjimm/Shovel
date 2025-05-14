@@ -1,3 +1,4 @@
+// TODO: Rework this shitty example
 const std = @import("std");
 const shovel = @import("shovel");
 
@@ -35,9 +36,7 @@ pub fn main() !void {
     }
 }
 
-const RenderError = shovel.Term.WriteError;
-
-fn render(term: *shovel.Term) RenderError!void {
+fn render(term: *shovel.Term) !void {
     var rc = try term.getRenderContext(4096);
 
     try rc.clear();

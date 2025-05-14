@@ -32,7 +32,7 @@ const constants = if (builtin.link_libc and builtin.os.tag == .linux) os.linux e
 
 const Style = @import("Style.zig");
 const spells = @import("spells.zig");
-const cell_writer = @import("cell_writer.zig");
+const cell_writer = @import("terminal_cell_writer.zig");
 const TermInfo = @import("TermInfo.zig");
 
 const Term = @This();
@@ -660,7 +660,7 @@ pub fn RenderContext(comptime buffer_size: usize) type {
 
         const Self = @This();
         const BufferedWriter = io.BufferedWriter(buffer_size, Writer);
-        const CellWriter = cell_writer.CellWriter(BufferedWriter.Writer);
+        const CellWriter = cell_writer.TerminalCellWriter(BufferedWriter.Writer);
 
         /// Finishes the render operation. The render context may not be used any
         /// further.
@@ -749,7 +749,11 @@ pub fn RenderContext(comptime buffer_size: usize) type {
 
         pub fn cellWriter(rc: *Self, width: u16) CellWriter {
             assert(rc.term.currently_rendering);
-            return cell_writer.cellWriter(rc.buffer.writer(), width);
+            const width_strategy: cell_writer.WidthStrategy = switch (rc.term.mode_2027_enabled) {
+                true => .mode_2027,
+                false => .legacy,
+            };
+            return cell_writer.terminalCellWriter(rc.buffer.writer(), width_strategy, width);
         }
 
         /// Write all bytes, wrapping at the end of the line.
