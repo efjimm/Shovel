@@ -99,7 +99,7 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
                     // The codepoint is buffered across more writes :/
                     @memcpy(tcw.partial_cp_buf[tcw.partial_cp_buf_len..][0..slice.len], slice);
                     tcw.partial_cp_buf_len += @intCast(slice.len);
-                    return slice.len;
+                    return bytes.len;
                 }
                 var buf: [4]u8 = undefined;
                 @memcpy(buf[0..tcw.partial_cp_buf_len], tcw.partial_cp_buf[0..tcw.partial_cp_buf_len]);
@@ -128,12 +128,13 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
                 break :blk slice.len;
             };
 
-            if (valid_len == 0) return slice.len;
+            if (valid_len == 0) return bytes.len;
             const valid_bytes = slice[0..valid_len];
-            return switch (tcw.width_strategy) {
-                .legacy => tcw.writeLegacy(valid_bytes),
-                .mode_2027 => tcw.writeMode2027(valid_bytes),
-            };
+            switch (tcw.width_strategy) {
+                .legacy => try tcw.writeLegacy(valid_bytes),
+                .mode_2027 => try tcw.writeMode2027(valid_bytes),
+            }
+            return bytes.len;
         }
 
         fn writeAscii(tcw: *Tcw, bytes: []const u8) !bool {
@@ -186,7 +187,7 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
             return true;
         }
 
-        fn writeLegacy(tcw: *Tcw, bytes: []const u8) !usize {
+        fn writeLegacy(tcw: *Tcw, bytes: []const u8) !void {
             assert(std.unicode.utf8ValidateSlice(bytes));
             var iter: utf8.Iterator = .{ .bytes = bytes };
 
@@ -199,11 +200,9 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
                 const end = try tcw.writeCharacter(cp_slice, width);
                 if (end) break;
             }
-
-            return bytes.len;
         }
 
-        fn writeMode2027(tcw: *Tcw, bytes: []const u8) !usize {
+        fn writeMode2027(tcw: *Tcw, bytes: []const u8) !void {
             assert(std.unicode.utf8ValidateSlice(bytes));
             var iter: utf8.Iterator = .{ .bytes = bytes };
 
@@ -237,8 +236,6 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
                 const end = try tcw.writeCharacter(grapheme_slice, width);
                 if (end) break;
             }
-
-            return bytes.len;
         }
 
         fn graphemeWidth(bytes: []const u8) u2 {
@@ -360,7 +357,7 @@ fn lastCodepointIndex(bytes: []const u8) usize {
 }
 
 fn isStartByte(c: u8) bool {
-    return c & 0xC0 != 0x80;
+    return (c & 0xC0) != 0x80;
 }
 
 fn fuzz(_: void, input: []const u8) anyerror!void {
@@ -505,4 +502,12 @@ test "CellWriter" {
         }
         try std.testing.expectEqualStrings(expected, buf.slice());
     }
+}
+
+test "tcw single write" {
+    var buf = std.BoundedArray(u8, 4096){};
+    var tcw = terminalCellWriter(buf.writer(), .legacy, 100);
+    const str = "single write!🧑‍🌾";
+    const bytes_written = tcw.writer().write(str);
+    try std.testing.expectEqual(str.len, bytes_written);
 }
