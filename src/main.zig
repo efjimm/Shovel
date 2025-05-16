@@ -28,6 +28,24 @@ pub const TerminalCellWriter = @import("terminal_cell_writer.zig").TerminalCellW
 pub const TermInfo = @import("TermInfo.zig");
 pub const InputMap = @import("input.zig").InputMap;
 
+pub const WidthStrategy = terminal_cell_writer.WidthStrategy;
+
+const utf8 = @import("grapheme").utf8;
+const wcWidth = @import("wcwidth").wcWidth;
+
+pub fn graphemeWidth(bytes: []const u8, width_strategy: WidthStrategy) u32 {
+    switch (width_strategy) {
+        .legacy => {
+            var iter: utf8.Iterator = .{ .bytes = bytes };
+            var width: u32 = 0;
+            while (iter.nextCodepoint()) |cp|
+                width += wcWidth(cp);
+            return width;
+        },
+        .mode_2027 => return terminal_cell_writer.graphemeWidth2027(bytes),
+    }
+}
+
 test {
     @import("std").testing.refAllDeclsRecursive(@This());
 }

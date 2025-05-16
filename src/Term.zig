@@ -627,6 +627,13 @@ pub fn setWindowTitle(term: *Term, comptime fmt: []const u8, args: anytype) Writ
     try bw.flush();
 }
 
+pub fn graphemeWidth(term: *Term, bytes: []const u8) u32 {
+    return @import("main.zig").graphemeWidth(bytes, switch (term.mode_2027_enabled) {
+        true => .mode_2027,
+        false => .legacy,
+    });
+}
+
 pub fn getRenderContext(
     term: *Term,
     comptime buffer_size: usize,
