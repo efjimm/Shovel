@@ -11,6 +11,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    try shovel.initUnicodeData(allocator);
+    defer shovel.deinitUnicodeData(allocator);
+
     var term = try shovel.Term.init(allocator, .{});
     defer term.deinit(allocator);
 

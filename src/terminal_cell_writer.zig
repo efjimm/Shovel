@@ -4,7 +4,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const GraphemeClusteringMode = @import("main.zig").GraphemeClusteringMode;
 
-const wcWidth = @import("wcwidth").wcWidth;
+const wcWidth = @import("util.zig").wcWidth;
 const zg = @import("zg");
 
 pub const trunc_str = "…";
@@ -486,6 +486,9 @@ test "tcw double width" {
 }
 
 test "tcw multi codepoint graphemes" {
+    try initData();
+    defer deinitData();
+
     const str = "🧑‍🌾";
     try testLegacy(0, str, "");
     try testLegacy(1, str, trunc_str);
@@ -505,6 +508,9 @@ test "tcw multi codepoint graphemes" {
 }
 
 test "CellWriter" {
+    try initData();
+    defer deinitData();
+
     const data = .{
         .{ .finish, 8, "12345678", "12345678" },
         .{ .finish, 7, "12345678", "123456…" },
@@ -530,6 +536,9 @@ test "CellWriter" {
 }
 
 test "tcw single write" {
+    try initData();
+    defer deinitData();
+
     var buf = std.BoundedArray(u8, 4096){};
     var tcw = terminalCellWriter(buf.writer(), .codepoint, 100);
     const str = "single write!🧑‍🌾";

@@ -1,6 +1,15 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+pub fn wcWidth(cp: u21) u2 {
+    const width = @import("zg").display_width.codePointWidth(cp);
+    return switch (width) {
+        -1 => 0,
+        3 => 2,
+        else => @intCast(width),
+    };
+}
+
 pub fn isZigString(comptime T: type) bool {
     return comptime blk: {
         // Only pointer types can be strings, no optionals

@@ -11,10 +11,6 @@
         "LICENSE",
     },
     .dependencies = .{
-        .wcwidth = .{
-            .url = "git+https://github.com/efjimm/zig-wcwidth?ref=master#2872d6dfd5b4c6e2785065a851d744fd3b670ca1",
-            .hash = "wcwidth-1.0.0--VafOOvKAABO48aMATSMlqEhATb_QqKgJ6Pjz_JqMBPU",
-        },
         .critbit = .{
             .url = "git+https://github.com/efjimm/critbit-zig#887989b2faa1a88210b6d3315e3957da961fee3b",
             .hash = "critbit-0.0.1-In1cd6MxAAAebNcsHCEngYnwxKHSO9EwN4DMyCDcbIpL",

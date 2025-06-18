@@ -14,7 +14,7 @@
 
 const std = @import("std");
 
-const wcWidth = @import("wcwidth").wcWidth;
+const wcWidth = @import("util.zig").wcWidth;
 const zg = @import("zg");
 
 pub const Input = @import("input.zig").Input;

@@ -8,11 +8,6 @@ pub fn build(b: *Build) void {
     const test_filter = b.option([]const u8, "test-filter", "Filter string for tests");
     const enable_logging = b.option(bool, "logging", "Enable logging") orelse false;
 
-    const wcwidth = b.dependency("wcwidth", .{
-        .target = target,
-        .optimize = optimize,
-    }).module("wcwidth");
-
     const critbit = b.dependency("critbit", .{
         .target = target,
         .optimize = optimize,
@@ -27,7 +22,6 @@ pub fn build(b: *Build) void {
     opts.addOption(bool, "logging_enabled", enable_logging);
 
     const imports: []const std.Build.Module.Import = &.{
-        .{ .name = "wcwidth", .module = wcwidth },
         .{ .name = "critbit", .module = critbit },
         .{ .name = "build_options", .module = opts.createModule() },
         .{ .name = "zg", .module = zg },
