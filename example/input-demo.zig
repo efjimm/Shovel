@@ -44,7 +44,7 @@ pub fn main() !void {
         .flags = 0,
     }, null);
 
-    try term.uncook(.{
+    try term.uncook(allocator, .{
         .request_kitty_keyboard_protocol = !force_legacy,
         .request_mouse_tracking = mouse,
     });

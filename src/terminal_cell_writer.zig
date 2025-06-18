@@ -4,8 +4,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 const wcWidth = @import("wcwidth").wcWidth;
-const grapheme = @import("grapheme").codepoint;
-const utf8 = @import("grapheme").utf8;
+const zg = @import("zg");
 
 // TODO: Add ASCII strategy
 pub const WidthStrategy = enum {
@@ -29,7 +28,7 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
 
         /// Buffer for grapheme clusters which may overflow the width
         character_buf: std.BoundedArray(u8, 64),
-        state: grapheme.State = 0,
+        state: zg.Graphemes.State = .reset,
         last_cp: u21,
 
         const Tcw = @This();
@@ -189,10 +188,10 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
 
         fn writeLegacy(tcw: *Tcw, bytes: []const u8) !void {
             assert(std.unicode.utf8ValidateSlice(bytes));
-            var iter: utf8.Iterator = .{ .bytes = bytes };
+            var iter: std.unicode.Utf8Iterator = .{ .bytes = bytes, .i = 0 };
 
             while (iter.nextCodepointSlice()) |cp_slice| {
-                const cp = utf8.decode(cp_slice);
+                const cp = std.unicode.utf8Decode(cp_slice) catch unreachable;
                 const width = wcWidth(cp);
 
                 if (width == 0) continue; // TODO: Allow variation selectors
@@ -204,30 +203,32 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
 
         fn writeMode2027(tcw: *Tcw, bytes: []const u8) !void {
             assert(std.unicode.utf8ValidateSlice(bytes));
-            var iter: utf8.Iterator = .{ .bytes = bytes };
+            var iter: std.unicode.Utf8Iterator = .{ .bytes = bytes, .i = 0 };
 
             const first_cp = iter.nextCodepoint().?;
-            const continues_previous_write = !grapheme.isCharacterBreak(tcw.last_cp, first_cp, &tcw.state);
+            const continues_previous_write = !zg.graphemes.isBreak(tcw.last_cp, first_cp, &tcw.state);
             if (continues_previous_write) {
                 var last_cp = first_cp;
                 while (iter.nextCodepointSlice()) |cp_slice| {
-                    const cp = utf8.decode(cp_slice);
-                    const have_break = grapheme.isCharacterBreak(last_cp, cp, &tcw.state);
+                    const cp = std.unicode.utf8Decode(cp_slice) catch unreachable;
+                    const have_break = zg.graphemes.isBreak(last_cp, cp, &tcw.state);
                     if (have_break) {
-                        iter.index -= cp_slice.len;
+                        iter.i -= cp_slice.len;
                         break;
                     }
                     last_cp = cp;
                 }
 
-                const grapheme_slice = bytes[0..iter.index];
+                const grapheme_slice = bytes[0..iter.i];
                 try tcw.writeContinuingGrapheme(grapheme_slice);
             } else {
-                tcw.state = 0;
-                iter.index = 0;
+                tcw.state = .reset;
+                iter.i = 0;
             }
 
-            while (iter.nextGrapheme()) |grapheme_slice| {
+            var grapheme_iter = zg.graphemes.iterator(bytes[iter.i..]);
+            while (grapheme_iter.next()) |grapheme| {
+                const grapheme_slice = grapheme.bytes(bytes[iter.i..]);
                 // Take the width of the first non-zero width codepoint as the width of the whole grapheme
                 // cluster. TODO: Special case variation selectors!
                 const width = graphemeWidth2027(grapheme_slice);
@@ -282,7 +283,7 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
 
             assert(width > 0);
 
-            tcw.state = 0;
+            tcw.state = .reset;
 
             // If we already have a buffered character then we need to truncate.
             if (tcw.character_buf.len > 0) {
@@ -306,7 +307,7 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
                 try tcw.underlying_writer.writeAll(trunc_str);
                 tcw.remaining_width -= 1;
             }
-            tcw.state = 0;
+            tcw.state = .reset;
             tcw.last_cp = 0;
             tcw.character_buf.clear();
             tcw.finished = true;
@@ -333,7 +334,7 @@ fn firstNonAscii(bytes: []const u8) ?usize {
 /// Returns the last codepoint in `bytes`. Asserts that `bytes` is valid utf-8.
 fn lastCodepoint(bytes: []const u8) u21 {
     const i = lastCodepointIndex(bytes);
-    return utf8.decode(bytes[i..]);
+    return std.unicode.utf8Decode(bytes[i..]) catch unreachable;
 }
 
 fn lastCodepointIndex(bytes: []const u8) usize {
@@ -349,10 +350,14 @@ fn isStartByte(c: u8) bool {
     return (c & 0xC0) != 0x80;
 }
 
-pub fn graphemeWidth2027(bytes: []const u8) u2 {
-    var cp_iter: utf8.Iterator = .{ .bytes = bytes };
+fn utf8Iterator(bytes: []const u8) std.unicode.Utf8Iterator {
+    return .{ .bytes = bytes, .i = 0 };
+}
 
-    while (cp_iter.nextCodepoint()) |cp| {
+pub fn graphemeWidth2027(bytes: []const u8) u2 {
+    var iter = utf8Iterator(bytes);
+
+    while (iter.nextCodepoint()) |cp| {
         const width = wcWidth(cp);
         if (width != 0) return width;
     }
@@ -414,7 +419,18 @@ fn testAll(width: u32, input: []const u8, expected: []const u8) !void {
     try testWriter(.mode_2027, width, input, expected);
 }
 
+fn initData() !void {
+    try @import("main.zig").initUnicodeData(std.testing.allocator);
+}
+
+fn deinitData() void {
+    @import("main.zig").deinitUnicodeData(std.testing.allocator);
+}
+
 test "tcw ascii" {
+    try initData();
+    defer deinitData();
+
     try testAll(0, "", "");
     try testAll(0, "a", "");
     try testAll(0, "hello world", "");
@@ -427,6 +443,9 @@ test "tcw ascii" {
 }
 
 test "tcw ASCII zero width" {
+    try initData();
+    defer deinitData();
+
     try testAll(0, "\n", "");
     try testAll(0, "\t", "");
     try testAll(0, "\x00", "");
@@ -442,6 +461,9 @@ test "tcw ASCII zero width" {
 }
 
 test "tcw double width" {
+    try initData();
+    defer deinitData();
+
     try testAll(0, "漢", "");
     try testAll(1, "漢", trunc_str);
     try testAll(1, "w漢", trunc_str);
@@ -471,6 +493,9 @@ test "tcw multi codepoint graphemes" {
     try testLegacy(3, str, "🧑" ++ trunc_str);
     try testLegacy(4, str, "🧑🌾"); // zwj shouldn't be written in legacy
     try testLegacy(5, str, "🧑🌾");
+
+    try initData();
+    defer deinitData();
 
     try test2027(0, str, "");
     try test2027(1, str, trunc_str);

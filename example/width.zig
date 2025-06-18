@@ -14,7 +14,7 @@ pub fn main() !void {
     var term = try shovel.Term.init(allocator, .{});
     defer term.deinit(allocator);
 
-    try term.uncook(.{});
+    try term.uncook(allocator, .{});
     try term.fetchSize();
 
     var buf: [16]u8 = undefined;

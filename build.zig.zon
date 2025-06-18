@@ -8,8 +8,6 @@
         "README.md",
         "build.zig",
         "build.zig.zon",
-        "import.zig",
-        "test_main.zig",
         "LICENSE",
     },
     .dependencies = .{
@@ -21,9 +19,9 @@
             .url = "git+https://github.com/efjimm/critbit-zig#887989b2faa1a88210b6d3315e3957da961fee3b",
             .hash = "critbit-0.0.1-In1cd6MxAAAebNcsHCEngYnwxKHSO9EwN4DMyCDcbIpL",
         },
-        .libgrapheme_zig = .{
-            .url = "git+https://github.com/efjimm/zig-grapheme?ref=master#632452e8f2c5c3958ced0cb51330f26e132b8002",
-            .hash = "libgrapheme_zig-0.0.1-vo5eAVh1AAAMrUnMVXO2u0SDuvlYTChnYmgiqOh4rDv2",
+        .zg = .{
+            .url = "git+https://github.com/efjimm/zg?ref=master#76e16813d82420882a59af236c7733ab62243a12",
+            .hash = "zg-0.14.0-oGqU3Gx0sgJt86FCS6TEx3MLGRwHjwMV0RIBb1AV-bY6",
         },
     },
 }

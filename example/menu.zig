@@ -21,6 +21,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    try shovel.initUnicodeData(allocator);
+    defer shovel.deinitUnicodeData(allocator);
+
     term = try shovel.Term.init(allocator, .{});
     defer term.deinit(allocator);
 
@@ -32,7 +35,7 @@ pub fn main() !void {
 
     // Shovel will return the terminal back to cooked state automatically
     // when we call term.deinit().
-    try term.uncook(.{});
+    try term.uncook(allocator, .{});
 
     try term.fetchSize();
     try term.setWindowTitle("Shovel example: menu", .{});

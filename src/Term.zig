@@ -12,28 +12,31 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-const builtin = @import("builtin");
 const std = @import("std");
-// const log = @import("log.zig");
-const log = @import("log.zig");
 const Allocator = std.mem.Allocator;
-const ascii = std.ascii;
-const io = std.io;
-const mem = std.mem;
-const os = std.os;
 const unicode = std.unicode;
 const debug = std.debug;
 const math = std.math;
 const assert = debug.assert;
 const posix = std.posix;
+const builtin = @import("builtin");
+const mode = @import("builtin").mode;
 
-// Workaround for bad libc integration of zigs std.
-const constants = if (builtin.link_libc and builtin.os.tag == .linux) os.linux else posix.system;
+const zg = @import("zg");
 
-const Style = @import("Style.zig");
-const spells = @import("spells.zig");
 const cell_writer = @import("terminal_cell_writer.zig");
+const input = @import("input.zig");
+const InputParser = input.InputParser;
+const InputMap = @import("input.zig").InputMap;
+const log = @import("log.zig");
+const spells = @import("spells.zig");
+pub const CursorShape = spells.CursorShape;
+const Style = @import("Style.zig");
 const TermInfo = @import("TermInfo.zig");
+
+// const log = @import("log.zig");
+// Workaround for bad libc integration of zigs std.
+const constants = if (builtin.link_libc and builtin.os.tag == .linux) std.os.linux else posix.system;
 
 const Term = @This();
 
@@ -86,7 +89,6 @@ terminfo: ?*TermInfo = null,
 /// True if the kitty keyboard protocol is active.
 kitty_enabled: bool = false,
 
-/// True if mode 2027 is active.
 mode_2027_enabled: bool = false,
 
 truecolor_enabled: bool = false,
@@ -97,15 +99,6 @@ cw: switch (mode) {
 },
 
 const CountingWriter = std.io.CountingWriter(PosixWriter);
-const mode = @import("builtin").mode;
-
-pub const CursorShape = spells.CursorShape;
-
-const InputMap = @import("input.zig").InputMap;
-
-const input = @import("input.zig");
-const InputParser = input.InputParser;
-
 /// See `input.inputParser`
 pub fn inputParser(term: *Term, bytes: []const u8) InputParser {
     return input.inputParser(bytes, term);
@@ -113,7 +106,7 @@ pub fn inputParser(term: *Term, bytes: []const u8) InputParser {
 
 pub const WriteError = posix.WriteError || TermInfo.FormatError;
 
-const PosixWriter = io.Writer(posix.fd_t, posix.WriteError, posix.write);
+const PosixWriter = std.io.Writer(posix.fd_t, posix.WriteError, posix.write);
 const Writer = switch (mode) {
     .Debug => CountingWriter.Writer,
     else => PosixWriter,
@@ -129,7 +122,7 @@ pub fn unbufferedWriter(term: *Term) Writer {
 pub inline fn bufferedWriter(
     term: *Term,
     comptime buffer_size: usize,
-) io.BufferedWriter(buffer_size, Writer) {
+) std.io.BufferedWriter(buffer_size, Writer) {
     return .{ .unbuffered_writer = term.unbufferedWriter() };
 }
 
@@ -431,10 +424,21 @@ pub inline fn isCooked(term: *const Term) bool {
     return term.cooked_termios == null;
 }
 
-pub const UncookError = posix.TermiosGetError || posix.TermiosSetError || posix.WriteError || posix.FcntlError || posix.ReadError || posix.PollError;
+pub const UncookError =
+    std.mem.Allocator.Error ||
+    posix.TermiosGetError ||
+    posix.TermiosSetError ||
+    posix.WriteError ||
+    posix.FcntlError ||
+    posix.ReadError ||
+    posix.PollError;
 
 /// Enter raw mode.
-pub fn uncook(term: *Term, options: UncookOptions) UncookError!void {
+pub fn uncook(
+    term: *Term,
+    allocator: std.mem.Allocator,
+    options: UncookOptions,
+) UncookError!void {
     if (!term.isCooked())
         return;
 
@@ -508,7 +512,7 @@ pub fn uncook(term: *Term, options: UncookOptions) UncookError!void {
     }
 
     if (options.request_mode_2027) {
-        try term.enableMode2027(&buffered_writer);
+        try term.enableMode2027(allocator, &buffered_writer);
     }
 
     if (options.request_mouse_tracking) {
@@ -517,8 +521,11 @@ pub fn uncook(term: *Term, options: UncookOptions) UncookError!void {
     try buffered_writer.flush();
 }
 
-/// See `spells.enable_mode_2027`
-pub fn enableMode2027(term: *Term, bw: anytype) !void {
+/// Attempts to enable mode 2027. If successful, also initializes the unicode data required to do
+/// proper grapheme cluster segmentation.
+///
+/// https://github.com/contour-terminal/terminal-unicode-core
+pub fn enableMode2027(term: *Term, allocator: std.mem.Allocator, bw: anytype) !void {
     const writer = bw.writer();
     try writer.writeAll(spells.enable_mode_2027);
     try writer.writeAll("\x1B[?2027$p");
@@ -537,6 +544,8 @@ pub fn enableMode2027(term: *Term, bw: anytype) !void {
             if (std.mem.eql(u8, buf[0..len], "\x1b[?2027;1$y") or
                 std.mem.eql(u8, buf[0..len], "\x1b[?2027;3$y"))
             {
+                if (!zg.isInitialized(.graphemes))
+                    try zg.initData(allocator, &.{.graphemes});
                 term.mode_2027_enabled = true;
                 log.info("Mode 2027 enabled", .{});
             }
@@ -610,7 +619,7 @@ pub fn fetchSize(term: *Term) posix.UnexpectedError!void {
     if (term.isCooked())
         return;
 
-    var size = mem.zeroes(std.posix.winsize);
+    var size = std.mem.zeroes(std.posix.winsize);
     const err = posix.system.ioctl(term.tty, constants.T.IOCGWINSZ, @intFromPtr(&size));
     if (posix.errno(err) != .SUCCESS) {
         return posix.unexpectedErrno(@enumFromInt(err));
@@ -666,7 +675,7 @@ pub fn RenderContext(comptime buffer_size: usize) type {
         buffer: BufferedWriter,
 
         const Self = @This();
-        const BufferedWriter = io.BufferedWriter(buffer_size, Writer);
+        const BufferedWriter = std.io.BufferedWriter(buffer_size, Writer);
         const CellWriter = cell_writer.TerminalCellWriter(BufferedWriter.Writer);
 
         /// Finishes the render operation. The render context may not be used any
