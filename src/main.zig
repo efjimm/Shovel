@@ -25,10 +25,14 @@ pub const spells = @import("spells.zig");
 pub const Style = @import("Style.zig");
 pub const Term = @import("Term.zig");
 pub const terminal_cell_writer = @import("terminal_cell_writer.zig");
-pub const WidthStrategy = terminal_cell_writer.WidthStrategy;
 pub const terminalCellWriter = @import("terminal_cell_writer.zig").terminalCellWriter;
 pub const TerminalCellWriter = @import("terminal_cell_writer.zig").TerminalCellWriter;
 pub const TermInfo = @import("TermInfo.zig");
+
+pub const GraphemeClusteringMode = enum {
+    codepoint,
+    grapheme,
+};
 
 pub fn initUnicodeData(allocator: std.mem.Allocator) !void {
     try zg.initData(allocator, &.{ .graphemes, .display_width });
@@ -38,16 +42,16 @@ pub fn deinitUnicodeData(allocator: std.mem.Allocator) void {
     zg.deinitData(allocator, &.{ .graphemes, .display_width });
 }
 
-pub fn graphemeWidth(bytes: []const u8, width_strategy: WidthStrategy) u32 {
-    switch (width_strategy) {
-        .legacy => {
+pub fn graphemeWidth(bytes: []const u8, mode: GraphemeClusteringMode) u32 {
+    switch (mode) {
+        .codepoint => {
             var iter: std.unicode.Utf8Iterator = .{ .bytes = bytes, .i = 0 };
             var width: u32 = 0;
             while (iter.nextCodepoint()) |cp|
                 width += wcWidth(cp);
             return width;
         },
-        .mode_2027 => return terminal_cell_writer.graphemeWidth2027(bytes),
+        .grapheme => return terminal_cell_writer.graphemeWidth2027(bytes),
     }
 }
 

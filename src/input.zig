@@ -13,10 +13,6 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
-const ascii = std.ascii;
-const fmt = std.fmt;
-const unicode = std.unicode;
-const meta = std.meta;
 const TermInfo = @import("TermInfo.zig");
 
 // Kitty supports a few more modifiers, but these are the ones that actually
@@ -36,7 +32,7 @@ pub const Input = struct {
     /// be comptime known.
     pub fn eqlDescription(self: Input, comptime descr: []const u8) bool {
         const description_input = comptime Input.fromDescription(descr) catch @compileError("Shovel: Bad input descriptor.");
-        return meta.eql(self, description_input);
+        return std.meta.eql(self, description_input);
     }
 
     mod_alt: bool = false,
@@ -129,7 +125,7 @@ pub const InputParser = struct {
         }
 
         if (self.bytes[1] == '[' and self.bytes.len > 2) {
-            if (ascii.isDigit(self.bytes[2])) {
+            if (std.ascii.isDigit(self.bytes[2])) {
                 return self.numericEscapeSequence();
             } else if (singleLetterSpecialInput(self.bytes[2])) |ev| {
                 self.advanceBufferBy("\x1B[A".len);
@@ -177,12 +173,12 @@ pub const InputParser = struct {
             0x1F => .{ .content = .{ .codepoint = '/' }, .mod_ctrl = true },
             else => {
                 // The terminal sends us input encoded as utf8.
-                advance = unicode.utf8ByteSequenceLength(self.bytes[0]) catch
+                advance = std.unicode.utf8ByteSequenceLength(self.bytes[0]) catch
                     return .{ .content = .unknown };
 
                 // TODO check if buffer is long enough
                 if (self.bytes.len < advance) return .{ .content = .unknown };
-                return if (unicode.utf8Decode(self.bytes[0..advance])) |codepoint|
+                return if (std.unicode.utf8Decode(self.bytes[0..advance])) |codepoint|
                     .{ .content = .{ .codepoint = codepoint } }
                 else |_|
                     .{ .content = .unknown };
@@ -203,7 +199,7 @@ pub const InputParser = struct {
         // just a press of the scape key followed by a press of the '[' key.
         if (self.bytes[1] == '[' and self.bytes.len > 2) {
             // There are two types of '[' escape sequences.
-            if (ascii.isDigit(self.bytes[2])) {
+            if (std.ascii.isDigit(self.bytes[2])) {
                 return self.numericEscapeSequence() orelse {
                     // It most definitely is an escape sequence, just one we don't know.
                     // Since there is a good chance we can guess it's length based on the
@@ -241,10 +237,10 @@ pub const InputParser = struct {
                     .mod_alt = true,
                 };
             },
-            else => if (ascii.isASCII(self.bytes[1])) {
+            else => if (std.ascii.isASCII(self.bytes[1])) {
                 defer self.advanceBufferBy("\x1Ba".len);
 
-                if (ascii.isControl(self.bytes[1]))
+                if (std.ascii.isControl(self.bytes[1]))
                     return .{
                         .content = .{ .codepoint = self.bytes[1] + 0x40 },
                         .mod_alt = true,
@@ -304,7 +300,7 @@ pub const InputParser = struct {
         // 2) self.bytes[3] is an ascii numeric caracter
         if (self.bytes.len > 3) {
             for (self.bytes[3..], 0..) |byte, i| {
-                if (!ascii.isDigit(byte)) {
+                if (!std.ascii.isDigit(byte)) {
                     const first_num_bytes = self.bytes[2 .. i + 3];
                     switch (byte) {
                         '~' => return self.numericTildeEscapeSequence(first_num_bytes, null),
@@ -376,7 +372,7 @@ pub const InputParser = struct {
         const semicolon_index = "\x1B[".len + first_num_bytes.len;
         if (self.bytes.len > semicolon_index + 1) {
             for (self.bytes[semicolon_index + 1 ..], 0..) |byte, i| {
-                if (!ascii.isDigit(byte)) {
+                if (!std.ascii.isDigit(byte)) {
                     const second_num_bytes = self.bytes[semicolon_index + 1 .. i + semicolon_index + 1];
                     switch (byte) {
                         '~' => return self.numericTildeEscapeSequence(first_num_bytes, second_num_bytes),
@@ -384,7 +380,7 @@ pub const InputParser = struct {
                         'A', 'B', 'C', 'D', 'E', 'F', 'H', 'P', 'Q', 'R', 'S' => {
                             defer self.advanceBufferBy("\x1B[".len + first_num_bytes.len + ";".len + second_num_bytes.len + "A".len);
                             var ev = singleLetterSpecialInput(byte) orelse unreachable;
-                            const modifiers = (fmt.parseInt(u16, second_num_bytes, 10) catch return .{ .content = .unknown }) - @as(u16, 1);
+                            const modifiers = (std.fmt.parseInt(u16, second_num_bytes, 10) catch return .{ .content = .unknown }) - @as(u16, 1);
                             ev.mod_alt = (modifiers & kitty_alt) > 0;
                             ev.mod_ctrl = (modifiers & kitty_ctrl) > 0;
                             ev.mod_super = (modifiers & kitty_super) > 0;
@@ -430,7 +426,7 @@ pub const InputParser = struct {
             .{ "24", Input{ .content = .{ .function = 12 } } },
         });
         var ev = sequences.get(num) orelse return .{ .content = .unknown };
-        const modifiers = if (modifiers_str) |md| ((fmt.parseInt(u16, md, 10) catch return .{ .content = .unknown }) - @as(u16, 1)) else undefined;
+        const modifiers = if (modifiers_str) |md| ((std.fmt.parseInt(u16, md, 10) catch return .{ .content = .unknown }) - @as(u16, 1)) else undefined;
         ev.mod_alt = if (modifiers_str) |_| ((modifiers & kitty_alt) > 0) else false;
         ev.mod_ctrl = if (modifiers_str) |_| ((modifiers & kitty_ctrl) > 0) else false;
         ev.mod_super = if (modifiers_str) |_| ((modifiers & kitty_super) > 0) else false;
@@ -444,10 +440,10 @@ pub const InputParser = struct {
             if (modifiers_str) |mods| len += mods.len + ";".len;
             self.advanceBufferBy(len);
         }
-        const codepoint = fmt.parseInt(u21, codepoint_str, 10) catch
+        const codepoint = std.fmt.parseInt(u21, codepoint_str, 10) catch
             return .{ .content = .unknown };
 
-        const modifiers = if (modifiers_str) |md| ((fmt.parseInt(u16, md, 10) catch
+        const modifiers = if (modifiers_str) |md| ((std.fmt.parseInt(u16, md, 10) catch
             return .{ .content = .unknown }) - @as(u16, 1)) else undefined;
 
         return .{

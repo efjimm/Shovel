@@ -5,15 +5,19 @@ for creating TUI programs. Shovel started as a fork of
 [zig-spoon](https://git.sr.ht/~leon_plickat/zig-spoon) and has since
 significantly outgrown the original code.
 
+Why fork zig-spoon? Because I was using it for a personal project and kept adding features I wanted.
+By the time I thought about publishing this repo the changes were extensive enough that I was too
+lazy to contribute them upstream.
+
 The design of Shovel is inherently decoupled, so it is not necessary to use
 everything in the library. For example, Shovel implements a terminfo parser
 which is used internally but can also be used standalone.
 
 Shovel supports the kitty keyboard protocol.
 
-## Read before use!
+This readme could be a lot better, huh?.
 
-**This text is taken from the README of zig-spoon, the project that Shovel
+**The following is taken from the README of zig-spoon, the project that Shovel
 was originally forked from. This all still applies so I left it in.**
 
 I am happy you are interested in this project and I hope it will serve you well.

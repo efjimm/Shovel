@@ -14,10 +14,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const unicode = std.unicode;
-const debug = std.debug;
-const math = std.math;
-const assert = debug.assert;
+const assert = std.debug.assert;
 const posix = std.posix;
 const builtin = @import("builtin");
 const mode = @import("builtin").mode;
@@ -25,18 +22,14 @@ const mode = @import("builtin").mode;
 const zg = @import("zg");
 
 const cell_writer = @import("terminal_cell_writer.zig");
+const GraphemeClusteringMode = @import("main.zig").GraphemeClusteringMode;
 const input = @import("input.zig");
 const InputParser = input.InputParser;
-const InputMap = @import("input.zig").InputMap;
 const log = @import("log.zig");
 const spells = @import("spells.zig");
 pub const CursorShape = spells.CursorShape;
 const Style = @import("Style.zig");
 const TermInfo = @import("TermInfo.zig");
-
-// const log = @import("log.zig");
-// Workaround for bad libc integration of zigs std.
-const constants = if (builtin.link_libc and builtin.os.tag == .linux) std.os.linux else posix.system;
 
 const Term = @This();
 
@@ -89,7 +82,7 @@ terminfo: ?*TermInfo = null,
 /// True if the kitty keyboard protocol is active.
 kitty_enabled: bool = false,
 
-mode_2027_enabled: bool = false,
+grapheme_clustering_mode: GraphemeClusteringMode = .codepoint,
 
 truecolor_enabled: bool = false,
 
@@ -294,11 +287,11 @@ pub fn setBlockingRead(term: Term, enabled: bool) SetBlockingReadError!void {
         var raw = try posix.tcgetattr(term.tty);
 
         if (enabled) {
-            raw.cc[@intFromEnum(constants.V.TIME)] = 0;
-            raw.cc[@intFromEnum(constants.V.MIN)] = 1;
+            raw.cc[@intFromEnum(posix.system.V.TIME)] = 0;
+            raw.cc[@intFromEnum(posix.system.V.MIN)] = 1;
         } else {
-            raw.cc[@intFromEnum(constants.V.TIME)] = 0;
-            raw.cc[@intFromEnum(constants.V.MIN)] = 0;
+            raw.cc[@intFromEnum(posix.system.V.TIME)] = 0;
+            raw.cc[@intFromEnum(posix.system.V.MIN)] = 0;
         }
 
         break :blk raw;
@@ -546,7 +539,7 @@ pub fn enableMode2027(term: *Term, allocator: std.mem.Allocator, bw: anytype) !v
             {
                 if (!zg.isInitialized(.graphemes))
                     try zg.initData(allocator, &.{.graphemes});
-                term.mode_2027_enabled = true;
+                term.grapheme_clustering_mode = .grapheme;
                 log.info("Mode 2027 enabled", .{});
             }
         } else |err| {
@@ -620,7 +613,7 @@ pub fn fetchSize(term: *Term) posix.UnexpectedError!void {
         return;
 
     var size = std.mem.zeroes(std.posix.winsize);
-    const err = posix.system.ioctl(term.tty, constants.T.IOCGWINSZ, @intFromPtr(&size));
+    const err = posix.system.ioctl(term.tty, posix.system.T.IOCGWINSZ, @intFromPtr(&size));
     if (posix.errno(err) != .SUCCESS) {
         return posix.unexpectedErrno(@enumFromInt(err));
     }
@@ -637,10 +630,7 @@ pub fn setWindowTitle(term: *Term, comptime fmt: []const u8, args: anytype) Writ
 }
 
 pub fn graphemeWidth(term: *Term, bytes: []const u8) u32 {
-    return @import("main.zig").graphemeWidth(bytes, switch (term.mode_2027_enabled) {
-        true => .mode_2027,
-        false => .legacy,
-    });
+    return @import("main.zig").graphemeWidth(bytes, term.grapheme_clustering_mode);
 }
 
 pub fn getRenderContext(
@@ -765,11 +755,11 @@ pub fn RenderContext(comptime buffer_size: usize) type {
 
         pub fn cellWriter(rc: *Self, width: u16) CellWriter {
             assert(rc.term.currently_rendering);
-            const width_strategy: cell_writer.WidthStrategy = switch (rc.term.mode_2027_enabled) {
-                true => .mode_2027,
-                false => .legacy,
-            };
-            return cell_writer.terminalCellWriter(rc.buffer.writer(), width_strategy, width);
+            return cell_writer.terminalCellWriter(
+                rc.buffer.writer(),
+                rc.term.grapheme_clustering_mode,
+                width,
+            );
         }
 
         /// Write all bytes, wrapping at the end of the line.

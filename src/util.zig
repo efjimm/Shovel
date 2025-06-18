@@ -1,7 +1,5 @@
 const std = @import("std");
-const Case = std.fmt.Case;
 const assert = std.debug.assert;
-const math = std.math;
 
 pub fn isZigString(comptime T: type) bool {
     return comptime blk: {
@@ -42,7 +40,7 @@ pub const FormatOptions = struct {
 pub fn formatInt(
     value: i32,
     base: u8,
-    case: Case,
+    case: std.fmt.Case,
     options: FormatOptions,
     writer: anytype,
 ) !void {

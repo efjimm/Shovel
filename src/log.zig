@@ -1,6 +1,4 @@
 const std = @import("std");
-const root = @import("root");
-const build_options = @import("build_options");
 const log = std.log.scoped(.shovel);
 
 pub const perf = std.log.scoped(.shovel_perf);

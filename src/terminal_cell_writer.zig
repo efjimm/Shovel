@@ -2,15 +2,10 @@
 //       Possibly implement this as a separate writer that wraps this one.
 const std = @import("std");
 const assert = std.debug.assert;
+const GraphemeClusteringMode = @import("main.zig").GraphemeClusteringMode;
 
 const wcWidth = @import("wcwidth").wcWidth;
 const zg = @import("zg");
-
-// TODO: Add ASCII strategy
-pub const WidthStrategy = enum {
-    legacy,
-    mode_2027,
-};
 
 pub const trunc_str = "…";
 
@@ -18,7 +13,7 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
     return struct {
         underlying_writer: UnderlyingWriter,
 
-        width_strategy: WidthStrategy,
+        grapheme_clustering_mode: GraphemeClusteringMode,
         remaining_width: u32,
         finished: bool,
 
@@ -38,12 +33,12 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
 
         pub fn init(
             underlying_writer: UnderlyingWriter,
-            strategy: WidthStrategy,
+            grapheme_clustering_mode: GraphemeClusteringMode,
             width: u32,
         ) Tcw {
             return .{
                 .underlying_writer = underlying_writer,
-                .width_strategy = strategy,
+                .grapheme_clustering_mode = grapheme_clustering_mode,
                 .remaining_width = width,
                 .finished = width == 0,
                 .partial_cp_buf = undefined,
@@ -129,9 +124,9 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
 
             if (valid_len == 0) return bytes.len;
             const valid_bytes = slice[0..valid_len];
-            switch (tcw.width_strategy) {
-                .legacy => try tcw.writeLegacy(valid_bytes),
-                .mode_2027 => try tcw.writeMode2027(valid_bytes),
+            switch (tcw.grapheme_clustering_mode) {
+                .codepoint => try tcw.writeLegacy(valid_bytes),
+                .grapheme => try tcw.writeMode2027(valid_bytes),
             }
             return bytes.len;
         }
@@ -317,10 +312,10 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
 
 pub fn terminalCellWriter(
     writer: anytype,
-    mode: WidthStrategy,
+    grapheme_clustering_mode: GraphemeClusteringMode,
     width: u32,
 ) TerminalCellWriter(@TypeOf(writer)) {
-    return .init(writer, mode, width);
+    return .init(writer, grapheme_clustering_mode, width);
 }
 
 fn firstNonAscii(bytes: []const u8) ?usize {
@@ -368,7 +363,7 @@ pub fn graphemeWidth2027(bytes: []const u8) u2 {
 fn fuzz(_: void, input: []const u8) anyerror!void {
     if (input.len == 0) return;
 
-    var tcw = terminalCellWriter(std.io.null_writer, .mode_2027, input[0] +| 1);
+    var tcw = terminalCellWriter(std.io.null_writer, .grapheme, input[0] +| 1);
     const codepoints = std.mem.bytesAsSlice(u21, input[0 .. input.len - input.len % 4]);
     for (codepoints) |cp| {
         const valid_codepoint = std.unicode.utf8ValidCodepoint(cp);
@@ -389,7 +384,12 @@ test "tcw fuzz" {
     try std.testing.fuzz({}, fuzz, .{});
 }
 
-fn testWriter(comptime mode: WidthStrategy, width: u32, input: []const u8, expected: []const u8) !void {
+fn testWriter(
+    comptime mode: GraphemeClusteringMode,
+    width: u32,
+    input: []const u8,
+    expected: []const u8,
+) !void {
     var buf: std.BoundedArray(u8, 4096) = .{};
     var tcw = terminalCellWriter(buf.writer().any(), mode, width);
     for (input) |c| {
@@ -407,16 +407,16 @@ fn testWriter(comptime mode: WidthStrategy, width: u32, input: []const u8, expec
 }
 
 fn testLegacy(width: u32, input: []const u8, expected: []const u8) !void {
-    try testWriter(.legacy, width, input, expected);
+    try testWriter(.codepoint, width, input, expected);
 }
 
 fn test2027(width: u32, input: []const u8, expected: []const u8) !void {
-    try testWriter(.mode_2027, width, input, expected);
+    try testWriter(.grapheme, width, input, expected);
 }
 
 fn testAll(width: u32, input: []const u8, expected: []const u8) !void {
-    try testWriter(.legacy, width, input, expected);
-    try testWriter(.mode_2027, width, input, expected);
+    try testWriter(.codepoint, width, input, expected);
+    try testWriter(.grapheme, width, input, expected);
 }
 
 fn initData() !void {
@@ -518,7 +518,7 @@ test "CellWriter" {
     inline for (data) |d| {
         const end, const width, const input, const expected = d;
         var buf = std.BoundedArray(u8, 128){};
-        var rpw = terminalCellWriter(buf.writer(), .legacy, width);
+        var rpw = terminalCellWriter(buf.writer(), .codepoint, width);
         try rpw.writer().writeAll(input);
         switch (end) {
             .finish => try rpw.finish(),
@@ -531,7 +531,7 @@ test "CellWriter" {
 
 test "tcw single write" {
     var buf = std.BoundedArray(u8, 4096){};
-    var tcw = terminalCellWriter(buf.writer(), .legacy, 100);
+    var tcw = terminalCellWriter(buf.writer(), .codepoint, 100);
     const str = "single write!🧑‍🌾";
     const bytes_written = tcw.writer().write(str);
     try std.testing.expectEqual(str.len, bytes_written);
