@@ -48,10 +48,10 @@ pub fn graphemeWidth(bytes: []const u8, mode: GraphemeClusteringMode) u32 {
             var iter: std.unicode.Utf8Iterator = .{ .bytes = bytes, .i = 0 };
             var width: u32 = 0;
             while (iter.nextCodepoint()) |cp|
-                width += wcWidth(cp);
+                width += @import("util.zig").wcWidth(cp);
             return width;
         },
-        .grapheme => return terminal_cell_writer.graphemeWidth2027(bytes),
+        .grapheme => return @intCast(zg.display_width.strWidth(bytes)),
     }
 }
 

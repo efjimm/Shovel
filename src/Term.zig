@@ -723,6 +723,20 @@ pub fn RenderContext(comptime buffer_size: usize) type {
             try TermInfo.writeParamSequence(spell, writer, .{ row, col });
         }
 
+        pub fn saveCursor(rc: *Self) WriteError!void {
+            assert(rc.term.currently_rendering);
+            const writer = rc.buffer.writer();
+            const spell = rc.term.getStringCapability(.save_cursor) orelse spells.save_cursor_position;
+            try TermInfo.writeParamSequence(spell, writer, .{});
+        }
+
+        pub fn restoreCursor(rc: *Self) WriteError!void {
+            assert(rc.term.currently_rendering);
+            const writer = rc.buffer.writer();
+            const spell = rc.term.getStringCapability(.restore_cursor) orelse spells.restore_cursor_position;
+            try TermInfo.writeParamSequence(spell, writer, .{});
+        }
+
         /// Hide the cursor.
         pub fn hideCursor(rc: *Self) WriteError!void {
             assert(rc.term.currently_rendering);

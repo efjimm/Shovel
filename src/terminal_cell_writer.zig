@@ -7,6 +7,8 @@ const GraphemeClusteringMode = @import("main.zig").GraphemeClusteringMode;
 const wcWidth = @import("util.zig").wcWidth;
 const zg = @import("zg");
 
+const graphemeWidth = @import("main.zig").graphemeWidth;
+
 pub const trunc_str = "…";
 
 pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
@@ -56,7 +58,7 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
             assert(tcw.partial_cp_buf_len == 0);
             if (tcw.character_buf.len > 0) {
                 const slice = tcw.character_buf.constSlice();
-                const width = graphemeWidth2027(slice);
+                const width = graphemeWidth(slice, .grapheme);
                 try tcw.underlying_writer.writeAll(slice);
                 tcw.remaining_width -= width;
             }
@@ -226,7 +228,7 @@ pub fn TerminalCellWriter(comptime UnderlyingWriter: type) type {
                 const grapheme_slice = grapheme.bytes(bytes[iter.i..]);
                 // Take the width of the first non-zero width codepoint as the width of the whole grapheme
                 // cluster. TODO: Special case variation selectors!
-                const width = graphemeWidth2027(grapheme_slice);
+                const width: u2 = @intCast(graphemeWidth(grapheme_slice, .grapheme));
                 if (width == 0) continue;
 
                 const end = try tcw.writeCharacter(grapheme_slice, width);
@@ -347,17 +349,6 @@ fn isStartByte(c: u8) bool {
 
 fn utf8Iterator(bytes: []const u8) std.unicode.Utf8Iterator {
     return .{ .bytes = bytes, .i = 0 };
-}
-
-pub fn graphemeWidth2027(bytes: []const u8) u2 {
-    var iter = utf8Iterator(bytes);
-
-    while (iter.nextCodepoint()) |cp| {
-        const width = wcWidth(cp);
-        if (width != 0) return width;
-    }
-
-    return 0;
 }
 
 fn fuzz(_: void, input: []const u8) anyerror!void {
