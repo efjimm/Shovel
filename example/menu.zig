@@ -69,7 +69,8 @@ pub fn main() !void {
 }
 
 fn render() !void {
-    var rc = try term.getRenderContext(4096);
+    var buf: [4096]u8 = undefined;
+    var rc = try term.getRenderContext(&buf);
     defer rc.done() catch {};
 
     try rc.clear();
@@ -89,13 +90,13 @@ fn render() !void {
     // The CellWriter.pad() function will fill the remaining space
     // with whitespace padding.
     var cw = rc.cellWriter(term.width);
-    try cw.writer().writeAll(" shovel example program: menu");
+    try cw.interface.writeAll(" shovel example program: menu");
     try cw.pad();
 
     try rc.moveCursorTo(1, 0);
     try rc.setStyle(.{ .fg = .red, .attrs = .{ .bold = true } });
     cw = rc.cellWriter(term.width);
-    try cw.writer().writeAll(" Up and Down arrows to select, q to exit.");
+    try cw.interface.writeAll(" Up and Down arrows to select, q to exit.");
     try cw.finish(); // No need to pad here, since there is no background.
 
     const entry_width = @min(term.width - 2, 8);
@@ -110,10 +111,10 @@ fn menuEntry(rc: anytype, name: []const u8, row: u16, width: u16) !void {
     try rc.setStyle(.{ .fg = .blue, .attrs = .{ .reverse = (cursor == row - 3) } });
     var cw = rc.cellWriter(width - 1);
     defer cw.pad() catch {};
-    try cw.writer().writeAll(name);
+    try cw.interface.writeAll(name);
 }
 
-fn handleSigWinch(_: c_int) callconv(.C) void {
+fn handleSigWinch(_: c_int) callconv(.c) void {
     term.fetchSize() catch {};
     render() catch {};
 }

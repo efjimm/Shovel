@@ -36,7 +36,7 @@ pub fn build(b: *Build) void {
 
     const tests = b.addTest(.{
         .root_module = shovel_module,
-        .filter = test_filter,
+        .filters = &.{test_filter orelse ""},
     });
 
     const run_tests = b.addRunArtifact(tests);

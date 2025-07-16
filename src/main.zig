@@ -14,7 +14,6 @@
 
 const std = @import("std");
 
-const wcWidth = @import("util.zig").wcWidth;
 const zg = @import("zg");
 
 pub const Input = @import("input.zig").Input;
@@ -24,10 +23,9 @@ pub const inputParser = @import("input.zig").inputParser;
 pub const spells = @import("spells.zig");
 pub const Style = @import("Style.zig");
 pub const Term = @import("Term.zig");
-pub const terminal_cell_writer = @import("terminal_cell_writer.zig");
-pub const terminalCellWriter = @import("terminal_cell_writer.zig").terminalCellWriter;
-pub const TerminalCellWriter = @import("terminal_cell_writer.zig").TerminalCellWriter;
+pub const TerminalCellWriter = @import("TerminalCellWriter.zig");
 pub const TermInfo = @import("TermInfo.zig");
+const wcWidth = @import("util.zig").wcWidth;
 
 pub const GraphemeClusteringMode = enum {
     codepoint,
@@ -71,7 +69,7 @@ pub fn writeTruncating(
     str: []const u8,
     max_width: u32,
     alignment: TextAlignment,
-    writer: anytype,
+    writer: *std.io.Writer,
 ) !void {
     const res = zg.display_width.strWidth(str, .{ .max_width = max_width });
     const width: u32 = @intCast(res.width);
@@ -79,9 +77,9 @@ pub fn writeTruncating(
         const pad = max_width - width;
         const left, const right = getLeftRightPadding(pad, alignment);
 
-        try writer.writeByteNTimes(' ', left);
+        try writer.splatByteAll(' ', left);
         try writer.writeAll(str);
-        try writer.writeByteNTimes(' ', right);
+        try writer.splatByteAll(' ', right);
         return;
     }
 
@@ -95,9 +93,9 @@ pub fn writeTruncating(
 
     const pad = max_width - width - 1;
     const left, const right = getLeftRightPadding(pad, alignment);
-    try writer.writeByteNTimes(' ', left);
+    try writer.splatByteAll(' ', left);
     try writer.print("{s}…", .{truncated});
-    try writer.writeByteNTimes(' ', right);
+    try writer.splatByteAll(' ', right);
 }
 
 test {

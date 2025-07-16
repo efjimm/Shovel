@@ -19,7 +19,8 @@ pub fn main() !void {
     var term = try shovel.Term.init(gpa.allocator(), .{});
     defer term.deinit(gpa.allocator());
 
-    const writer = io.getStdOut().writer();
+    var file_writer = std.fs.File.stdout().writer(&.{});
+    const writer = &file_writer.interface;
 
     var colour: u8 = 0;
     var column: usize = 0;
@@ -78,7 +79,7 @@ pub fn main() !void {
     try writer.writeByte('\n');
 }
 
-fn writeTitle(ti: ?*shovel.TermInfo, writer: anytype, bytes: []const u8) !void {
+fn writeTitle(ti: ?*shovel.TermInfo, writer: *std.io.Writer, bytes: []const u8) !void {
     try title.dump(writer, .{ .terminfo = ti });
     try writer.writeByte('\n');
     try writer.writeAll(bytes);

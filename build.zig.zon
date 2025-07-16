@@ -12,12 +12,12 @@
     },
     .dependencies = .{
         .critbit = .{
-            .url = "git+https://github.com/efjimm/critbit-zig#887989b2faa1a88210b6d3315e3957da961fee3b",
-            .hash = "critbit-0.0.1-In1cd6MxAAAebNcsHCEngYnwxKHSO9EwN4DMyCDcbIpL",
+            .url = "git+https://github.com/efjimm/critbit-zig?ref=master#27ebd1a081117c4ebf09a9961b5a026ffb5a09b2",
+            .hash = "critbit-0.0.1-In1cd04xAAA6Dg9IYV_CGyDi3XghWEanNc9qIe3FlQc5",
         },
         .zg = .{
-            .url = "git+https://github.com/efjimm/zg?ref=master#d39310bcd7dd0f3d0d902f1347faa427368ff587",
-            .hash = "zg-0.14.0-oGqU3IOlsgIIxQU_WQ73eIWS_gkgvaPAHAYO3kp0eIey",
+            .url = "git+https://github.com/efjimm/zg?ref=master#16355ce3da13f24d13200f834fab50c12b7e61ee",
+            .hash = "zg-0.14.0-oGqU3PmnsgLOl4mt6T8xa6SeOYOYkSfvm13csnZTLonP",
         },
     },
 }

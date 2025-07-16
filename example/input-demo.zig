@@ -73,14 +73,15 @@ pub fn log(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    const writer = log_file.writer();
-    writer.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
-    writer.print(format, args) catch {};
-    writer.writeByte('\n') catch {};
+    var writer = log_file.writer(&.{});
+    writer.interface.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
+    writer.interface.print(format, args) catch {};
+    writer.interface.writeByte('\n') catch {};
 }
 
 fn render() !void {
-    var rc = try term.getRenderContext(4096);
+    var b: [4096]u8 = undefined;
+    var rc = try term.getRenderContext(&b);
     defer rc.done() catch {};
 
     try rc.clear();
@@ -88,8 +89,8 @@ fn render() !void {
     try rc.moveCursorTo(0, 0);
     try rc.setStyle(.{ .fg = .green, .attrs = .{ .reverse = true } });
     var cw = rc.cellWriter(term.width);
-    try cw.writer().writeAll(" shovel example program: input-demo");
-    try cw.writer().print("kitty keyboard {s}", .{
+    try cw.interface.writeAll(" shovel example program: input-demo");
+    try cw.interface.print("kitty keyboard {s}", .{
         if (term.kitty_enabled) "active" else "inactive",
     });
     try cw.pad();
@@ -97,18 +98,18 @@ fn render() !void {
     try rc.moveCursorTo(1, 0);
     try rc.setStyle(.{ .fg = .red, .attrs = .{ .bold = true } });
     cw = rc.cellWriter(term.width);
-    try cw.writer().writeAll(" Input demo / tester, q to exit.");
+    try cw.interface.writeAll(" Input demo / tester, q to exit.");
     try cw.finish();
 
     try rc.moveCursorTo(3, 0);
     try rc.setStyle(.{ .attrs = .{ .bold = true } });
     if (empty) {
         cw = rc.cellWriter(term.width);
-        try cw.writer().writeAll(" Press a key! Or try to paste something!");
+        try cw.interface.writeAll(" Press a key! Or try to paste something!");
         try cw.finish();
     } else {
         cw = rc.cellWriter(term.width);
-        var writer = cw.writer();
+        var writer = &cw.interface;
         try writer.writeAll(" Bytes read:    ");
         try rc.setStyle(.{});
         try writer.print("{}", .{read});
@@ -121,7 +122,7 @@ fn render() !void {
         try rc.moveCursorTo(4, 0);
         try rc.setStyle(.{ .attrs = .{ .bold = true } });
         cw = rc.cellWriter(term.width);
-        writer = cw.writer();
+        writer = &cw.interface;
         try writer.writeAll(" Valid unicode: ");
         try rc.setStyle(.{});
         if (valid_unicode) {
@@ -169,7 +170,7 @@ fn render() !void {
         var i: u16 = 1;
         while (it.next()) |in| : (i += 1) {
             cw = rc.cellWriter(term.width);
-            writer = cw.writer();
+            writer = &cw.interface;
 
             try rc.moveCursorTo(5 + (i - 1), 0);
 
@@ -179,7 +180,7 @@ fn render() !void {
                 try writer.writeAll(msg);
                 try rc.setStyle(.{ .attrs = .{ .bold = false } });
             } else {
-                try writer.writeByteNTimes(' ', msg.len);
+                try writer.splatByteAll(' ', msg.len);
             }
 
             var mouse: ?struct { x: u16, y: u16 } = null;
@@ -210,13 +211,13 @@ fn render() !void {
             if (mouse) |m| {
                 try rc.moveCursorTo(m.y, m.x);
                 try rc.setStyle(.{ .bg = .red, .attrs = .{ .bold = true } });
-                try rc.buffer.writer().writeByte('X');
+                try rc.writer.interface.writeByte('X');
             }
         }
     }
 }
 
-fn handleSigWinch(_: c_int) callconv(.C) void {
+fn handleSigWinch(_: c_int) callconv(.c) void {
     term.fetchSize() catch {};
 }
 

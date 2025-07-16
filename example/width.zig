@@ -40,7 +40,8 @@ pub fn main() !void {
 }
 
 fn render(term: *shovel.Term) !void {
-    var rc = try term.getRenderContext(4096);
+    var buf: [4096]u8 = undefined;
+    var rc = try term.getRenderContext(&buf);
 
     try rc.clear();
 
@@ -65,13 +66,13 @@ fn testPaddingWriter(
     string: []const u8,
     width: u16,
 ) !void {
-    const writer = rc.buffer.writer();
+    const writer = &rc.writer.interface;
 
     try writer.print("Should display '{s}': '", .{desired});
 
     var cw = rc.cellWriter(width);
 
-    try cw.writer().writeAll(string);
+    try cw.interface.writeAll(string);
     try cw.finish();
 
     try writer.writeAll("'");

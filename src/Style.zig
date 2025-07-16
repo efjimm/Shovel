@@ -88,7 +88,7 @@ pub const DumpOptions = struct {
 };
 
 /// Dumps the attributes to `writer`, using the capabilities reported by `ti`.
-pub fn dump(style: Style, writer: anytype, opts: DumpOptions) !void {
+pub fn dump(style: Style, writer: *std.io.Writer, opts: DumpOptions) !void {
     const ti = opts.terminfo orelse return style.dumpRaw(writer);
 
     if (ti.getStringCapability(.set_attributes)) |sgr| {

@@ -21,7 +21,7 @@ const mode = @import("builtin").mode;
 
 const zg = @import("zg");
 
-const cell_writer = @import("terminal_cell_writer.zig");
+const TerminalCellWriter = @import("TerminalCellWriter.zig");
 const GraphemeClusteringMode = @import("main.zig").GraphemeClusteringMode;
 const input = @import("input.zig");
 const InputParser = input.InputParser;
@@ -86,37 +86,13 @@ grapheme_clustering_mode: GraphemeClusteringMode = .codepoint,
 
 truecolor_enabled: bool = false,
 
-cw: switch (mode) {
-    .Debug => CountingWriter,
-    else => void,
-},
-
-const CountingWriter = std.io.CountingWriter(PosixWriter);
 /// See `input.inputParser`
 pub fn inputParser(term: *Term, bytes: []const u8) InputParser {
     return input.inputParser(bytes, term);
 }
 
-pub const WriteError = posix.WriteError || TermInfo.FormatError;
-
-const PosixWriter = std.io.Writer(posix.fd_t, posix.WriteError, posix.write);
-const Writer = switch (mode) {
-    .Debug => CountingWriter.Writer,
-    else => PosixWriter,
-};
-
-pub fn unbufferedWriter(term: *Term) Writer {
-    return switch (mode) {
-        .Debug => term.cw.writer(),
-        else => .{ .context = term.tty },
-    };
-}
-
-pub inline fn bufferedWriter(
-    term: *Term,
-    comptime buffer_size: usize,
-) std.io.BufferedWriter(buffer_size, Writer) {
-    return .{ .unbuffered_writer = term.unbufferedWriter() };
+pub fn writer(term: *Term, buffer: []u8) std.fs.File.Writer {
+    return .init(.{ .handle = term.tty }, buffer);
 }
 
 // NotATerminal + a subset of posix.OpenError, removing all errors which aren't reachable due to how
@@ -173,13 +149,8 @@ pub fn init(allocator: Allocator, term_config: TermConfig) InitError!Term {
             => |e| return e,
         },
         .terminfo = null,
-        .cw = undefined,
     };
     errdefer posix.close(ret.tty);
-
-    if (mode == .Debug) {
-        ret.cw = std.io.countingWriter(PosixWriter{ .context = ret.tty });
-    }
 
     if (!posix.isatty(ret.tty))
         return error.NotATerminal;
@@ -490,39 +461,38 @@ pub fn uncook(
 
     try posix.tcsetattr(term.tty, .FLUSH, raw_termios);
 
-    var buffered_writer = term.bufferedWriter(256);
-    const writer = buffered_writer.writer();
+    var buf: [256]u8 = undefined;
+    var bw = term.writer(&buf);
     inline for (.{
         term.getStringCapability(.save_cursor) orelse spells.save_cursor_position,
         term.getStringCapability(.enter_ca_mode) orelse spells.enter_alt_buffer,
         term.getStringCapability(.exit_insert_mode) orelse spells.overwrite_mode,
         term.getStringCapability(.exit_am_mode) orelse spells.reset_auto_wrap,
         term.getStringCapability(.cursor_invisible) orelse spells.hide_cursor,
-    }) |str| try writer.writeAll(str);
+    }) |str| bw.interface.writeAll(str) catch return bw.err.?;
 
     if (options.request_kitty_keyboard_protocol) {
-        try term.enableKittyKeyboard(&buffered_writer);
+        term.enableKittyKeyboard(&bw.interface) catch return bw.err.?;
     }
 
     if (options.request_mode_2027) {
-        try term.enableMode2027(allocator, &buffered_writer);
+        term.enableMode2027(allocator, &bw.interface) catch return bw.err.?;
     }
 
     if (options.request_mouse_tracking) {
-        try writer.writeAll(spells.enable_mouse_tracking);
+        bw.interface.writeAll(spells.enable_mouse_tracking) catch return bw.err.?;
     }
-    try buffered_writer.flush();
+    bw.interface.flush() catch return bw.err.?;
 }
 
 /// Attempts to enable mode 2027. If successful, also initializes the unicode data required to do
 /// proper grapheme cluster segmentation.
 ///
 /// https://github.com/contour-terminal/terminal-unicode-core
-pub fn enableMode2027(term: *Term, allocator: std.mem.Allocator, bw: anytype) !void {
-    const writer = bw.writer();
-    try writer.writeAll(spells.enable_mode_2027);
-    try writer.writeAll("\x1B[?2027$p");
-    try bw.flush();
+pub fn enableMode2027(term: *Term, allocator: std.mem.Allocator, wr: *std.io.Writer) !void {
+    try wr.writeAll(spells.enable_mode_2027);
+    try wr.writeAll("\x1B[?2027$p");
+    try wr.flush();
     var poll_fds: [1]posix.pollfd = .{
         .{
             .fd = term.tty,
@@ -550,11 +520,10 @@ pub fn enableMode2027(term: *Term, allocator: std.mem.Allocator, bw: anytype) !v
     }
 }
 
-fn enableKittyKeyboard(term: *Term, buffered_writer: anytype) !void {
-    const writer = buffered_writer.writer();
-    try writer.writeAll(spells.enable_kitty_keyboard);
-    try writer.writeAll("\x1B[?u");
-    try buffered_writer.flush();
+fn enableKittyKeyboard(term: *Term, wr: *std.io.Writer) !void {
+    try wr.writeAll(spells.enable_kitty_keyboard);
+    try wr.writeAll("\x1B[?u");
+    try wr.flush();
     var poll_fds: [1]posix.pollfd = .{
         .{
             .fd = term.tty,
@@ -589,11 +558,11 @@ pub fn cook(term: *Term) CookError!void {
     try posix.tcsetattr(term.tty, .FLUSH, term.cooked_termios.?);
     term.cooked_termios = null;
 
-    var buffered_writer = term.bufferedWriter(128);
-    const writer = buffered_writer.writer();
+    var buf: [128]u8 = undefined;
+    var bw = term.writer(&buf);
 
     if (term.kitty_enabled) {
-        try writer.writeAll(spells.disable_kitty_keyboard);
+        bw.interface.writeAll(spells.disable_kitty_keyboard) catch return bw.err.?;
         term.kitty_enabled = false;
     }
 
@@ -604,8 +573,8 @@ pub fn cook(term: *Term) CookError!void {
         term.getStringCapability(.cursor_visible) orelse "",
         term.getStringCapability(.exit_attribute_mode) orelse "",
         term.getStringCapability(.enter_am_mode) orelse spells.enable_auto_wrap,
-    }) |str| try writer.writeAll(str);
-    try buffered_writer.flush();
+    }) |str| bw.interface.writeAll(str) catch return bw.err.?;
+    bw.interface.flush() catch return bw.err.?;
 }
 
 pub fn fetchSize(term: *Term) posix.UnexpectedError!void {
@@ -621,182 +590,167 @@ pub fn fetchSize(term: *Term) posix.UnexpectedError!void {
     term.width = size.col;
 }
 
+pub const WriteError = std.posix.WriteError;
+
 /// Set window title using OSC 2. Shall not be called while rendering.
 pub fn setWindowTitle(term: *Term, comptime fmt: []const u8, args: anytype) WriteError!void {
     assert(!term.currently_rendering);
-    var bw = term.bufferedWriter(1024);
-    bw.writer().print("\x1b]2;" ++ fmt ++ "\x1b\\", args) catch unreachable;
-    try bw.flush();
+    var buf: [1024]u8 = undefined;
+    var bw = term.writer(&buf);
+    bw.interface.print("\x1b]2;" ++ fmt ++ "\x1b\\", args) catch return bw.err.?;
+    bw.interface.flush() catch return bw.err.?;
 }
 
 pub fn graphemeWidth(term: *Term, bytes: []const u8) u32 {
     return @import("main.zig").graphemeWidth(bytes, term.grapheme_clustering_mode);
 }
 
-pub fn getRenderContext(
-    term: *Term,
-    comptime buffer_size: usize,
-) WriteError!RenderContext(buffer_size) {
+pub fn getRenderContext(term: *Term, buf: []u8) WriteError!RenderContext {
     assert(!term.currently_rendering);
     assert(!term.isCooked());
 
-    var rc: RenderContext(buffer_size) = .{
+    var rc: RenderContext = .{
         .term = term,
-        .buffer = term.bufferedWriter(buffer_size),
+        .writer = .initMode(.{ .handle = term.tty }, buf, .streaming),
     };
 
-    const writer = rc.buffer.writer();
-
     if (rc.term.getExtendedString("Sync")) |sync|
-        try TermInfo.writeParamSequence(sync, writer, .{1});
+        TermInfo.writeParamSequence(sync, &rc.writer.interface, .{1}) catch {
+            return rc.writer.err.?;
+        };
 
     if (term.getStringCapability(.exit_attribute_mode)) |srg0|
-        try writer.writeAll(srg0);
+        rc.writer.interface.writeAll(srg0) catch return rc.writer.err.?;
 
     term.currently_rendering = true;
-    if (mode == .Debug)
-        term.cw.bytes_written = 0;
     return rc;
 }
 
-pub fn RenderContext(comptime buffer_size: usize) type {
-    return struct {
-        term: *Term,
-        buffer: BufferedWriter,
+pub const RenderContext = struct {
+    term: *Term,
+    writer: std.fs.File.Writer,
 
-        const Self = @This();
-        const BufferedWriter = std.io.BufferedWriter(buffer_size, Writer);
-        const CellWriter = cell_writer.TerminalCellWriter(BufferedWriter.Writer);
-
-        /// Finishes the render operation. The render context may not be used any
-        /// further.
-        pub fn done(rc: *Self) WriteError!void {
-            assert(rc.term.currently_rendering);
-            assert(!rc.term.isCooked());
-            defer rc.term.currently_rendering = false;
-            const writer = rc.buffer.writer();
-            if (rc.term.getExtendedString("Sync")) |sync| {
-                try TermInfo.writeParamSequence(sync, writer, .{2});
-            }
-            try rc.buffer.flush();
-            if (mode == .Debug)
-                log.perf.debug("{d} bytes written in render", .{rc.term.cw.bytes_written});
+    /// Finishes the render operation. The render context may not be used any further.
+    pub fn done(rc: *RenderContext) WriteError!void {
+        assert(rc.term.currently_rendering);
+        assert(!rc.term.isCooked());
+        defer rc.term.currently_rendering = false;
+        if (rc.term.getExtendedString("Sync")) |sync| {
+            TermInfo.writeParamSequence(sync, &rc.writer.interface, .{2}) catch return rc.writer.err.?;
         }
+        rc.writer.interface.flush() catch return rc.writer.err.?;
+    }
 
-        /// Clears all content. Avoid calling often, as fully clearing and redrawing the screen can
-        /// cause flicker on some terminals (such as the Linux tty). Prefer more granular clearing
-        /// functions like `clearToEol` and `clearToBot`.
-        pub fn clear(rc: *Self) WriteError!void {
-            assert(rc.term.currently_rendering);
-            const writer = rc.buffer.writer();
-            try writer.writeAll(rc.term.getStringCapability(.clear_screen) orelse spells.clear);
-        }
+    /// Clears all content. Avoid calling often, as fully clearing and redrawing the screen can
+    /// cause flicker on some terminals (such as the Linux tty). Prefer more granular clearing
+    /// functions like `clearToEol` and `clearToBot`.
+    pub fn clear(rc: *RenderContext) WriteError!void {
+        assert(rc.term.currently_rendering);
+        const spell = rc.term.getStringCapability(.clear_screen) orelse spells.clear;
+        rc.writer.interface.writeAll(spell) catch return rc.writer.err.?;
+    }
 
-        /// Clears the screen from the current line to the bottom.
-        pub fn clearToBot(rc: *Self) WriteError!void {
-            assert(rc.term.curerntly_rendering);
-            const writer = rc.buffer.writer();
-            try writer.writeAll(rc.term.getStringCapability(.clr_eos) orelse spells.clear_to_bot);
-        }
+    /// Clears the screen from the current line to the bottom.
+    pub fn clearToBot(rc: *RenderContext) WriteError!void {
+        assert(rc.term.currently_rendering);
+        const wr = &rc.writer.interface;
+        const spell = rc.term.getStringCapability(.clr_eos) orelse spells.clear_to_bot;
+        wr.writeAll(spell) catch return rc.writer.err.?;
+    }
 
-        /// Clears from the cursor position to the end of the line.
-        pub fn clearToEol(rc: *Self) WriteError!void {
-            assert(rc.term.currently_rendering);
-            const writer = rc.buffer.writer();
-            const spell = rc.term.getStringCapability(.clr_eol) orelse spells.clear_to_eol;
-            try writer.writeAll(spell);
-        }
+    /// Clears from the cursor position to the end of the line.
+    pub fn clearToEol(rc: *RenderContext) WriteError!void {
+        assert(rc.term.currently_rendering);
+        const wr = &rc.writer.interface;
+        const spell = rc.term.getStringCapability(.clr_eol) orelse spells.clear_to_eol;
+        wr.writeAll(spell) catch return rc.writer.err.?;
+    }
 
-        /// Clears the screen from the cursor to the beginning of the line.
-        pub fn clearToBol(rc: *Self) WriteError!void {
-            assert(rc.term.currently_rendering);
-            const writer = rc.buffer.writer();
-            const spell = rc.term.getStringCapability(.clr_bol) orelse spells.clear_to_bol;
-            try writer.writeAll(spell);
-        }
+    /// Clears the screen from the cursor to the beginning of the line.
+    pub fn clearToBol(rc: *RenderContext) WriteError!void {
+        assert(rc.term.currently_rendering);
+        const wr = &rc.writer.interface;
+        const spell = rc.term.getStringCapability(.clr_bol) orelse spells.clear_to_bol;
+        wr.writeAll(spell) catch return rc.writer.err.?;
+    }
 
-        /// Move the cursor to the specified cell.
-        pub fn moveCursorTo(rc: *Self, row: u16, col: u16) WriteError!void {
-            assert(rc.term.currently_rendering);
-            const writer = rc.buffer.writer();
-            const spell = rc.term.getStringCapability(.cursor_address) orelse spells.move_cursor_fmt;
-            try TermInfo.writeParamSequence(spell, writer, .{ row, col });
-        }
+    /// Move the cursor to the specified cell.
+    pub fn moveCursorTo(rc: *RenderContext, row: u16, col: u16) WriteError!void {
+        assert(rc.term.currently_rendering);
+        const spell = rc.term.getStringCapability(.cursor_address) orelse spells.move_cursor_fmt;
+        TermInfo.writeParamSequence(spell, &rc.writer.interface, .{ row, col }) catch return rc.writer.err.?;
+    }
 
-        pub fn saveCursor(rc: *Self) WriteError!void {
-            assert(rc.term.currently_rendering);
-            const writer = rc.buffer.writer();
-            const spell = rc.term.getStringCapability(.save_cursor) orelse spells.save_cursor_position;
-            try TermInfo.writeParamSequence(spell, writer, .{});
-        }
+    pub fn saveCursor(rc: *RenderContext) WriteError!void {
+        assert(rc.term.currently_rendering);
+        const spell = rc.term.getStringCapability(.save_cursor) orelse spells.save_cursor_position;
+        TermInfo.writeParamSequence(spell, &rc.writer.interface, .{}) catch return rc.writer.err.?;
+    }
 
-        pub fn restoreCursor(rc: *Self) WriteError!void {
-            assert(rc.term.currently_rendering);
-            const writer = rc.buffer.writer();
-            const spell = rc.term.getStringCapability(.restore_cursor) orelse spells.restore_cursor_position;
-            try TermInfo.writeParamSequence(spell, writer, .{});
-        }
+    pub fn restoreCursor(rc: *RenderContext) WriteError!void {
+        assert(rc.term.currently_rendering);
+        const spell = rc.term.getStringCapability(.restore_cursor) orelse spells.restore_cursor_position;
+        TermInfo.writeParamSequence(spell, &rc.writer.interface, .{}) catch return rc.writer.err.?;
+    }
 
-        /// Hide the cursor.
-        pub fn hideCursor(rc: *Self) WriteError!void {
-            assert(rc.term.currently_rendering);
-            if (!rc.term.cursor_visible) return;
-            const writer = rc.buffer.writer();
-            const spell = rc.term.getStringCapability(.cursor_invisible) orelse spells.hide_cursor;
-            try writer.writeAll(spell);
-            rc.term.cursor_visible = false;
-        }
+    /// Hide the cursor.
+    pub fn hideCursor(rc: *RenderContext) WriteError!void {
+        assert(rc.term.currently_rendering);
+        if (!rc.term.cursor_visible) return;
+        const wr = &rc.writer.interface;
+        const spell = rc.term.getStringCapability(.cursor_invisible) orelse spells.hide_cursor;
+        wr.writeAll(spell) catch return rc.writer.err.?;
+        rc.term.cursor_visible = false;
+    }
 
-        /// Show the cursor.
-        pub fn showCursor(rc: *Self) WriteError!void {
-            assert(rc.term.currently_rendering);
-            if (rc.term.cursor_visible) return;
-            const writer = rc.buffer.writer();
-            const spell = rc.term.getStringCapability(.cursor_normal) orelse spells.show_cursor;
-            try writer.writeAll(spell);
-            rc.term.cursor_visible = true;
-        }
+    /// Show the cursor.
+    pub fn showCursor(rc: *RenderContext) WriteError!void {
+        assert(rc.term.currently_rendering);
+        if (rc.term.cursor_visible) return;
+        const wr = &rc.writer.interface;
+        const spell = rc.term.getStringCapability(.cursor_normal) orelse spells.show_cursor;
+        wr.writeAll(spell) catch return rc.writer.err.?;
+        rc.term.cursor_visible = true;
+    }
 
-        /// Set the text attributes for all following writes.
-        pub fn setStyle(rc: *Self, attr: Style) WriteError!void {
-            assert(rc.term.currently_rendering);
-            const writer = rc.buffer.writer();
-            try attr.dump(writer, .{
-                .terminfo = rc.term.terminfo,
-                .truecolor = rc.term.truecolor_enabled,
-            });
-        }
+    /// Set the text attributes for all following writes.
+    pub fn setStyle(rc: *RenderContext, attr: Style) WriteError!void {
+        assert(rc.term.currently_rendering);
+        attr.dump(&rc.writer.interface, .{
+            .terminfo = rc.term.terminfo,
+            .truecolor = rc.term.truecolor_enabled,
+        }) catch return rc.writer.err.?;
+    }
 
-        pub fn cellWriter(rc: *Self, width: u16) CellWriter {
-            assert(rc.term.currently_rendering);
-            return cell_writer.terminalCellWriter(
-                rc.buffer.writer(),
-                rc.term.grapheme_clustering_mode,
-                width,
-            );
-        }
+    pub fn cellWriter(rc: *RenderContext, width: u16) TerminalCellWriter {
+        assert(rc.term.currently_rendering);
+        return .init(
+            &rc.writer.interface,
+            rc.term.grapheme_clustering_mode,
+            width,
+        );
+    }
 
-        /// Write all bytes, wrapping at the end of the line.
-        pub fn writeAllWrapping(rc: *Self, bytes: []const u8) WriteError!void {
-            assert(rc.term.currently_rendering);
-            const writer = rc.buffer.writer();
-            const enable = rc.term.getStringCapability(.enter_am_mode) orelse spells.enable_auto_wrap;
-            const disable = rc.term.getStringCapability(.exit_am_mode) orelse spells.reset_auto_wrap;
-            try writer.writeAll(enable);
-            try writer.writeAll(bytes);
-            try writer.writeAll(disable);
-        }
+    /// Write all bytes, wrapping at the end of the line.
+    pub fn writeAllWrapping(rc: *RenderContext, bytes: []const u8) WriteError!void {
+        assert(rc.term.currently_rendering);
+        const wr = &rc.writer.interface;
+        const enable = rc.term.getStringCapability(.enter_am_mode) orelse spells.enable_auto_wrap;
+        const disable = rc.term.getStringCapability(.exit_am_mode) orelse spells.reset_auto_wrap;
+        wr.writeAll(enable) catch return rc.writer.err.?;
+        wr.writeAll(bytes) catch return rc.writer.err.?;
+        wr.writeAll(disable) catch return rc.writer.err.?;
+    }
 
-        pub fn setCursorShape(rc: *Self, shape: CursorShape) WriteError!void {
-            assert(rc.term.currently_rendering);
-            assert(shape != .unknown);
+    pub fn setCursorShape(rc: *RenderContext, shape: CursorShape) WriteError!void {
+        assert(rc.term.currently_rendering);
+        assert(shape != .unknown);
 
-            if (rc.term.cursor_shape == shape) return;
-            const writer = rc.buffer.writer();
+        if (rc.term.cursor_shape == shape) return;
 
-            const spell = rc.term.getExtendedString("Ss") orelse spells.change_cursor;
-            try TermInfo.writeParamSequence(spell, writer, .{@intFromEnum(shape)});
-            rc.term.cursor_shape = shape;
-        }
-    };
-}
+        const spell = rc.term.getExtendedString("Ss") orelse spells.change_cursor;
+        TermInfo.writeParamSequence(spell, &rc.writer.interface, .{@intFromEnum(shape)}) catch
+            return rc.writer.err.?;
+        rc.term.cursor_shape = shape;
+    }
+};

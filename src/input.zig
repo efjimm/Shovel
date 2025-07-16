@@ -237,7 +237,7 @@ pub const InputParser = struct {
                     .mod_alt = true,
                 };
             },
-            else => if (std.ascii.isASCII(self.bytes[1])) {
+            else => if (std.ascii.isAscii(self.bytes[1])) {
                 defer self.advanceBufferBy("\x1Ba".len);
 
                 if (std.ascii.isControl(self.bytes[1]))

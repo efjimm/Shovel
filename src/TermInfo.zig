@@ -293,6 +293,7 @@ pub fn createInputMap(
     ti: *TermInfo,
     allocator: Allocator,
 ) !input.InputMap {
+    @setEvalBranchQuota(100_000);
     const print = std.fmt.comptimePrint;
 
     var map = input.InputMap.init();
@@ -1223,7 +1224,7 @@ pub fn validateParamSequence(sequence: []const u8, param_count: usize) ParamSequ
 pub const FormatError = error{InvalidFormat};
 
 /// Writes a paramterized escape sequence to the given writer, with the specified arguments.
-pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void {
+pub fn writeParamSequence(str: []const u8, writer: *std.io.Writer, args: anytype) !void {
     // TODO: Move the validation from here to the loading of terminfo definitions.
     validateParamSequence(str, args.len) catch return error.InvalidFormat;
     const PrintFlags = packed struct(u4) {
@@ -1363,13 +1364,13 @@ pub fn writeParamSequence(str: []const u8, writer: anytype, args: anytype) !void
                         try util.formatInt(value.number, base, case, fmt_opts, writer);
                     },
                     's' => switch (stack.pop().?) {
-                        .number => |int| try util.formatInt(int, 10, .lower, fmt_opts, writer),
-                        .string => |s| try std.fmt.formatBuf(s, .{
+                        .number => |int| try writer.printInt(int, 10, .lower, .{}),
+                        .string => |s| try writer.printValue("s", .{
                             .precision = fmt_opts.precision,
                             .width = fmt_opts.width,
                             .alignment = fmt_opts.alignment,
                             .fill = ' ',
-                        }, writer),
+                        }, s, 1),
                     },
                     else => unreachable,
                 }
@@ -2677,26 +2678,21 @@ test "xterm" {
 //     try t.expectEqual(@as(?std.fs.File, null), openTermInfoFile("Non-extant-terminal :)"));
 // }
 
-const ParamTestContext = struct {
-    list: std.ArrayList(u8) = std.ArrayList(u8).init(t.allocator),
+fn testParam(expected: anytype, sequence: []const u8, args: anytype) !void {
+    var buf: [4096]u8 = undefined;
+    var writer = std.io.Writer.fixed(&buf);
 
-    fn testParam(ctx: *ParamTestContext, expected: anytype, sequence: []const u8, args: anytype) !void {
-        ctx.list.clearRetainingCapacity();
-        const res = validateParamSequence(sequence, args.len);
-        if (comptime util.isZigString(@TypeOf(expected))) {
-            try res;
-            try writeParamSequence(sequence, ctx.list.writer(), args);
-            try t.expectEqualSlices(u8, expected, ctx.list.items);
-        } else {
-            try t.expectError(expected, res);
-        }
+    const res = validateParamSequence(sequence, args.len);
+    if (comptime util.isZigString(@TypeOf(expected))) {
+        try res;
+        try writeParamSequence(sequence, &writer, args);
+        try t.expectEqualSlices(u8, expected, writer.buffered());
+    } else {
+        try t.expectError(expected, res);
     }
-};
+}
 
 test "param string" {
-    var list = std.ArrayList(u8).init(std.testing.allocator);
-    defer list.deinit();
-
     try validateParamSequence("", 9);
     try validateParamSequence("%p1%4d", 1);
     try t.expectError(error.InvalidSpecifier, validateParamSequence("%pp", 1));
@@ -2715,199 +2711,160 @@ test "param string" {
 }
 
 test "Param sequence: non-formatted printing" {
-    var c: ParamTestContext = .{};
-    defer c.list.deinit();
-
-    try c.testParam("", "", .{});
-    try c.testParam("this is epic", "this is epic", .{});
-    try c.testParam("% this is epic %", "%% this is epic %%", .{});
+    try testParam("", "", .{});
+    try testParam("this is epic", "this is epic", .{});
+    try testParam("% this is epic %", "%% this is epic %%", .{});
 }
 
 test "Param sequence: number literals" {
-    var c: ParamTestContext = .{};
-    defer c.list.deinit();
-
-    try c.testParam("10", "%{10}%d", .{});
-    try c.testParam("5", "%{5}%d", .{});
-    try c.testParam("-1", "%{-1}%d", .{});
-    try c.testParam("0", "%{0}%d", .{});
-    try c.testParam("100000", "%{100000}%d", .{});
-    try c.testParam(error.InvalidSpecifier, "%{}%d", .{});
-    try c.testParam(error.InvalidSpecifier, "%{-}%d", .{});
-    try c.testParam(error.InvalidSpecifier, "%{abc}%d", .{});
-    try c.testParam(error.Overflow, "%{10000000000}%d", .{});
-    try c.testParam(error.Overflow, "%{-10000000000}%d", .{});
+    try testParam("10", "%{10}%d", .{});
+    try testParam("5", "%{5}%d", .{});
+    try testParam("-1", "%{-1}%d", .{});
+    try testParam("0", "%{0}%d", .{});
+    try testParam("100000", "%{100000}%d", .{});
+    try testParam(error.InvalidSpecifier, "%{}%d", .{});
+    try testParam(error.InvalidSpecifier, "%{-}%d", .{});
+    try testParam(error.InvalidSpecifier, "%{abc}%d", .{});
+    try testParam(error.Overflow, "%{10000000000}%d", .{});
+    try testParam(error.Overflow, "%{-10000000000}%d", .{});
 }
 
 test "Param sequence: character literals" {
-    var c: ParamTestContext = .{};
-    defer c.list.deinit();
-
-    try c.testParam(" ", "%' '%c", .{});
-    try c.testParam("x", "%'x'%c", .{});
-    try c.testParam("65", "%'A'%d", .{});
-    try c.testParam("32", "%' '%d", .{});
-    try c.testParam(error.InvalidSpecifier, "%'ab'%c", .{});
-    try c.testParam(error.InvalidSpecifier, "%''%c", .{});
+    try testParam(" ", "%' '%c", .{});
+    try testParam("x", "%'x'%c", .{});
+    try testParam("65", "%'A'%d", .{});
+    try testParam("32", "%' '%d", .{});
+    try testParam(error.InvalidSpecifier, "%'ab'%c", .{});
+    try testParam(error.InvalidSpecifier, "%''%c", .{});
 }
 
 test "Param sequence: push positional" {
-    var c: ParamTestContext = .{};
-    defer c.list.deinit();
-
-    try c.testParam("39", "%p1%d", .{39});
-    try c.testParam("-1", "%p1%d", .{-1});
-    try c.testParam("10", "%p2%d", .{ -1, 10 });
-    try c.testParam("17", "%p9%d", .{ 1, 3, 5, 7, 9, 11, 13, 15, 17 });
+    try testParam("39", "%p1%d", .{39});
+    try testParam("-1", "%p1%d", .{-1});
+    try testParam("10", "%p2%d", .{ -1, 10 });
+    try testParam("17", "%p9%d", .{ 1, 3, 5, 7, 9, 11, 13, 15, 17 });
 
     // Interpreted as %p1 followed by a literal 0,
     // as only 1-9 are allowed following %p
-    try c.testParam("0-1", "%p10%d", .{ -1, 5 });
+    try testParam("0-1", "%p10%d", .{ -1, 5 });
 }
 
 test "Param sequence: set/get dynamic variables" {
-    var c: ParamTestContext = .{};
-    defer c.list.deinit();
-
     for ('a'..'z') |i| {
         const ch: u8 = @intCast(i);
-        try c.testParam("10101", "%p1%P" ++ .{ch} ++ "%g" ++ .{ch} ++ "%d", .{10101});
+        try testParam("10101", "%p1%P" ++ .{ch} ++ "%g" ++ .{ch} ++ "%d", .{10101});
         // Make sure unset variables are zeroed
-        try c.testParam("0", "%ga%d", .{10101});
+        try testParam("0", "%ga%d", .{10101});
     }
 }
 
 test "Param sequence: set/get static variables" {
-    var c: ParamTestContext = .{};
-    defer c.list.deinit();
-
     for ('A'..'Z') |i| {
         const ch: u8 = @intCast(i);
-        try c.testParam("10101", "%p1%P" ++ .{ch} ++ "%g" ++ .{ch} ++ "%d", .{10101});
+        try testParam("10101", "%p1%P" ++ .{ch} ++ "%g" ++ .{ch} ++ "%d", .{10101});
         // Make sure unset variables are zeroed
-        try c.testParam("0", "%gA%d", .{10101});
+        try testParam("0", "%gA%d", .{10101});
     }
 }
 
 test "Param sequence: hexadecimal" {
-    var c: ParamTestContext = .{};
-    defer c.list.deinit();
+    try testParam("0", "%p1%x", .{0x0});
+    try testParam("0", "%p1%X", .{0x0});
 
-    try c.testParam("0", "%p1%x", .{0x0});
-    try c.testParam("0", "%p1%X", .{0x0});
+    try testParam("dab", "%p1%x", .{0xdab});
+    try testParam("DAB", "%p1%X", .{0xDAB});
 
-    try c.testParam("dab", "%p1%x", .{0xdab});
-    try c.testParam("DAB", "%p1%X", .{0xDAB});
+    try testParam("f", "%p1%x", .{0xf});
+    try testParam("F", "%p1%X", .{0xF});
 
-    try c.testParam("f", "%p1%x", .{0xf});
-    try c.testParam("F", "%p1%X", .{0xF});
-
-    try c.testParam("10", "%p1%x", .{0x10});
-    try c.testParam("10", "%p1%X", .{0x10});
+    try testParam("10", "%p1%x", .{0x10});
+    try testParam("10", "%p1%X", .{0x10});
 }
 
 test "Param sequence: octal" {
-    var c: ParamTestContext = .{};
-    defer c.list.deinit();
-
-    try c.testParam("0", "%p1%o", .{0o0});
-    try c.testParam("1", "%p1%o", .{0o1});
-    try c.testParam("7", "%p1%o", .{0o7});
-    try c.testParam("10", "%p1%o", .{0o10});
-    try c.testParam("11111", "%p1%o", .{0o11111});
+    try testParam("0", "%p1%o", .{0o0});
+    try testParam("1", "%p1%o", .{0o1});
+    try testParam("7", "%p1%o", .{0o7});
+    try testParam("10", "%p1%o", .{0o10});
+    try testParam("11111", "%p1%o", .{0o11111});
 }
 
 test "Param sequence: width & flags" {
-    var c: ParamTestContext = .{};
-    defer c.list.deinit();
+    try testParam("100", "%{100}%0d", .{});
+    try testParam("100", "%{100}%1d", .{});
+    try testParam("100", "%{100}%2d", .{});
+    try testParam("100", "%{100}%3d", .{});
+    try testParam(" 100", "%{100}%4d", .{});
+    try testParam("  100", "%{100}%5d", .{});
+    try testParam("   100", "%{100}%6d", .{});
 
-    try c.testParam("100", "%{100}%0d", .{});
-    try c.testParam("100", "%{100}%1d", .{});
-    try c.testParam("100", "%{100}%2d", .{});
-    try c.testParam("100", "%{100}%3d", .{});
-    try c.testParam(" 100", "%{100}%4d", .{});
-    try c.testParam("  100", "%{100}%5d", .{});
-    try c.testParam("   100", "%{100}%6d", .{});
+    try testParam("  -100", "%{-100}%6d", .{});
+    try testParam("  +100", "%{100}%:+6d", .{});
 
-    try c.testParam("  -100", "%{-100}%6d", .{});
-    try c.testParam("  +100", "%{100}%:+6d", .{});
+    try testParam("+100  ", "%{100}%:-+6d", .{});
+    try testParam("-100  ", "%{-100}%:-+6d", .{});
 
-    try c.testParam("+100  ", "%{100}%:-+6d", .{});
-    try c.testParam("-100  ", "%{-100}%:-+6d", .{});
+    try testParam(" 100  ", "%{100}%:- 6d", .{});
+    try testParam("-100  ", "%{-100}%:- 6d", .{});
 
-    try c.testParam(" 100  ", "%{100}%:- 6d", .{});
-    try c.testParam("-100  ", "%{-100}%:- 6d", .{});
+    try testParam(" 100", "%{100}% d", .{});
+    try testParam("-100", "%{-100}% d", .{});
 
-    try c.testParam(" 100", "%{100}% d", .{});
-    try c.testParam("-100", "%{-100}% d", .{});
-
-    try c.testParam("100", "%{100}%.1d", .{});
-    try c.testParam("-100", "%{-100}%.1d", .{});
-    try c.testParam("100", "%{100}%.3d", .{});
-    try c.testParam("-100", "%{-100}%.3d", .{});
-    try c.testParam("00100", "%{100}%.5d", .{});
-    try c.testParam("-00100", "%{-100}%.5d", .{});
+    try testParam("100", "%{100}%.1d", .{});
+    try testParam("-100", "%{-100}%.1d", .{});
+    try testParam("100", "%{100}%.3d", .{});
+    try testParam("-100", "%{-100}%.3d", .{});
+    try testParam("00100", "%{100}%.5d", .{});
+    try testParam("-00100", "%{-100}%.5d", .{});
 }
 
 test "Param sequence: strings" {
-    var c: ParamTestContext = .{};
-    defer c.list.deinit();
-
-    try c.testParam("100", "%p1%s", .{100});
-    try c.testParam("abc", "%p1%s", .{"abc"});
-    try c.testParam("  abc", "%p1%5s", .{"abc"});
-    try c.testParam("abc  ", "%p1%:-5s", .{"abc"});
+    try testParam("100", "%p1%s", .{100});
+    try testParam("abc", "%p1%s", .{"abc"});
+    try testParam("  abc", "%p1%5s", .{"abc"});
+    try testParam("abc  ", "%p1%:-5s", .{"abc"});
 
     // Check for inoring of sign, space and precision
-    try c.testParam("abc  ", "%p1%:-+ 5.10s", .{"abc"});
+    try testParam("abc  ", "%p1%:-+ 5.10s", .{"abc"});
 }
 
 test "Param sequence: arithmetic" {
-    var c: ParamTestContext = .{};
-    defer c.list.deinit();
-
     // Binary operators are 'push(pop() op pop())', so %p1%p2%- would be push(p2 - p1)
 
-    try c.testParam("10", "%p1%p2%+%d", .{ 3, 7 });
-    try c.testParam("-20", "%p1%p2%+%d", .{ 10, -30 });
+    try testParam("10", "%p1%p2%+%d", .{ 3, 7 });
+    try testParam("-20", "%p1%p2%+%d", .{ 10, -30 });
 
-    try c.testParam("40", "%p1%p2%-%d", .{ 10, -30 });
-    try c.testParam("20", "%p1%p2%-%d", .{ -10, -30 });
+    try testParam("40", "%p1%p2%-%d", .{ 10, -30 });
+    try testParam("20", "%p1%p2%-%d", .{ -10, -30 });
 
-    try c.testParam("300", "%p1%p2%*%d", .{ 10, 30 });
-    try c.testParam("-300", "%p1%p2%*%d", .{ 10, -30 });
+    try testParam("300", "%p1%p2%*%d", .{ 10, 30 });
+    try testParam("-300", "%p1%p2%*%d", .{ 10, -30 });
 
-    try c.testParam("0", "%p1%p2%/%d", .{ 10, 30 });
-    try c.testParam("0", "%p1%p2%/%d", .{ 10, -30 });
-    try c.testParam("3", "%p1%p2%/%d", .{ 30, 10 });
-    try c.testParam("-3", "%p1%p2%/%d", .{ 30, -10 });
+    try testParam("0", "%p1%p2%/%d", .{ 10, 30 });
+    try testParam("0", "%p1%p2%/%d", .{ 10, -30 });
+    try testParam("3", "%p1%p2%/%d", .{ 30, 10 });
+    try testParam("-3", "%p1%p2%/%d", .{ 30, -10 });
 
-    try c.testParam("2", "%p1%p2%m%d", .{ 5, 3 });
-    try c.testParam("-2", "%p1%p2%m%d", .{ -5, 3 });
+    try testParam("2", "%p1%p2%m%d", .{ 5, 3 });
+    try testParam("-2", "%p1%p2%m%d", .{ -5, 3 });
 }
 
 test "Param sequence: strlen" {
-    var c: ParamTestContext = .{};
-    defer c.list.deinit();
-
-    try c.testParam("3", "%p1%l%d", .{100});
-    try c.testParam("4", "%p1%l%d", .{-100});
-    try c.testParam("1", "%p1%l%d", .{0});
-    try c.testParam("0", "%p1%l%s", .{""});
-    try c.testParam("8", "%p1%l%s", .{"abcdefgh"});
-    try c.testParam("4", "%p1%l%s", .{"what"});
+    try testParam("3", "%p1%l%d", .{100});
+    try testParam("4", "%p1%l%d", .{-100});
+    try testParam("1", "%p1%l%d", .{0});
+    try testParam("0", "%p1%l%s", .{""});
+    try testParam("8", "%p1%l%s", .{"abcdefgh"});
+    try testParam("4", "%p1%l%s", .{"what"});
 }
 
 test "Param sequence: if-then-else" {
-    var c: ParamTestContext = .{};
-    defer c.list.deinit();
+    try testParam("100", "%?%{1}%t%{100}%d%;", .{});
+    try testParam("100", "%?%{1}%t%{100}%e%{-1}%;%d", .{});
+    try testParam("-1", "%?%{0}%t%{100}%e%{-1}%;%d", .{});
 
-    try c.testParam("100", "%?%{1}%t%{100}%d%;", .{});
-    try c.testParam("100", "%?%{1}%t%{100}%e%{-1}%;%d", .{});
-    try c.testParam("-1", "%?%{0}%t%{100}%e%{-1}%;%d", .{});
+    try testParam("100", "%?%{0}%t%{3}%e%{1}%t%{100}%d%;", .{});
+    try testParam("\x1b[48;5;239m", "\x1b[%?%p1%{8}%<%t4%p1%d%e%p1%{16}%<%t10%p1%{8}%-%d%e48;5;%p1%d%;m", .{239});
 
-    try c.testParam("100", "%?%{0}%t%{3}%e%{1}%t%{100}%d%;", .{});
-    try c.testParam("\x1b[48;5;239m", "\x1b[%?%p1%{8}%<%t4%p1%d%e%p1%{16}%<%t10%p1%{8}%-%d%e48;5;%p1%d%;m", .{239});
-
-    try c.testParam(error.UnexpectedConditionTerminator, "%?%{1}%t%{100}%d%;%;", .{});
+    try testParam(error.UnexpectedConditionTerminator, "%?%{1}%t%{100}%d%;%;", .{});
 }

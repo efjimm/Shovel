@@ -2,7 +2,6 @@
 // stand-alone without using shovel.Term.
 
 const std = @import("std");
-const io = std.io;
 
 const shovel = @import("shovel");
 
@@ -20,7 +19,8 @@ const magenta = shovel.Style{ .fg = parsed, .attrs = .{ .dimmed = true } };
 const reset = shovel.Style{};
 
 pub fn main() !void {
-    const writer = io.getStdOut().writer();
+    var stdout = std.fs.File.stdout().writer(&.{});
+    const writer = &stdout.interface;
 
     try red.dump(writer, .{});
     try writer.writeAll("foo ");

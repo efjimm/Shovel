@@ -51,7 +51,7 @@ pub fn formatInt(
     base: u8,
     case: std.fmt.Case,
     options: FormatOptions,
-    writer: anytype,
+    writer: *std.io.Writer,
 ) !void {
     assert(base >= 2);
 
@@ -63,7 +63,7 @@ pub fn formatInt(
     // Write fill
     // std.debug.print("width: {d}, p: {d}, d: {d}\n", .{ width, precision, digit_count });
     if (options.alignment == .right) {
-        try writer.writeByteNTimes(' ', width -| precision -| digit_count -| write_sign);
+        try writer.splatByteAll(' ', width -| precision -| digit_count -| write_sign);
     }
 
     // Write sign if necessary
@@ -76,13 +76,24 @@ pub fn formatInt(
     }
 
     // Write leading zeroes if necessary
-    try writer.writeByteNTimes('0', precision -| digit_count);
+    try writer.splatByteAll('0', precision -| digit_count);
 
-    // Write integer value
-    try std.fmt.formatInt(@abs(value), base, case, .{}, writer);
+    try writer.printInt(@abs(value), base, case, .{});
 
     if (options.alignment == .left) {
-        try writer.writeByteNTimes(' ', width -| precision -| digit_count -| write_sign);
+        try writer.splatByteAll(' ', width -| precision -| digit_count -| write_sign);
+    }
+}
+
+/// Writes the same slice many times, performing the underlying write call as
+/// many times as necessary.
+pub fn splatBytesAll(w: *std.io.Writer, bytes: []const u8, splat: usize) std.io.Writer.Error!void {
+    var remaining_bytes: usize = bytes.len * splat;
+    remaining_bytes -= try w.splatBytes(bytes, splat);
+    while (remaining_bytes > 0) {
+        const leftover = remaining_bytes % bytes.len;
+        const buffers: [2][]const u8 = .{ bytes[bytes.len - leftover ..], bytes };
+        remaining_bytes -= try w.writeSplat(&buffers, splat);
     }
 }
 
