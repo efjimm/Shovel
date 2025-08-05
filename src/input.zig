@@ -89,7 +89,7 @@ pub const InputParser = struct {
 
     bytes: []const u8,
     kitty_enabled: bool = false,
-    ti: ?*TermInfo = null,
+    ti: *const TermInfo = &.{},
 
     pub fn next(self: *Self) ?Input {
         if (self.bytes.len == 0) return null;
@@ -104,12 +104,10 @@ pub const InputParser = struct {
             if (self.maybeKittyEscapeSequence()) |in| return in;
         }
 
-        if (self.ti) |ti| if (ti.input_map) |*map| {
-            if (map.getPrefix(self.bytes)) |kv| {
-                self.advanceBufferBy(kv.key.len);
-                return kv.value;
-            }
-        };
+        if (self.ti.input_map.getPrefix(self.bytes)) |kv| {
+            self.advanceBufferBy(kv.key.len);
+            return kv.value;
+        }
 
         if (self.bytes[0] == '\x1B') {
             return self.maybeEscapeSequence();
@@ -171,6 +169,10 @@ pub const InputParser = struct {
             'z' & 0x1F => .{ .content = .{ .codepoint = 'z' }, .mod_ctrl = true },
             0x1D => .{ .content = .{ .codepoint = ']' }, .mod_ctrl = true },
             0x1F => .{ .content = .{ .codepoint = '/' }, .mod_ctrl = true },
+
+            // ASCII
+            0x20...0x7f => .{ .content = .{ .codepoint = self.bytes[0] } },
+
             else => {
                 // The terminal sends us input encoded as utf8.
                 advance = std.unicode.utf8ByteSequenceLength(self.bytes[0]) catch
@@ -499,7 +501,7 @@ pub fn inputParser(bytes: []const u8, term: ?*Term) InputParser {
     return .{
         .bytes = bytes,
         .kitty_enabled = if (term) |t| t.kitty_enabled else false,
-        .ti = if (term) |t| t.terminfo else null,
+        .ti = if (term) |t| t.terminfo else &.{},
     };
 }
 
@@ -645,12 +647,12 @@ test "input parser: terminfo escape sequences" {
         }
     };
 
-    const ti = try TermInfo.parse(t.allocator, @embedFile("descriptions/x/xterm"));
-    defer ti.destroy(t.allocator);
+    var ti = try TermInfo.parseBytes(t.allocator, @embedFile("descriptions/x/xterm"));
+    defer ti.deinit(t.allocator);
 
-    _ = try ti.createInputMap(t.allocator);
+    _ = try ti.populateInputMap(t.allocator);
 
-    var ctx: Context = .{ .ti = ti };
+    var ctx: Context = .{ .ti = &ti };
     try ctx.testInput("\x08", .{ .content = .backspace });
     try ctx.testInput("\x1b[3~", .{ .content = .delete });
     try ctx.testInput("\x1bOB", .{ .content = .arrow_down });

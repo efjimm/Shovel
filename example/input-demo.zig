@@ -31,12 +31,20 @@ pub fn main() !void {
     log_file = try std.fs.cwd().createFile("log.txt", .{});
     defer log_file.close();
 
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var dbg_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = dbg_allocator.deinit();
+    const gpa = dbg_allocator.allocator();
 
-    term = try shovel.Term.init(allocator, .{});
-    defer term.deinit(allocator);
+    try shovel.initUnicodeData(gpa);
+    defer shovel.deinitUnicodeData(gpa);
+
+    term = try shovel.Term.init(gpa, .{
+        .terminfo = .{
+            .fallback = .@"xterm-256color",
+            .fallback_mode = .merge,
+        },
+    });
+    defer term.deinit(gpa);
 
     posix.sigaction(posix.SIG.WINCH, &.{
         .handler = .{ .handler = handleSigWinch },
@@ -44,7 +52,7 @@ pub fn main() !void {
         .flags = 0,
     }, null);
 
-    try term.uncook(allocator, .{
+    try term.uncook(gpa, .{
         .request_kitty_keyboard_protocol = !force_legacy,
         .request_mouse_tracking = mouse,
     });

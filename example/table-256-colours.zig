@@ -16,7 +16,12 @@ pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     defer _ = gpa.deinit();
 
-    var term = try shovel.Term.init(gpa.allocator(), .{});
+    var term = try shovel.Term.init(gpa.allocator(), .{
+        .terminfo = .{
+            .fallback = .@"xterm-256color",
+            .fallback_mode = .last_resort,
+        },
+    });
     defer term.deinit(gpa.allocator());
 
     var file_writer = std.fs.File.stdout().writer(&.{});

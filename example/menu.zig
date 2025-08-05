@@ -4,46 +4,95 @@ const math = std.math;
 const mem = std.mem;
 const os = std.os;
 const posix = std.posix;
+const builtin = @import("builtin");
 
 const shovel = @import("shovel");
 
 pub const std_options: std.Options = .{
-    .log_level = .err,
+    .log_level = .debug,
+    .logFn = log,
 };
 
+var logfile: std.fs.File = undefined;
+
+pub fn log(
+    comptime _: std.log.Level,
+    comptime _: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    var wr = logfile.writerStreaming(&.{});
+    wr.interface.print(format ++ "\n", args) catch @panic("");
+    wr.interface.flush() catch @panic("");
+}
+
 var term: shovel.Term = undefined;
-var loop: bool = true;
+var running: bool = true;
 
 var cursor: usize = 0;
 
+const entries = [_][]const u8{ "foo", "bar", "baz", "longer", "→µ←" };
+
 pub fn main() !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    logfile = try std.fs.cwd().createFile("log.txt", .{});
+    defer logfile.close();
 
-    try shovel.initUnicodeData(allocator);
-    defer shovel.deinitUnicodeData(allocator);
+    var dbg_allocator: std.heap.DebugAllocator(.{}) = .init;
+    const gpa, const is_debug = switch (builtin.mode) {
+        .Debug, .ReleaseSafe => .{ dbg_allocator.allocator(), true },
+        .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
+    };
+    defer _ = if (is_debug) dbg_allocator.deinit();
 
-    term = try shovel.Term.init(allocator, .{});
-    defer term.deinit(allocator);
+    try shovel.initUnicodeData(gpa);
+    defer shovel.deinitUnicodeData(gpa);
 
-    posix.sigaction(posix.SIG.WINCH, &posix.Sigaction{
-        .handler = .{ .handler = handleSigWinch },
-        .mask = posix.sigemptyset(),
-        .flags = 0,
-    }, null);
+    term = try shovel.Term.init(gpa, .{
+        .terminfo = .{
+            .fallback = .@"xterm-256color",
+            .fallback_mode = .merge,
+        },
+    });
+    defer term.deinit(gpa);
+
+    var db = term.doubleBuffer(gpa);
+    defer db.deinit();
+
+    posix.sigaction(
+        posix.SIG.WINCH,
+        &.{
+            .handler = .{ .handler = handleSigWinch },
+            .mask = posix.sigemptyset(),
+            .flags = 0,
+        },
+        null,
+    );
 
     // Shovel will return the terminal back to cooked state automatically
-    // when we call term.deinit().
-    try term.uncook(allocator, .{});
+    // when we call `term.deinit()`.
+    try term.uncook(gpa, .{});
 
     try term.fetchSize();
     try term.setWindowTitle("Shovel example: menu", .{});
-    try render();
 
-    var buf: [16]u8 = undefined;
-    while (loop) {
-        const slice = try term.readInput(&buf);
+    var term_buf: [4096]u8 = undefined;
+    var term_writer = term.writer(&term_buf);
+
+    var input_buf: [16]u8 = undefined;
+    while (running) {
+        if (needs_update) {
+            if (needs_resize) {
+                try term.fetchSize();
+                try db.resize(term.width, term.height);
+                needs_resize = false;
+            }
+            try blit(&db.write, term.width);
+            try db.dump(&term_writer.interface);
+            try term_writer.interface.flush();
+            needs_update = false;
+        }
+
+        const slice = try term.readInput(&input_buf);
         var it = term.inputParser(slice);
         while (it.next()) |in| {
             // The input descriptor parser is not only useful for user-configuration.
@@ -53,78 +102,80 @@ pub fn main() !void {
             // down, without getting our hands dirty in the interals of Shovels
             // Input object.
             if (in.eqlDescription("escape") or in.eqlDescription("q")) {
-                loop = false;
+                running = false;
                 break;
-            } else if (in.eqlDescription("arrow-down") or in.eqlDescription("C-n") or in.eqlDescription("j")) {
-                if (cursor < 3) {
+            }
+
+            if (in.eqlDescription("arrow-down") or in.eqlDescription("C-n") or in.eqlDescription("j")) {
+                if (cursor < entries.len - 1) {
                     cursor += 1;
-                    try render();
+                    needs_update = true;
                 }
             } else if (in.eqlDescription("arrow-up") or in.eqlDescription("C-p") or in.eqlDescription("k")) {
                 cursor -|= 1;
-                try render();
+                needs_update = true;
+            } else if (in.eqlDescription("g")) {
+                needs_update = true;
             }
         }
     }
 }
 
-fn render() !void {
+var needs_update: bool = true;
+var needs_resize: bool = true;
+
+/// Render to the given screen.
+fn blit(s: *shovel.Screen, width: u16) !void {
     var buf: [4096]u8 = undefined;
-    var rc = try term.getRenderContext(&buf);
-    defer rc.done() catch {};
+    var wr = s.writerFull(&buf, .truncate, .unicode);
+    const w = &wr.interface;
 
-    try rc.clear();
-
-    if (term.width < 6) {
-        try rc.setStyle(.{ .fg = .red, .attrs = .{ .bold = true } });
-        try rc.writeAllWrapping("Terminal too small!");
+    if (width < 20) {
+        wr.clear();
+        try wr.setStyle(.{ .fg = .red, .attrs = .{ .bold = true } });
+        try w.writeAll("Terminal too small!");
+        try wr.flush();
         return;
     }
 
-    try rc.moveCursorTo(0, 0);
-    try rc.setStyle(.{ .fg = .green, .attrs = .{ .reverse = true } });
+    try wr.setCursor(0, 0);
+    try wr.setStyle(.{ .fg = .green, .attrs = .{ .reverse = true } });
 
-    // The CellWriter helps us avoid writing more than the terminal
-    // is wide. It exposes a normal writer interface you can use with any
-    // function that integrates with that, such as print(), write() and writeAll().
-    // The CellWriter.pad() function will fill the remaining space
-    // with whitespace padding.
-    var cw = rc.cellWriter(term.width);
-    try cw.interface.writeAll(" shovel example program: menu");
-    try cw.pad();
+    try w.writeAll(" shovel example program: menu");
+    try wr.styleToEol();
 
-    try rc.moveCursorTo(1, 0);
-    try rc.setStyle(.{ .fg = .red, .attrs = .{ .bold = true } });
-    cw = rc.cellWriter(term.width);
-    try cw.interface.writeAll(" Up and Down arrows to select, q to exit.");
-    try cw.finish(); // No need to pad here, since there is no background.
+    try wr.setCursor(1, 0);
+    try wr.setStyle(.{ .fg = .red, .attrs = .{ .bold = true } });
+    try w.writeAll(" Up and Down arrows to select, q to exit.");
 
-    const entry_width = @min(term.width - 2, 8);
-    try menuEntry(&rc, " foo", 3, entry_width);
-    try menuEntry(&rc, " bar", 4, entry_width);
-    try menuEntry(&rc, " baz", 5, entry_width);
-    try menuEntry(&rc, " →µ←", 6, entry_width);
+    try wr.setRectClamp(.init(1, 3, 10, @intCast(entries.len)));
+
+    for (entries, 0..) |str, y| {
+        try wr.setCursor(@intCast(y), 1);
+        try wr.setStyle(.{ .fg = .blue, .attrs = .{ .reverse = cursor == y } });
+        try w.print(" {s}", .{str});
+        try wr.styleToEol();
+    }
+
+    try w.flush();
 }
 
-fn menuEntry(rc: anytype, name: []const u8, row: u16, width: u16) !void {
-    try rc.moveCursorTo(row, 2);
-    try rc.setStyle(.{ .fg = .blue, .attrs = .{ .reverse = (cursor == row - 3) } });
-    var cw = rc.cellWriter(width - 1);
-    defer cw.pad() catch {};
-    try cw.interface.writeAll(name);
-}
-
+/// This signal is sent to terminal applications when they are resized.
+///
+/// Signal handles can be called at ANY point in your programs execution, so you should never call
+/// functions that depend on application state. Instead, you should set a global flack that you
+/// check in your main loop.
 fn handleSigWinch(_: c_int) callconv(.c) void {
-    term.fetchSize() catch {};
-    render() catch {};
+    needs_resize = true;
+    needs_update = true;
 }
 
 /// Custom panic handler, so that we can try to cook the terminal on a crash,
 /// as otherwise all messages will be mangled.
-fn panic(msg: []const u8, ret_addr: ?usize) noreturn {
+fn panicFn(msg: []const u8, ret_addr: ?usize) noreturn {
     @branchHint(.cold);
     term.cook() catch {};
     std.debug.defaultPanic(msg, ret_addr);
 }
 
-pub const Panic = std.debug.FullPanic(panic);
+pub const panic = std.debug.FullPanic(panicFn);

@@ -7,7 +7,7 @@ const Writer = std.io.Writer;
 const zg = @import("zg");
 
 const GraphemeClusteringMode = @import("main.zig").GraphemeClusteringMode;
-const graphemeWidth = @import("main.zig").graphemeWidth;
+const graphemeWidth = @import("main.zig").stringWidth;
 const wcWidth = @import("util.zig").wcWidth;
 
 pub const trunc_str = "…";
@@ -59,7 +59,7 @@ pub fn finish(tcw: *TerminalCellWriter) !void {
     try tcw.interface.flush();
     if (tcw.character_buf.len > 0) {
         const slice = tcw.character_buf.constSlice();
-        const width = graphemeWidth(slice, .grapheme);
+        const width: u32 = @intCast(graphemeWidth(slice, .grapheme, .{}).width);
         try tcw.child.writeAll(slice);
         tcw.remaining_width -= width;
     }
@@ -266,7 +266,7 @@ fn writeMode2027(tcw: *TerminalCellWriter, bytes: []const u8) !void {
         const grapheme_slice = grapheme.bytes(bytes[iter.i..]);
         // Take the width of the first non-zero width codepoint as the width of the whole grapheme
         // cluster. TODO: Special case variation selectors!
-        const width: u2 = @intCast(graphemeWidth(grapheme_slice, .grapheme));
+        const width: u2 = @intCast(graphemeWidth(grapheme_slice, .grapheme, .{}).width);
         if (width == 0) continue;
 
         const end = try tcw.writeCharacter(grapheme_slice, width);

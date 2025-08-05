@@ -14,7 +14,12 @@ pub fn main() !void {
     try shovel.initUnicodeData(allocator);
     defer shovel.deinitUnicodeData(allocator);
 
-    var term = try shovel.Term.init(allocator, .{});
+    var term = try shovel.Term.init(allocator, .{
+        .terminfo = .{
+            .fallback = .@"xterm-256color",
+            .fallback_mode = .last_resort,
+        },
+    });
     defer term.deinit(allocator);
 
     try term.uncook(allocator, .{});

@@ -1,6 +1,6 @@
-// TODO: This whole thing kinda sucks
+// TODO: Store index + length for strings instead of using zero termination
 // TODO: Investigate using terminfo for mouse support
-//       Validate all sequences on load
+// TODO: Validate all sequences on load
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -18,19 +18,256 @@ pub const max_file_length = 32768;
 
 const TermInfo = @This();
 
-input_map: ?input.InputMap = null,
+input_map: input.InputMap = .init(),
 
-names: []const u8 = &.{},
-string_table: []const u8 = &.{},
+names: []u8 = &.{},
+string_table: []u8 = &.{},
 ext_string_table: []u8 = &.{},
 
 flags: std.EnumArray(Flag, bool) = std.EnumArray(Flag, bool).initFill(false),
 numbers: std.EnumArray(Number, i32) = std.EnumArray(Number, i32).initFill(-1),
+
+// TODO: Store larger indexes, as merging terminfo definitions could in theory overflow
+//       maxInt(i16).
 strings: std.EnumArray(String, i16) = std.EnumArray(String, i16).initFill(-1),
 
 ext_flags: std.StringHashMapUnmanaged(void) = .empty,
 ext_nums: std.StringHashMapUnmanaged(u31) = .empty,
+// TODO: Store larger indexes, as we add the setrgbf/setrgbb strings in certain cases which may
+//       exceed maxInt(u15).
 ext_strs: std.StringHashMapUnmanaged(u15) = .empty,
+
+/// Whether or not the target terminal conforms to the ECMA-48 standard. This does not affect what
+/// capabilities are reported, which are solely based on terminfo definitions. This field is only
+/// ever set manually by the user of the library, as there is no way to actually detect this.
+///
+/// If set to true, some functions in Shovel that take a `TermInfo` parameter will use hardcoded
+/// ECMA-48 escape sequences instead of the terminfo ones. This allows, for example, setting
+/// colours/attributes in fewer bytes, and resetting foreground/background colours individually (as
+/// terminfo does not expose a sequence to reset them individually, but the ECMA-48 standard does.)
+///
+/// For terminals that support ECMA-48 sequences, setting this to true does not alter behaviour and
+/// simply allows some small optimizations.
+///
+/// For terminals that do not support ECMA-48 sequences, setting this to true may break rendering.
+///
+/// Note that virtually every terminal emulator in use supports ECMA-48 sequences, but this is still
+/// disabled by default for slightly increased portability.
+ecma48: bool = false,
+
+/// How this terminal supports truecolour.
+truecolour: TrueColour = .none,
+
+pub const TrueColour = enum {
+    /// No truecolour support.
+    none,
+    /// The setrgbf and setrgbb extended string capabilities are defined.
+    setrgb,
+    /// Truecolour sequences are hardcoded as '\x1b[38;2;r;g;bm' and '\x1b[48;2;r;g;bm'.
+    /// This is the case when the `Tc` extended flag is defined and the setrgbf and setrgbb
+    /// capabilities are not defined.
+    hardcoded,
+    /// The setaf and setab capabilities support 24-bit colour. This is the case when the `RGB`
+    /// extended flag is defined.
+    ///
+    /// This is braindead because the 256 colour palette aliases valid 24-bit colour codes, and how
+    /// that is handled is implementation defined! Most terminfo entries special case the first 8
+    /// colours as typical, and treat any fg/bg colour >= 8 as a 24-bit colour code. But some (like
+    /// xterm-direct256) special case the first 256 colours instead, meaning `setaf 0x000000F0`
+    /// could either be the 240th colour in the 256 colour table OR the rgb colour #0000F0.
+    ///
+    /// In practice every terminfo definition with this uses the same escape sequence as the
+    /// hardcoded variant here, so we COULD just use that. But that would mean hardcoding
+    /// the setaf/setab capabilities too, which I don't wanna do. So the solution is simple:
+    /// proceed as terminfo intends, and if any users complain tell them that their terminal is
+    /// configured incorrectly and uses a broken-by-design colour mechanism. Luckily it seems that
+    /// no terminal author is stupid enough to willingly enable this in their default terminfo
+    /// definitions, though terminfo is for some reason insistent on shipping `-direct` versions
+    /// of terminfo files that do this. Thankfully they're not used.
+    ///
+    /// See the discussion under
+    /// [this](https://github.com/kovidgoyal/kitty/commit/18fe2e8dfa34038aabd5c3a2fdb3624e2b27932a)
+    /// commit.
+    lunacy,
+};
+
+pub const hardcoded_setrgbf = "\x1b[38;2;%p1%d;%p2%d;%p3%dm";
+pub const hardcoded_setrgbb = "\x1b[48;2;%p1%d;%p2%d;%p3%dm";
+
+/// Sets the setrgbf and setrgbb extended strings to hardcoded values.
+// pub fn hardcodeTruecolor(ti: *TermInfo, gpa: std.mem.Allocator) !void {
+//     const extra_len = hardcoded_setrgbb.len + 1 + hardcoded_setrgbb.len + 1;
+//     if (ti.ext_string_table.len + extra_len > std.math.maxInt(u15)) {
+//         @branchHint(.cold);
+//         return error.StringTableTooLarge;
+//     }
+
+//     try ti.ext_strs.ensureUnusedCapacity(gpa, 2);
+//     var list: std.ArrayListUnmanaged(u8) = .fromOwnedSlice(ti.ext_string_table);
+//     try list.ensureTotalCapacityPrecise(gpa, list.capacity + extra_len);
+//     errdefer comptime unreachable;
+
+//     const f_index: u15 = @intCast(list.items.len);
+//     list.appendSliceAssumeCapacity(hardcoded_setrgbf);
+//     list.appendAssumeCapacity(0);
+
+//     const b_index: u15 = @intCast(list.items.len);
+//     list.appendSliceAssumeCapacity(hardcoded_setrgbb);
+//     list.appendAssumeCapacity(0);
+
+//     ti.ext_strs.putAssumeCapacity("setrgbf", f_index);
+//     ti.ext_strs.putAssumeCapacity("setrgbb", b_index);
+
+//     assert(list.items.len == list.capacity);
+//     ti.ext_string_table = list.items;
+// }
+
+/// Queries the current terminal for truecolour support. If found, sets the `setrgbf` and `setrgbb`
+/// extended strings.
+pub fn queryTrueColour(ti: *TermInfo) void {
+    if (ti.getExtendedString("setrgbf") != null and ti.getExtendedString("setrgbb") != null) {
+        ti.truecolour = .setrgb;
+    } else if (ti.getExtendedFlag("RGB")) {
+        ti.truecolour = .lunacy;
+    } else if (ti.getExtendedFlag("Tc")) {
+        ti.truecolour = .hardcoded;
+    } else if (std.posix.getenv("COLORTERM")) |colorterm| {
+        if (std.mem.eql(u8, colorterm, "truecolor") or std.mem.eql(u8, colorterm, "24bit")) {
+            ti.truecolour = .hardcoded;
+        }
+    }
+
+    std.log.info("Truecolour set to {t}", .{ti.truecolour});
+
+    // if (ti.getNumberCapability(.max_colors)) |colors| {
+    //     if (colors >= 1 << 24) {
+    //         // So we don't have the `RGB` flag, but we DO support at least 2^24 colours... There's
+    //         // no terminfo definitions that do this, so I have no idea what the behaviour should be.
+    //         // It's commented out for now, which shouldn't cause any problems.
+    //         return;
+    //     }
+    // }
+}
+
+/// For no fallback, use `Fallback.dumb`.
+pub const Fallback = union(enum) {
+    /// When a terminfo file can't be loaded, fall back to a terminfo file from the user's system.
+    /// Tries each item successively until a terminfo definition is successfully found. This is
+    /// interpreted the same as the TERM environment variable.
+    terms: []const []const u8,
+
+    /// Source bytes of a custom terminfo definition to fall back to.
+    custom_source: []const u8,
+
+    // manual_overrides: []const CapabilityOverride,
+
+    pub const CapabilityOverride = union(enum) {
+        flag: struct { Flag, bool },
+        number: struct { Number, i32 },
+        string: struct { String, []const u8 },
+        extended_flag: struct { []const u8, bool },
+        extended_number: struct { []const u8, i32 },
+        extended_string: struct { []const u8, []const u8 },
+    };
+
+    pub const @"xterm-256color": Fallback = .{
+        .custom_source = @embedFile("xterm-256color"),
+    };
+
+    pub const dumb: Fallback = .{
+        .custom_source = @embedFile("dumb"),
+    };
+
+    pub fn getTermInfo(f: Fallback, gpa: std.mem.Allocator) !TermInfo {
+        switch (f) {
+            .terms => |terms| {
+                for (terms) |term| {
+                    return getTermInfoForTerm(gpa, term) catch continue;
+                }
+                return error.NoTermInfo;
+            },
+            .custom_source => |src| return .parseBytes(gpa, src),
+        }
+    }
+};
+
+pub const FallbackMode = enum {
+    /// Only use the fallback terminfo file when a terminfo file cannot be found for the current
+    /// TERM environment variable.
+    last_resort,
+    /// Only use the specified fallback terminfo, ignoring the TERM environment variable.
+    always,
+
+    // Load the terminfo for TERM and use the fallback for any sequences that are not defined.
+    merge,
+};
+
+/// Merge two terminfo definitions together. Any capabilites available in `src` that are not
+/// available in `dest` will be added to `dest`.
+pub fn merge(gpa: std.mem.Allocator, dest: *TermInfo, src: *const TermInfo) !void {
+    var extra_len: usize = 0;
+    for (&dest.strings.values, &src.strings.values) |*d, s| {
+        if (d.* < 0 and s >= 0) {
+            const ptr: [*:0]const u8 = @ptrCast(&src.string_table[@intCast(s)]);
+            extra_len += std.mem.len(ptr) + 1;
+        }
+    }
+
+    const buffer = dest.names.ptr[0 .. dest.names.len + dest.string_table.len];
+    const new_buffer = try gpa.realloc(buffer, buffer.len + extra_len);
+    errdefer comptime unreachable;
+
+    for (&dest.flags.values, &src.flags.values) |*d, s|
+        d.* = d.* or s;
+
+    for (&dest.numbers.values, &src.numbers.values) |*d, s| {
+        if (d.* < 0 and s >= 0) d.* = s;
+    }
+
+    // For appending to the string table
+    var list: std.ArrayListUnmanaged(u8) = .initBuffer(new_buffer);
+    list.items.len = buffer.len;
+
+    for (&dest.strings.values, &src.strings.values) |*d, s| {
+        if (d.* < 0 and s >= 0) {
+            // Need to append to the destination's string table
+            const index: i16 = @intCast(list.items.len - dest.names.len);
+            var ptr: [*:0]const u8 = @ptrCast(&src.string_table[@intCast(s)]);
+            while (ptr[0] != 0) : (ptr += 1)
+                list.appendAssumeCapacity(ptr[0]);
+            list.appendAssumeCapacity(0);
+            d.* = index;
+        }
+    }
+    assert(list.items.len == list.capacity);
+    dest.names = list.items[0..dest.names.len];
+    dest.string_table = list.items[dest.names.len..];
+}
+
+pub fn getTermInfoForTerm(gpa: Allocator, term: []const u8) !TermInfo {
+    var buf: [8192]u8 = undefined;
+
+    var iter: TermInfo.FileIter = .{ .term = term };
+    while (iter.next()) |file| {
+        defer file.close();
+
+        var r = file.readerStreaming(&buf);
+        return parse(gpa, &r.interface) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.ReadFailed => {
+                log.info("Could not parse terminfo file, skipping ({})", .{r.err.?});
+                continue;
+            },
+            error.InvalidFormat => {
+                log.info("Found invalid terminfo file, skipping", .{});
+                continue;
+            },
+        };
+    }
+
+    log.info("Could not find terminfo description for '{s}'", .{term});
+    return error.NoTermInfo;
+}
 
 fn searchTermInfoDirectory(term: []const u8) ?std.fs.File {
     assert(term.len > 0);
@@ -188,15 +425,14 @@ pub fn openTermInfoFile(term: []const u8) ?std.fs.File {
         searchDefaultDirs(term);
 }
 
-pub fn destroy(ti: *TermInfo, allocator: Allocator) void {
-    if (ti.input_map) |*map| map.deinit(allocator);
-    allocator.free(ti.names);
-    allocator.free(ti.string_table);
-    allocator.free(ti.ext_string_table);
-    ti.ext_flags.deinit(allocator);
-    ti.ext_nums.deinit(allocator);
-    ti.ext_strs.deinit(allocator);
-    allocator.destroy(ti);
+pub fn deinit(ti: *TermInfo, gpa: Allocator) void {
+    ti.input_map.deinit(gpa);
+    const buffer = ti.names.ptr[0 .. ti.names.len + ti.string_table.len];
+    gpa.free(buffer);
+    gpa.free(ti.ext_string_table);
+    ti.ext_flags.deinit(gpa);
+    ti.ext_nums.deinit(gpa);
+    ti.ext_strs.deinit(gpa);
 }
 
 const keys = [_]struct { []const u8, input.Input }{
@@ -283,25 +519,22 @@ const keys = [_]struct { []const u8, input.Input }{
 };
 
 // TODO: Test this
-pub fn createInputMap(
-    ti: *TermInfo,
-    allocator: Allocator,
-) !input.InputMap {
+pub fn populateInputMap(ti: *TermInfo, gpa: Allocator) !void {
     @setEvalBranchQuota(100_000);
     const print = std.fmt.comptimePrint;
 
     var map = input.InputMap.init();
-    errdefer map.deinit(allocator);
+    errdefer map.deinit(gpa);
 
     if (ti.getStringCapability(.delete_character)) |str| {
-        map.put(allocator, str, .{ .content = .delete }) catch |err| switch (err) {
+        map.put(gpa, str, .{ .content = .delete }) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             error.IsPrefix => {},
         };
     }
 
     if (ti.getStringCapability(.cursor_left)) |str| {
-        map.put(allocator, str, .{ .content = .backspace }) catch |err| switch (err) {
+        map.put(gpa, str, .{ .content = .backspace }) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             error.IsPrefix => {},
         };
@@ -312,7 +545,7 @@ pub fn createInputMap(
         const name = comptime print("key_{s}", .{key_name});
         const tag = comptime std.meta.stringToEnum(String, name).?;
         if (ti.getStringCapability(tag)) |str| {
-            map.put(allocator, str, in) catch |err| switch (err) {
+            map.put(gpa, str, in) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 error.IsPrefix => {},
             };
@@ -323,7 +556,7 @@ pub fn createInputMap(
         const name = comptime print("key_f{d}", .{i});
         const tag = comptime std.meta.stringToEnum(String, name).?;
         if (ti.getStringCapability(tag)) |str| {
-            map.put(allocator, str, .{
+            map.put(gpa, str, .{
                 .content = .{ .function = i },
             }) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
@@ -335,16 +568,21 @@ pub fn createInputMap(
     // TODO: Handle `key_mouse`?
 
     ti.input_map = map;
-    return map;
 }
 
-pub const ParseError = error{
-    InvalidFormat,
-} || Allocator.Error;
+pub const ParseError = error{InvalidFormat} || Allocator.Error;
 
-pub fn parse(allocator: Allocator, bytes: []const u8) ParseError!*TermInfo {
-    return parseInternal(allocator, bytes) catch |err| switch (err) {
-        error.ReadFailed, error.EndOfStream => error.InvalidFormat,
+pub fn parse(gpa: Allocator, r: *std.io.Reader) !TermInfo {
+    return parseInternal(gpa, r) catch |err| switch (err) {
+        error.EndOfStream => error.InvalidFormat,
+        else => |e| e,
+    };
+}
+
+pub fn parseBytes(gpa: Allocator, bytes: []const u8) ParseError!TermInfo {
+    var r: std.io.Reader = .fixed(bytes);
+    return parse(gpa, &r) catch |err| switch (err) {
+        error.ReadFailed => unreachable,
         else => |e| e,
     };
 }
@@ -362,13 +600,7 @@ fn validateHeader(h: anytype) bool {
     return true;
 }
 
-fn parseInternal(allocator: Allocator, bytes: []const u8) !*TermInfo {
-    var r: std.io.Reader = .fixed(bytes);
-
-    const ret = try allocator.create(TermInfo);
-    ret.* = .{};
-    errdefer ret.destroy(allocator);
-
+fn parseInternal(gpa: Allocator, r: *std.io.Reader) !TermInfo {
     const Header = extern struct {
         format: Format,
         names_len: u16,
@@ -378,26 +610,28 @@ fn parseInternal(allocator: Allocator, bytes: []const u8) !*TermInfo {
         string_table_len: u16,
     };
 
-    const ExtendedHeader = extern struct {
-        flags_len: u16,
-        nums_len: u16,
-        strings_len: u16,
-        string_table_count: u16,
-        string_table_len: u16,
-    };
-
     const h = try r.takeStruct(Header, .little);
     if (h.format != .legacy and h.format != .extended)
         return error.InvalidFormat;
+    const names_len: usize = h.names_len -| 1;
+
+    var ret: TermInfo = .{};
+    errdefer ret.deinit(gpa);
 
     const flags_dest = ret.flags.values[0..h.flags_len];
     const nums_dest = ret.numbers.values[0..h.nums_len];
     const strings_dest = ret.strings.values[0..h.strings_len];
 
-    const names = try r.take(h.names_len);
+    const buffer = try gpa.alloc(u8, names_len + h.string_table_len);
+    ret.names = buffer[0..names_len];
+    ret.string_table = buffer[names_len..];
+
+    try r.readSliceAll(ret.names);
+    try r.discardAll(1); // Null terminator
 
     try r.readSliceAll(@ptrCast(flags_dest));
-    try r.discardAll((h.names_len + h.flags_len) % 2);
+    try r.discardAll((@as(u32, h.names_len) + h.flags_len) % 2);
+
     assert(r.seek % 2 == 0);
 
     switch (h.format) {
@@ -408,10 +642,10 @@ fn parseInternal(allocator: Allocator, bytes: []const u8) !*TermInfo {
     }
 
     try r.readSliceEndian(i16, strings_dest, .little);
-    const string_table = try r.take(h.string_table_len);
+    try r.readSliceAll(ret.string_table);
 
-    ret.names = try allocator.dupe(u8, names[0 .. names.len - 1]);
-    ret.string_table = try allocator.dupe(u8, string_table);
+    if (ret.string_table[ret.string_table.len - 1] != 0)
+        return error.InvalidFormat;
 
     if (r.end - r.seek < 10)
         return ret;
@@ -419,6 +653,14 @@ fn parseInternal(allocator: Allocator, bytes: []const u8) !*TermInfo {
     // Have more bytes, continue parsing extended format
 
     try r.discardAll(h.string_table_len % 2);
+
+    const ExtendedHeader = extern struct {
+        flags_len: u16,
+        nums_len: u16,
+        strings_len: u16,
+        string_table_count: u16,
+        string_table_len: u16,
+    };
 
     const eh = try r.takeStruct(ExtendedHeader, .little);
 
@@ -431,7 +673,8 @@ fn parseInternal(allocator: Allocator, bytes: []const u8) !*TermInfo {
     };
 
     const ext_flags: []const bool = @ptrCast(try r.take(eh.flags_len));
-    try r.discardAll(eh.flags_len % 2);
+    if (eh.flags_len % 2 == 1)
+        try r.discardAll(1);
 
     const ext_nums_bytes = try r.take(eh.nums_len * num_size);
     const ext_strings_bytes = try r.take(eh.strings_len * 2);
@@ -440,10 +683,10 @@ fn parseInternal(allocator: Allocator, bytes: []const u8) !*TermInfo {
     try r.discardAll(2 * (eh.flags_len + eh.nums_len + eh.strings_len));
 
     // TODO: Merge individual allocations together
-    try ret.ext_flags.ensureTotalCapacity(allocator, eh.flags_len);
-    try ret.ext_nums.ensureTotalCapacity(allocator, eh.nums_len);
-    try ret.ext_strs.ensureTotalCapacity(allocator, eh.strings_len);
-    ret.ext_string_table = try allocator.dupe(u8, try r.take(eh.string_table_len));
+    try ret.ext_flags.ensureTotalCapacity(gpa, eh.flags_len);
+    try ret.ext_nums.ensureTotalCapacity(gpa, eh.nums_len);
+    try ret.ext_strs.ensureTotalCapacity(gpa, eh.strings_len);
+    ret.ext_string_table = try gpa.dupe(u8, try r.take(eh.string_table_len));
 
     var strings_iter = std.mem.splitScalar(u8, ret.ext_string_table, 0);
     for (std.mem.bytesAsSlice(i16, ext_strings_bytes)) |string_index| {
@@ -1202,6 +1445,21 @@ pub fn validateParamSequence(sequence: []const u8, param_count: usize) ParamSequ
 
 pub const FormatError = error{InvalidFormat};
 
+/// Write the string capability to writer. If the string capability is not defined, does nothing.
+pub fn write(ti: *const TermInfo, w: *std.io.Writer, cap: String, args: anytype) !void {
+    if (ti.getStringCapability(cap)) |str| {
+        try writeParamSequence(str, w, args);
+    }
+}
+
+/// Write the extended string capability to writer. If the string capability is not defined, does
+/// nothing.
+pub fn writeExt(ti: *const TermInfo, w: *std.io.Writer, key: []const u8, args: anytype) !void {
+    if (ti.getExtendedString(key)) |str| {
+        try writeParamSequence(str, w, args);
+    }
+}
+
 /// Writes a paramterized escape sequence to the given writer, with the specified arguments.
 pub fn writeParamSequence(str: []const u8, writer: *std.io.Writer, args: anytype) !void {
     // TODO: Move the validation from here to the loading of terminfo definitions.
@@ -1221,9 +1479,10 @@ pub fn writeParamSequence(str: []const u8, writer: *std.io.Writer, args: anytype
         break :blk params;
     };
 
-    var stack: std.BoundedArray(Parameter, 123) = .{};
-    var dynamic_variables: [26]Parameter = [_]Parameter{.{ .number = 0 }} ** 26;
-    var static_variables: [26]Parameter = [_]Parameter{.{ .number = 0 }} ** 26;
+    var buf: [128]Parameter = undefined;
+    var stack: std.ArrayListUnmanaged(Parameter) = .initBuffer(&buf);
+    var dynamic_variables: [26]Parameter = @splat(.{ .number = 0 });
+    var static_variables: [26]Parameter = @splat(.{ .number = 0 });
 
     var i: usize = 0;
     while (i < str.len) : (i += 1) {
@@ -1471,18 +1730,18 @@ pub fn writeParamSequence(str: []const u8, writer: *std.io.Writer, args: anytype
 const terminfo = @embedFile("descriptions/s/st-256color").*;
 
 test "Invalid" {
-    try expectError(error.InvalidFormat, parse(std.testing.allocator, ""));
-    try expectError(error.InvalidFormat, parse(std.testing.allocator, "some invalid text"));
+    try expectError(error.InvalidFormat, parseBytes(std.testing.allocator, ""));
+    try expectError(error.InvalidFormat, parseBytes(std.testing.allocator, "some invalid text"));
     var buf = terminfo;
-    const p = try parse(std.testing.allocator, &buf);
-    p.destroy(std.testing.allocator);
+    var p = try parseBytes(std.testing.allocator, &buf);
+    p.deinit(std.testing.allocator);
     buf[0] = 10;
-    try expectError(error.InvalidFormat, parse(std.testing.allocator, &buf));
+    try expectError(error.InvalidFormat, parseBytes(std.testing.allocator, &buf));
 }
 
 test "Boolean capabilities" {
-    const res = try parse(std.testing.allocator, &terminfo);
-    defer res.destroy(std.testing.allocator);
+    var res = try parseBytes(std.testing.allocator, &terminfo);
+    defer res.deinit(std.testing.allocator);
     try expectEqual(false, res.flags.get(.auto_left_margin));
     try expectEqual(true, res.flags.get(.auto_right_margin));
     try expectEqual(false, res.flags.get(.no_esc_ctlc));
@@ -1533,8 +1792,8 @@ fn expectNumber32(expected: u32, actual: i32) !void {
 }
 
 test "Number capabilities" {
-    const res = try parse(std.testing.allocator, &terminfo);
-    defer res.destroy(std.testing.allocator);
+    var res = try parseBytes(std.testing.allocator, &terminfo);
+    defer res.deinit(std.testing.allocator);
 
     // Hex values taken from running `hexdump -C` on the terminfo file
     try expectNumber32(0x0050, res.numbers.get(.columns));
@@ -1575,8 +1834,8 @@ test "Number capabilities" {
 }
 
 test "String capabilities" {
-    const res = try parse(std.testing.allocator, &terminfo);
-    defer res.destroy(std.testing.allocator);
+    var res = try parseBytes(std.testing.allocator, &terminfo);
+    defer res.deinit(std.testing.allocator);
 
     // Hex values taken from running `hexdump -C` on the terminfo file
     try expectNumber(0x0000, res.strings.get(.back_tab));
@@ -1646,16 +1905,16 @@ fn expectExtendedString(ti: *TermInfo, expected: []const u8, name: []const u8) !
 
 test "st" {
     const x = @embedFile("descriptions/s/st-256color");
-    const res = try parse(std.testing.allocator, x);
-    defer res.destroy(std.testing.allocator);
+    var res = try parseBytes(std.testing.allocator, x);
+    defer res.deinit(std.testing.allocator);
 
     try expectEqualSlices(u8, "\x1b[%p1%d q", res.getExtendedString("Ss").?);
 }
 
 test "tmux" {
     const x = @embedFile("descriptions/t/tmux");
-    const res = try parse(std.testing.allocator, x);
-    defer res.destroy(std.testing.allocator);
+    var res = try parseBytes(std.testing.allocator, x);
+    defer res.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("tmux|tmux terminal multiplexer", res.names);
 
@@ -2237,8 +2496,8 @@ test "tmux" {
 
 test "xterm" {
     const x = @embedFile("descriptions/x/xterm");
-    const res = try parse(std.testing.allocator, x);
-    defer res.destroy(std.testing.allocator);
+    var res = try parseBytes(std.testing.allocator, x);
+    defer res.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("xterm|xterm terminal emulator (X Window System)", res.names);
 

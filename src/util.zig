@@ -1,6 +1,26 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+pub fn truncatePartialCodepoint(string: []const u8) error{InvalidUtf8}!usize {
+    var i = string.len;
+    while (i > 0) {
+        i -= 1;
+        if (string[i] & 0xC0 != 0x80) break;
+    }
+
+    const remaining_bytes = string.len - i;
+    if (remaining_bytes > 4) return error.InvalidUtf8;
+    assert(remaining_bytes <= 4); // Invalid UTF-8
+
+    const expected_remaining = std.unicode.utf8ByteSequenceLength(string[i]) catch
+        return error.InvalidUtf8;
+
+    if (remaining_bytes > expected_remaining)
+        return error.InvalidUtf8;
+
+    return if (remaining_bytes < expected_remaining) i else string.len;
+}
+
 pub fn wcWidth(cp: u21) u2 {
     const width = @import("zg").display_width.codePointWidth(cp);
     return switch (width) {

@@ -5,6 +5,7 @@
     .paths = .{
         "src",
         "example",
+        "terminfo",
         "README.md",
         "build.zig",
         "build.zig.zon",
@@ -12,12 +13,12 @@
     },
     .dependencies = .{
         .critbit = .{
-            .url = "git+https://github.com/efjimm/critbit-zig?ref=master#27ebd1a081117c4ebf09a9961b5a026ffb5a09b2",
-            .hash = "critbit-0.0.1-In1cd04xAAA6Dg9IYV_CGyDi3XghWEanNc9qIe3FlQc5",
+            .url = "git+https://github.com/efjimm/critbit-zig?ref=master#23e22d86d5811822919506e2e0a5597b56254b4d",
+            .hash = "critbit-0.0.1-In1cd8o0AADD5COO2u4_vLUOI3UERCp-i0zYKn4UBZ-K",
         },
         .zg = .{
-            .url = "git+https://github.com/efjimm/zg?ref=master#16355ce3da13f24d13200f834fab50c12b7e61ee",
-            .hash = "zg-0.14.0-oGqU3PmnsgLOl4mt6T8xa6SeOYOYkSfvm13csnZTLonP",
+            .url = "git+https://github.com/efjimm/zg?ref=master#793baa10ea27858795186a08221426194c232c81",
+            .hash = "zg-0.14.0-oGqU3HCpsgLabb__6gNV5SIHTdf9ojxZUW_JtImLh15v",
         },
     },
 }

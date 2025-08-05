@@ -12,6 +12,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+// TODO: Rework all of this
+
 const std = @import("std");
 const fmt = std.fmt;
 const mem = std.mem;

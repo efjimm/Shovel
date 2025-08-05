@@ -16,19 +16,21 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const posix = std.posix;
+pub const WriteError = std.posix.WriteError;
 const builtin = @import("builtin");
 const mode = @import("builtin").mode;
 
 const zg = @import("zg");
 
-const TerminalCellWriter = @import("TerminalCellWriter.zig");
 const GraphemeClusteringMode = @import("main.zig").GraphemeClusteringMode;
 const input = @import("input.zig");
 const InputParser = input.InputParser;
 const log = @import("log.zig");
+const Screen = @import("Screen.zig");
 const spells = @import("spells.zig");
 pub const CursorShape = spells.CursorShape;
 const Style = @import("Style.zig");
+const TerminalCellWriter = @import("TerminalCellWriter.zig");
 const TermInfo = @import("TermInfo.zig");
 
 const Term = @This();
@@ -39,9 +41,24 @@ const UncookOptions = struct {
     request_mode_2027: bool = true,
 };
 
-const TermConfig = struct {
-    use_terminfo: bool = true,
-    terminfo_inputs: bool = true,
+pub const TermInfoConfig = struct {
+    /// The terminfo definition to fall back to depending on the fallback mode.
+    fallback: TermInfo.Fallback,
+    fallback_mode: TermInfo.FallbackMode,
+
+    pub const no_fallback: TermInfoConfig = .{
+        .fallback = .dumb,
+        .fallback_mode = .last_resort,
+    };
+
+    pub const disable: TermInfoConfig = .{
+        .fallback = .dumb,
+        .fallback_mode = .always,
+    };
+};
+
+pub const TermConfig = struct {
+    terminfo: TermInfoConfig,
 
     /// How to handle 24 bit color support
     truecolour: enum {
@@ -77,14 +94,12 @@ cursor_shape: CursorShape = .unknown,
 codepoint: [4]u8 = undefined,
 codepoint_len: u3 = 0,
 
-terminfo: ?*TermInfo = null,
+terminfo: *TermInfo,
 
 /// True if the kitty keyboard protocol is active.
 kitty_enabled: bool = false,
 
 grapheme_clustering_mode: GraphemeClusteringMode = .codepoint,
-
-truecolor_enabled: bool = false,
 
 /// See `input.inputParser`
 pub fn inputParser(term: *Term, bytes: []const u8) InputParser {
@@ -116,138 +131,124 @@ pub const InitError = error{
     Unexpected,
 } || Allocator.Error;
 
-pub fn init(allocator: Allocator, term_config: TermConfig) InitError!Term {
-    var ret = Term{
-        .tty = posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
-            // None of these are reachable with the flags we pass to posix.open
-            error.DeviceBusy,
-            error.FileLocksNotSupported,
-            error.NoSpaceLeft,
-            error.NotDir,
-            error.PathAlreadyExists,
-            error.WouldBlock,
-            error.NetworkNotFound,
-            error.InvalidWtf8,
-            error.ProcessNotFound,
-            => unreachable,
+pub fn init(gpa: Allocator, conf: TermConfig) InitError!Term {
+    const tty = posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
+        // None of these are reachable with the flags we pass to posix.open
+        error.DeviceBusy,
+        error.FileLocksNotSupported,
+        error.NoSpaceLeft,
+        error.NotDir,
+        error.PathAlreadyExists,
+        error.WouldBlock,
+        error.NetworkNotFound,
+        error.InvalidWtf8,
+        error.ProcessNotFound,
+        => unreachable,
 
-            error.AccessDenied,
-            error.BadPathName,
-            error.FileBusy,
-            error.FileNotFound,
-            error.FileTooBig,
-            error.InvalidUtf8,
-            error.IsDir,
-            error.NameTooLong,
-            error.NoDevice,
-            error.ProcessFdQuotaExceeded,
-            error.SymLinkLoop,
-            error.SystemFdQuotaExceeded,
-            error.SystemResources,
-            error.PermissionDenied,
-            error.Unexpected,
-            => |e| return e,
-        },
-        .terminfo = null,
+        error.AccessDenied,
+        error.BadPathName,
+        error.FileBusy,
+        error.FileNotFound,
+        error.FileTooBig,
+        error.InvalidUtf8,
+        error.IsDir,
+        error.NameTooLong,
+        error.NoDevice,
+        error.ProcessFdQuotaExceeded,
+        error.SymLinkLoop,
+        error.SystemFdQuotaExceeded,
+        error.SystemResources,
+        error.PermissionDenied,
+        error.Unexpected,
+        => |e| return e,
     };
-    errdefer posix.close(ret.tty);
+    errdefer posix.close(tty);
 
-    if (!posix.isatty(ret.tty))
+    if (!posix.isatty(tty))
         return error.NotATerminal;
-    errdefer ret.deinit(allocator);
 
-    if (term_config.use_terminfo) {
-        ret.terminfo = getTermInfo(allocator) catch |err| switch (err) {
-            error.OutOfMemory => |e| return e,
-            error.NoTermInfo => blk: {
-                log.warn("Proceeding without terminfo definitions", .{});
-                break :blk null;
-            },
-        };
+    const terminfo = try gpa.create(TermInfo);
+    errdefer gpa.destroy(terminfo);
+    terminfo.* = getTermInfo(gpa, conf.terminfo) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidFormat, error.NoTermInfo => blk: {
+            std.log.err("Failed to load fallback terminfo, proceeding without terminfo definitions", .{});
+            break :blk .{};
+        },
+    };
 
-        if (term_config.terminfo_inputs) {
-            try ret.useTermInfoInputs(allocator);
-        }
+    try terminfo.populateInputMap(gpa);
+
+    switch (conf.truecolour) {
+        .disable => terminfo.truecolour = .none,
+        .check => terminfo.queryTrueColour(),
+        .force => {
+            terminfo.queryTrueColour();
+            if (terminfo.truecolour == .none)
+                terminfo.truecolour = .hardcoded;
+        },
     }
 
-    ret.truecolor_enabled = sw: switch (term_config.truecolour) {
-        .disable => false,
-        .check => {
-            if (posix.getenv("COLORTERM")) |colorterm| {
-                if (std.mem.eql(u8, colorterm, "truecolor") or
-                    std.mem.eql(u8, colorterm, "24bit"))
-                {
-                    break :sw true;
-                }
-            }
-
-            if (ret.terminfo) |ti| {
-                if (ti.getNumberCapability(.max_colors)) |colors| {
-                    if (colors >= comptime std.math.pow(u32, 2, 24))
-                        break :sw true;
-                }
-            }
-
-            break :sw false;
-        },
-        .force => true,
+    return .{
+        .tty = tty,
+        .terminfo = terminfo,
     };
-
-    return ret;
 }
 
-pub fn deinit(term: *Term, allocator: Allocator) void {
+pub fn deinit(term: *Term, gpa: Allocator) void {
     assert(!term.currently_rendering);
 
     // It's probably a good idea to cook the terminal on exit.
     if (!term.isCooked())
         term.cook() catch {};
 
-    if (term.terminfo) |ti|
-        ti.destroy(allocator);
+    if (term.grapheme_clustering_mode == .grapheme)
+        zg.deinitData(gpa, &.{.graphemes});
+
+    term.terminfo.deinit(gpa);
+    gpa.destroy(term.terminfo);
 
     posix.close(term.tty);
     term.* = undefined;
 }
 
-fn getTermInfo(allocator: Allocator) !*TermInfo {
-    const term_var = posix.getenv("TERM") orelse {
-        log.info("No TERM variable defined", .{});
-        return error.NoTermInfo;
-    };
+/// Returns a terminfo defintion based on the configuration. Returns `error.NoTermInfo` if a valid
+/// terminfo file cannot be found.
+fn getTermInfo(gpa: Allocator, opts: TermInfoConfig) !TermInfo {
+    switch (opts.fallback_mode) {
+        .always => return opts.fallback.getTermInfo(gpa),
+        .last_resort => {
+            const term_var = posix.getenv("TERM") orelse {
+                log.info("No TERM variable defined", .{});
+                return error.NoTermInfo;
+            };
 
-    var buf: [TermInfo.max_file_length]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
+            return TermInfo.getTermInfoForTerm(gpa, term_var) catch |err| switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.NoTermInfo => opts.fallback.getTermInfo(gpa),
+            };
+        },
+        .merge => {
+            const term_var = posix.getenv("TERM") orelse {
+                log.info("No TERM variable defined", .{});
+                return error.NoTermInfo;
+            };
 
-    var iter: TermInfo.FileIter = .{ .term = term_var };
-    while (iter.next()) |file| {
-        defer file.close();
+            var terminfo: TermInfo = TermInfo.getTermInfoForTerm(gpa, term_var) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NoTermInfo => .{},
+            };
+            errdefer terminfo.deinit(gpa);
 
-        fba.reset();
-        const bytes = file.readToEndAlloc(fba.allocator(), TermInfo.max_file_length) catch |err| switch (err) {
-            error.OutOfMemory => |e| return e,
-            else => {
-                log.info("{} when reading terminfo file, skipping", .{err});
-                continue;
-            },
-        };
+            var fallback: TermInfo = opts.fallback.getTermInfo(gpa) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NoTermInfo, error.InvalidFormat => .{},
+            };
+            defer fallback.deinit(gpa);
 
-        return TermInfo.parse(allocator, bytes) catch |err| switch (err) {
-            error.OutOfMemory => |e| return e,
-            else => {
-                log.info("Could not parse terminfo file, skipping {}", .{err});
-                continue;
-            },
-        };
-    }
-
-    log.info("Could not find terminfo description", .{});
-    return error.NoTermInfo;
-}
-
-pub fn useTermInfoInputs(term: *Term, allocator: Allocator) !void {
-    if (term.terminfo) |ti| {
-        _ = try ti.createInputMap(allocator);
+            try TermInfo.merge(gpa, &terminfo, &fallback);
+            return terminfo;
+        },
     }
 }
 
@@ -331,59 +332,6 @@ pub fn readInput(term: *Term, buf: []u8) ![]u8 {
     return slice;
 }
 
-// TODO: Make this ?bool
-
-pub fn getExtendedFlag(term: *const Term, name: []const u8) bool {
-    return if (term.terminfo) |ti|
-        ti.getExtendedFlag(name)
-    else
-        false;
-}
-
-pub fn getExtendedNumber(term: *const Term, name: []const u8) ?u31 {
-    return if (term.terminfo) |ti|
-        ti.getExtendedNumber(name)
-    else
-        null;
-}
-
-pub fn getExtendedString(term: *const Term, name: []const u8) ?[:0]const u8 {
-    return if (term.terminfo) |ti|
-        ti.getExtendedString(name)
-    else
-        null;
-}
-
-pub fn getFlagCapability(
-    term: *const Term,
-    comptime tag: TermInfo.Flag,
-) bool {
-    return if (term.terminfo) |ti|
-        ti.getFlagCapability(tag)
-    else
-        null;
-}
-
-pub fn getNumberCapability(
-    term: *const Term,
-    comptime tag: TermInfo.Number,
-) ?u31 {
-    return if (term.terminfo) |ti|
-        ti.getNumberCapability(tag)
-    else
-        null;
-}
-
-pub fn getStringCapability(
-    term: *const Term,
-    comptime tag: TermInfo.String,
-) ?[:0]const u8 {
-    return if (term.terminfo) |ti|
-        ti.getStringCapability(tag)
-    else
-        null;
-}
-
 pub inline fn isCooked(term: *const Term) bool {
     return term.cooked_termios == null;
 }
@@ -464,12 +412,12 @@ pub fn uncook(
     var buf: [256]u8 = undefined;
     var bw = term.writer(&buf);
     inline for (.{
-        term.getStringCapability(.save_cursor) orelse spells.save_cursor_position,
-        term.getStringCapability(.enter_ca_mode) orelse spells.enter_alt_buffer,
-        term.getStringCapability(.exit_insert_mode) orelse spells.overwrite_mode,
-        term.getStringCapability(.exit_am_mode) orelse spells.reset_auto_wrap,
-        term.getStringCapability(.cursor_invisible) orelse spells.hide_cursor,
-    }) |str| bw.interface.writeAll(str) catch return bw.err.?;
+        .save_cursor,
+        .enter_ca_mode,
+        .exit_insert_mode,
+        .exit_am_mode,
+        .cursor_invisible,
+    }) |str| term.terminfo.write(&bw.interface, str, .{}) catch return bw.err.?;
 
     if (options.request_kitty_keyboard_protocol) {
         term.enableKittyKeyboard(&bw.interface) catch return bw.err.?;
@@ -507,8 +455,7 @@ pub fn enableMode2027(term: *Term, allocator: std.mem.Allocator, wr: *std.io.Wri
             if (std.mem.eql(u8, buf[0..len], "\x1b[?2027;1$y") or
                 std.mem.eql(u8, buf[0..len], "\x1b[?2027;3$y"))
             {
-                if (!zg.isInitialized(.graphemes))
-                    try zg.initData(allocator, &.{.graphemes});
+                try zg.initData(allocator, &.{.graphemes});
                 term.grapheme_clustering_mode = .grapheme;
                 log.info("Mode 2027 enabled", .{});
             }
@@ -568,19 +515,16 @@ pub fn cook(term: *Term) CookError!void {
 
     inline for (.{
         spells.disable_mouse_tracking,
-        term.getStringCapability(.clear_screen) orelse "",
-        term.getStringCapability(.exit_ca_mode) orelse "",
-        term.getStringCapability(.cursor_visible) orelse "",
-        term.getStringCapability(.exit_attribute_mode) orelse "",
-        term.getStringCapability(.enter_am_mode) orelse spells.enable_auto_wrap,
+        term.terminfo.getStringCapability(.clear_screen) orelse "",
+        term.terminfo.getStringCapability(.exit_ca_mode) orelse "",
+        term.terminfo.getStringCapability(.cursor_visible) orelse "",
+        term.terminfo.getStringCapability(.exit_attribute_mode) orelse "",
+        term.terminfo.getStringCapability(.enter_am_mode) orelse "",
     }) |str| bw.interface.writeAll(str) catch return bw.err.?;
     bw.interface.flush() catch return bw.err.?;
 }
 
 pub fn fetchSize(term: *Term) posix.UnexpectedError!void {
-    if (term.isCooked())
-        return;
-
     var size = std.mem.zeroes(std.posix.winsize);
     const err = posix.system.ioctl(term.tty, posix.system.T.IOCGWINSZ, @intFromPtr(&size));
     if (posix.errno(err) != .SUCCESS) {
@@ -589,8 +533,6 @@ pub fn fetchSize(term: *Term) posix.UnexpectedError!void {
     term.height = size.row;
     term.width = size.col;
 }
-
-pub const WriteError = std.posix.WriteError;
 
 /// Set window title using OSC 2. Shall not be called while rendering.
 pub fn setWindowTitle(term: *Term, comptime fmt: []const u8, args: anytype) WriteError!void {
@@ -601,8 +543,13 @@ pub fn setWindowTitle(term: *Term, comptime fmt: []const u8, args: anytype) Writ
     bw.interface.flush() catch return bw.err.?;
 }
 
-pub fn graphemeWidth(term: *Term, bytes: []const u8) u32 {
-    return @import("main.zig").graphemeWidth(bytes, term.grapheme_clustering_mode);
+pub fn stringWidth(term: *Term, bytes: []const u8) u32 {
+    return @intCast(@import("main.zig").stringWidth(bytes, term.grapheme_clustering_mode, .{}).width);
+}
+
+/// Returns a double buffer using the terminfo and grapheme clustering mode of the terminal.
+pub fn doubleBuffer(term: *const Term, gpa: std.mem.Allocator) Screen.DoubleBuffer {
+    return .init(gpa, term.terminfo, term.grapheme_clustering_mode);
 }
 
 pub fn getRenderContext(term: *Term, buf: []u8) WriteError!RenderContext {
@@ -614,13 +561,15 @@ pub fn getRenderContext(term: *Term, buf: []u8) WriteError!RenderContext {
         .writer = .initMode(.{ .handle = term.tty }, buf, .streaming),
     };
 
-    if (rc.term.getExtendedString("Sync")) |sync|
-        TermInfo.writeParamSequence(sync, &rc.writer.interface, .{1}) catch {
-            return rc.writer.err.?;
-        };
+    term.terminfo.writeExt(&rc.writer.interface, "Sync", .{1}) catch
+        return rc.writer.err.?;
 
-    if (term.getStringCapability(.exit_attribute_mode)) |srg0|
-        rc.writer.interface.writeAll(srg0) catch return rc.writer.err.?;
+    term.terminfo.write(&rc.writer.interface, .exit_attribute_mode, .{}) catch {
+        term.terminfo.writeExt(&rc.writer.interface, "Sync", .{2}) catch
+            return rc.writer.err.?;
+
+        return rc.writer.err.?;
+    };
 
     term.currently_rendering = true;
     return rc;
@@ -635,9 +584,8 @@ pub const RenderContext = struct {
         assert(rc.term.currently_rendering);
         assert(!rc.term.isCooked());
         defer rc.term.currently_rendering = false;
-        if (rc.term.getExtendedString("Sync")) |sync| {
-            TermInfo.writeParamSequence(sync, &rc.writer.interface, .{2}) catch return rc.writer.err.?;
-        }
+        rc.term.terminfo.writeExt(&rc.writer.interface, "Sync", .{2}) catch
+            return rc.writer.err.?;
         rc.writer.interface.flush() catch return rc.writer.err.?;
     }
 
@@ -646,60 +594,56 @@ pub const RenderContext = struct {
     /// functions like `clearToEol` and `clearToBot`.
     pub fn clear(rc: *RenderContext) WriteError!void {
         assert(rc.term.currently_rendering);
-        const spell = rc.term.getStringCapability(.clear_screen) orelse spells.clear;
-        rc.writer.interface.writeAll(spell) catch return rc.writer.err.?;
+        rc.term.terminfo.write(
+            &rc.writer.interface,
+            .clear_screen,
+            .{},
+        ) catch return rc.writer.err.?;
+    }
+
+    pub fn write(rc: *RenderContext, str: TermInfo.String, args: anytype) WriteError!void {
+        assert(rc.term.currently_rendering);
+        rc.term.terminfo.write(&rc.writer.interface, str, args) catch return rc.writer.err.?;
+    }
+
+    pub fn writeExt(rc: *RenderContext, str: []const u8, args: anytype) WriteError!void {
+        assert(rc.term.currently_rendering);
+        rc.term.terminfo.writeExt(&rc.writer.interface, str, args) catch return rc.writer.err.?;
     }
 
     /// Clears the screen from the current line to the bottom.
     pub fn clearToBot(rc: *RenderContext) WriteError!void {
-        assert(rc.term.currently_rendering);
-        const wr = &rc.writer.interface;
-        const spell = rc.term.getStringCapability(.clr_eos) orelse spells.clear_to_bot;
-        wr.writeAll(spell) catch return rc.writer.err.?;
+        try rc.write(.clr_eos, .{});
     }
 
     /// Clears from the cursor position to the end of the line.
     pub fn clearToEol(rc: *RenderContext) WriteError!void {
-        assert(rc.term.currently_rendering);
-        const wr = &rc.writer.interface;
-        const spell = rc.term.getStringCapability(.clr_eol) orelse spells.clear_to_eol;
-        wr.writeAll(spell) catch return rc.writer.err.?;
+        try rc.write(.clr_eol, .{});
     }
 
     /// Clears the screen from the cursor to the beginning of the line.
     pub fn clearToBol(rc: *RenderContext) WriteError!void {
-        assert(rc.term.currently_rendering);
-        const wr = &rc.writer.interface;
-        const spell = rc.term.getStringCapability(.clr_bol) orelse spells.clear_to_bol;
-        wr.writeAll(spell) catch return rc.writer.err.?;
+        try rc.write(.clr_bol, .{});
     }
 
     /// Move the cursor to the specified cell.
     pub fn moveCursorTo(rc: *RenderContext, row: u16, col: u16) WriteError!void {
-        assert(rc.term.currently_rendering);
-        const spell = rc.term.getStringCapability(.cursor_address) orelse spells.move_cursor_fmt;
-        TermInfo.writeParamSequence(spell, &rc.writer.interface, .{ row, col }) catch return rc.writer.err.?;
+        try rc.write(.cursor_address, .{ row, col });
     }
 
     pub fn saveCursor(rc: *RenderContext) WriteError!void {
-        assert(rc.term.currently_rendering);
-        const spell = rc.term.getStringCapability(.save_cursor) orelse spells.save_cursor_position;
-        TermInfo.writeParamSequence(spell, &rc.writer.interface, .{}) catch return rc.writer.err.?;
+        try rc.write(.save_cursor, .{});
     }
 
     pub fn restoreCursor(rc: *RenderContext) WriteError!void {
-        assert(rc.term.currently_rendering);
-        const spell = rc.term.getStringCapability(.restore_cursor) orelse spells.restore_cursor_position;
-        TermInfo.writeParamSequence(spell, &rc.writer.interface, .{}) catch return rc.writer.err.?;
+        try rc.write(.restore_cursor, .{});
     }
 
     /// Hide the cursor.
     pub fn hideCursor(rc: *RenderContext) WriteError!void {
         assert(rc.term.currently_rendering);
         if (!rc.term.cursor_visible) return;
-        const wr = &rc.writer.interface;
-        const spell = rc.term.getStringCapability(.cursor_invisible) orelse spells.hide_cursor;
-        wr.writeAll(spell) catch return rc.writer.err.?;
+        try rc.write(.cursor_invisible, .{});
         rc.term.cursor_visible = false;
     }
 
@@ -707,9 +651,7 @@ pub const RenderContext = struct {
     pub fn showCursor(rc: *RenderContext) WriteError!void {
         assert(rc.term.currently_rendering);
         if (rc.term.cursor_visible) return;
-        const wr = &rc.writer.interface;
-        const spell = rc.term.getStringCapability(.cursor_normal) orelse spells.show_cursor;
-        wr.writeAll(spell) catch return rc.writer.err.?;
+        try rc.write(.cursor_normal, .{});
         rc.term.cursor_visible = true;
     }
 
@@ -718,7 +660,6 @@ pub const RenderContext = struct {
         assert(rc.term.currently_rendering);
         attr.dump(&rc.writer.interface, .{
             .terminfo = rc.term.terminfo,
-            .truecolor = rc.term.truecolor_enabled,
         }) catch return rc.writer.err.?;
     }
 
@@ -735,8 +676,8 @@ pub const RenderContext = struct {
     pub fn writeAllWrapping(rc: *RenderContext, bytes: []const u8) WriteError!void {
         assert(rc.term.currently_rendering);
         const wr = &rc.writer.interface;
-        const enable = rc.term.getStringCapability(.enter_am_mode) orelse spells.enable_auto_wrap;
-        const disable = rc.term.getStringCapability(.exit_am_mode) orelse spells.reset_auto_wrap;
+        const enable = rc.term.terminfo.getStringCapability(.enter_am_mode) orelse return;
+        const disable = rc.term.terminfo.getStringCapability(.exit_am_mode) orelse return;
         wr.writeAll(enable) catch return rc.writer.err.?;
         wr.writeAll(bytes) catch return rc.writer.err.?;
         wr.writeAll(disable) catch return rc.writer.err.?;
@@ -748,9 +689,15 @@ pub const RenderContext = struct {
 
         if (rc.term.cursor_shape == shape) return;
 
-        const spell = rc.term.getExtendedString("Ss") orelse spells.change_cursor;
-        TermInfo.writeParamSequence(spell, &rc.writer.interface, .{@intFromEnum(shape)}) catch
-            return rc.writer.err.?;
+        try rc.writeExt("Ss", .{@intFromEnum(shape)});
         rc.term.cursor_shape = shape;
     }
 };
+
+pub fn setCursorShape(term: *Term, w: *std.io.Writer, shape: CursorShape) !void {
+    assert(shape != .unknown);
+    if (term.cursor_shape == shape) return;
+
+    try term.terminfo.writeExt(w, "Ss", .{@intFromEnum(shape)});
+    term.cursor_shape = shape;
+}

@@ -20,17 +20,14 @@ pub const Input = @import("input.zig").Input;
 pub const InputContent = @import("input.zig").InputContent;
 pub const InputMap = @import("input.zig").InputMap;
 pub const inputParser = @import("input.zig").inputParser;
+pub const Screen = @import("Screen.zig");
 pub const spells = @import("spells.zig");
 pub const Style = @import("Style.zig");
 pub const Term = @import("Term.zig");
 pub const TerminalCellWriter = @import("TerminalCellWriter.zig");
 pub const TermInfo = @import("TermInfo.zig");
-const wcWidth = @import("util.zig").wcWidth;
 
-pub const GraphemeClusteringMode = enum {
-    codepoint,
-    grapheme,
-};
+pub const GraphemeClusteringMode = enum { codepoint, grapheme };
 
 pub fn initUnicodeData(allocator: std.mem.Allocator) !void {
     try zg.initData(allocator, &.{ .graphemes, .display_width });
@@ -40,18 +37,92 @@ pub fn deinitUnicodeData(allocator: std.mem.Allocator) void {
     zg.deinitData(allocator, &.{ .graphemes, .display_width });
 }
 
-pub fn graphemeWidth(bytes: []const u8, mode: GraphemeClusteringMode) u32 {
+pub fn stringWidth(
+    bytes: []const u8,
+    mode: GraphemeClusteringMode,
+    opts: zg.DisplayWidth.StrWidthOptions,
+) zg.DisplayWidth.StrWidthResult {
     switch (mode) {
         .codepoint => {
-            var iter: std.unicode.Utf8Iterator = .{ .bytes = bytes, .i = 0 };
+            var iter: zg.codepoint.Iterator = .init(bytes);
             var width: u32 = 0;
-            while (iter.nextCodepoint()) |cp|
-                width += @import("util.zig").wcWidth(cp);
-            return width;
+            while (iter.next()) |cp| {
+                const w = @import("util.zig").wcWidth(cp.code);
+                if (width + w > opts.max_width)
+                    return .{ .len = cp.offset, .width = width };
+                width += w;
+            }
+            return .{ .len = bytes.len, .width = width };
         },
-        .grapheme => return @intCast(zg.display_width.strWidth(bytes, .{}).width),
+        .grapheme => return zg.display_width.strWidth(bytes, opts),
     }
 }
+
+/// Iterator over characters that stops at a max width.
+/// What a character is depends on the grapheme clustering mode.
+///
+/// * For .codepoint, a character is a codepoint with non-zero width.
+/// * For .grapheme, a character is an extended grapheme cluster.
+pub const WidthIterator = struct {
+    pub const Result = struct {
+        offset: usize,
+        len: usize,
+        width: usize,
+    };
+
+    bytes: []const u8,
+    mode: GraphemeClusteringMode,
+    graphemes: zg.Graphemes.Iterator,
+    codepoints: zg.codepoint.Iterator,
+    max_width: usize,
+
+    pub fn init(bytes: []const u8, mode: GraphemeClusteringMode, max_width: usize) WidthIterator {
+        return .{
+            .bytes = bytes,
+            .mode = mode,
+            .graphemes = .init(bytes, &zg.graphemes),
+            .codepoints = .init(bytes),
+            .max_width = max_width,
+        };
+    }
+
+    pub fn next(i: *WidthIterator) ?Result {
+        if (i.max_width == 0) return null;
+
+        return switch (i.mode) {
+            .grapheme => i.nextGrapheme(),
+            .codepoint => i.nextCodepoint(),
+        };
+    }
+
+    pub fn nextGrapheme(i: *WidthIterator) ?Result {
+        const gr = i.graphemes.next() orelse return null;
+        const bytes = gr.bytes(i.bytes);
+        const res = stringWidth(bytes, .grapheme, .{ .max_width = i.max_width });
+        if (res.len < bytes.len) {
+            i.max_width = 0;
+            return null;
+        }
+        i.max_width -= res.width;
+        return .{
+            .offset = gr.offset,
+            .len = gr.len,
+            .width = res.width,
+        };
+    }
+
+    pub fn nextCodepoint(i: *WidthIterator) ?Result {
+        const cp = i.codepoints.next() orelse return null;
+        const bytes = i.bytes[cp.offset..][0..cp.len];
+        const res = stringWidth(bytes, .codepoint, .{ .max_width = i.max_width });
+        i.max_width -= res.width;
+        return .{
+            .offset = cp.offset,
+            .len = cp.len,
+            .width = res.width,
+        };
+    }
+};
 
 pub const TextAlignment = enum { left, right, center };
 

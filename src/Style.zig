@@ -83,13 +83,14 @@ pub fn eql(a: Style, b: Style) bool {
 pub const DumpOptions = struct {
     /// When set to false, truecolor colors will be approximated to the standard 256-color pallette
     /// instead.
-    truecolor: bool = true,
     terminfo: ?*const TermInfo = null,
+    diff: ?Style = null,
 };
 
 /// Dumps the attributes to `writer`, using the capabilities reported by `ti`.
 pub fn dump(style: Style, writer: *std.io.Writer, opts: DumpOptions) !void {
-    const ti = opts.terminfo orelse return style.dumpRaw(writer);
+    const ti = opts.terminfo orelse return style.dumpEcma48(writer);
+    if (opts.diff != null) return dumpDiff(style, writer, opts);
 
     if (ti.getStringCapability(.set_attributes)) |sgr| {
         try TermInfo.writeParamSequence(sgr, writer, .{
@@ -138,29 +139,133 @@ pub fn dump(style: Style, writer: *std.io.Writer, opts: DumpOptions) !void {
         }
     }
 
+    // TODO: Cache this sequence
     if (style.attrs.strikethrough) {
         if (ti.getExtendedString("smxx")) |xx| try writer.writeAll(xx);
     } else {
         if (ti.getExtendedString("rmxx")) |xx| try writer.writeAll(xx);
     }
 
-    switch (style.fg) {
-        .none => {},
+    if (style.bg == .none) {
+        _ = try dumpBg(style.bg, ti, writer);
+        _ = try dumpFg(style.fg, ti, writer);
+    } else {
+        _ = try dumpFg(style.fg, ti, writer);
+        _ = try dumpBg(style.bg, ti, writer);
+    }
+}
+
+/// Write only the difference between two styles.
+pub fn dumpDiff(style: Style, writer: *std.io.Writer, opts: DumpOptions) !void {
+    const ti = opts.terminfo orelse return style.dumpEcma48(writer);
+    const diff = opts.diff.?;
+
+    // Terminfo does not define any standard capabilities to disable bold/reverse/blink/dim/
+    // blank apart from sgr, so the only way to turn them off here is to reset all attributes.
+    // Other attributes are disabled individually anyway in case sgr0 is not defined.
+    const mask: u9 = @bitCast(Attribute{
+        .dimmed = true,
+        .bold = true,
+        .reverse = true,
+        .blinking = true,
+        .hidden = true,
+    });
+    const cm: u9 = @bitCast(style.attrs);
+    const dm: u9 = @bitCast(diff.attrs);
+    if ((cm & mask) & (dm & mask) != dm & mask) {
+        if (ti.getStringCapability(.exit_attribute_mode)) |sgr0| try writer.writeAll(sgr0);
+    }
+
+    if (style.attrs.standout != diff.attrs.standout) {
+        if (style.attrs.standout) {
+            if (ti.getStringCapability(.enter_standout_mode)) |so| try writer.writeAll(so);
+        } else {
+            if (ti.getStringCapability(.exit_standout_mode)) |so| try writer.writeAll(so);
+        }
+    }
+
+    if (style.attrs.underline != diff.attrs.underline) {
+        if (style.attrs.underline) {
+            if (ti.getStringCapability(.enter_underline_mode)) |ul| try writer.writeAll(ul);
+        } else {
+            if (ti.getStringCapability(.exit_underline_mode)) |ul| try writer.writeAll(ul);
+        }
+    }
+
+    if (style.attrs.reverse != diff.attrs.reverse and style.attrs.reverse) {
+        if (ti.getStringCapability(.enter_reverse_mode)) |rev| try writer.writeAll(rev);
+    }
+
+    if (style.attrs.blinking != diff.attrs.blinking and style.attrs.blinking) {
+        if (ti.getStringCapability(.enter_blink_mode)) |blink| try writer.writeAll(blink);
+    }
+
+    if (style.attrs.dimmed != diff.attrs.dimmed and style.attrs.dimmed) {
+        if (ti.getStringCapability(.enter_dim_mode)) |dim| try writer.writeAll(dim);
+    }
+
+    if (style.attrs.bold != diff.attrs.bold and style.attrs.bold) {
+        if (ti.getStringCapability(.enter_bold_mode)) |bold| try writer.writeAll(bold);
+    }
+
+    if (style.attrs.hidden != diff.attrs.hidden and style.attrs.hidden) {
+        if (ti.getStringCapability(.enter_secure_mode)) |invis| try writer.writeAll(invis);
+    }
+
+    if (style.attrs.strikethrough != diff.attrs.strikethrough) {
+        if (style.attrs.strikethrough) {
+            if (ti.getExtendedString("smxx")) |smxx| try writer.writeAll(smxx);
+        } else {
+            if (ti.getExtendedString("rmxx")) |rmxx| try writer.writeAll(rmxx);
+        }
+    }
+
+    if (!std.meta.eql(style.bg, diff.bg)) {
+        if (style.bg == .none) {
+            _ = try dumpBg(style.bg, ti, writer);
+            _ = try dumpFg(style.fg, ti, writer);
+        } else {
+            if (!std.meta.eql(style.fg, diff.fg))
+                _ = try dumpFg(style.fg, ti, writer);
+            _ = try dumpBg(style.bg, ti, writer);
+        }
+    } else if (!std.meta.eql(style.fg, diff.fg)) {
+        if (style.fg == .none) {
+            _ = try dumpFg(style.fg, ti, writer);
+            _ = try dumpBg(style.bg, ti, writer);
+        } else {
+            _ = try dumpFg(style.fg, ti, writer);
+        }
+    }
+}
+
+/// Dump the foreground colour. For the `.none` colour, resets the foreground colour
+/// to the terminal's default. There is no standard way with terminfo to reset only the
+/// foreground/background colour, so resetting the foreground colour also resets the background
+/// colour. If this happens, true is returned. Otherwise returns false.
+pub fn dumpFg(fg: Colour, ti: *const TermInfo, w: *std.io.Writer) !bool {
+    switch (fg) {
+        .none => {
+            if (ti.getStringCapability(.orig_pair)) |op| {
+                try w.writeAll(op);
+                return true;
+            }
+        },
         .black, .red, .green, .yellow, .blue, .magenta, .cyan, .white => {
-            const n = @intFromEnum(style.fg) - 1;
+            const n = @intFromEnum(fg) - 1;
             if (ti.getStringCapability(.set_a_foreground)) |setaf| {
-                try TermInfo.writeParamSequence(setaf, writer, .{n});
+                try TermInfo.writeParamSequence(setaf, w, .{n});
             } else if (ti.getStringCapability(.set_foreground)) |setf| {
                 // Rare case where setaf is not defined.
                 // Red/blue are swapped for setf.
-                const t = switch (style.fg) {
+                const t = switch (fg) {
                     .cyan => .yellow,
                     .yellow => .cyan,
                     .red => .blue,
                     .blue => .red,
-                    else => style.fg,
+                    else => fg,
                 };
-                try TermInfo.writeParamSequence(setf, writer, .{@intFromEnum(t) - 1});
+                try TermInfo.writeParamSequence(setf, w, .{@intFromEnum(t) - 1});
             } else {
                 // No color support!
             }
@@ -177,51 +282,73 @@ pub fn dump(style: Style, writer: *std.io.Writer, opts: DumpOptions) !void {
             const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
             if (num_colors >= 16) {
                 if (ti.getStringCapability(.set_a_foreground)) |setaf| {
-                    try TermInfo.writeParamSequence(setaf, writer, .{@intFromEnum(style.fg) - 1});
+                    try TermInfo.writeParamSequence(setaf, w, .{@intFromEnum(fg) - 1});
                 }
             }
         },
 
         .@"256" => |value| {
+            // TODO: If we don't support 256 colours it would be a good idea to approximate them
+            //       via the 8/16 available colours.
             const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
             if (num_colors >= 256) {
                 if (ti.getStringCapability(.set_a_foreground)) |setaf| {
-                    try TermInfo.writeParamSequence(setaf, writer, .{value});
+                    try TermInfo.writeParamSequence(setaf, w, .{value});
                 }
             }
         },
-        .rgb => |rgb| {
-            if (opts.truecolor) {
-                try dump24BitColour(rgb, .fg, writer);
-            } else {
-                const index = approximateTruecolor(rgb);
+        .rgb => |rgb| switch (ti.truecolour) {
+            .none => {
                 const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
                 if (num_colors >= 256) {
-                    if (ti.getStringCapability(.set_a_foreground)) |setaf| {
-                        try TermInfo.writeParamSequence(setaf, writer, .{index});
-                    }
+                    const index = approximateTruecolor(rgb);
+                    try ti.write(w, .set_a_foreground, .{index});
                 }
-            }
+            },
+            .lunacy => {
+                const r, const g, const b = rgb;
+                const real_rgb = (@as(u24, r) << 16) | (@as(u24, g) << 8) | b;
+                try ti.write(w, .set_a_foreground, .{real_rgb});
+            },
+            .hardcoded => {
+                const r, const g, const b = rgb;
+                try TermInfo.writeParamSequence(TermInfo.hardcoded_setrgbf, w, .{ r, g, b });
+            },
+            .setrgb => {
+                if (ti.getExtendedString("setrgbf")) |setrgbf| {
+                    const r, const g, const b = rgb;
+                    try TermInfo.writeParamSequence(setrgbf, w, .{ r, g, b });
+                }
+            },
         },
     }
+    return false;
+}
 
-    switch (style.bg) {
-        .none => {},
+/// May reset the foreground colour.
+pub fn dumpBg(bg: Colour, ti: *const TermInfo, w: *std.io.Writer) !bool {
+    switch (bg) {
+        .none => {
+            if (ti.getStringCapability(.orig_pair)) |op| {
+                try w.writeAll(op);
+                return true;
+            }
+        },
         .black, .red, .green, .yellow, .blue, .magenta, .cyan, .white => {
-            const n = @intFromEnum(style.bg) - 1;
+            const n = @intFromEnum(bg) - 1;
             if (ti.getStringCapability(.set_a_background)) |setab| {
-                try TermInfo.writeParamSequence(setab, writer, .{n});
+                try TermInfo.writeParamSequence(setab, w, .{n});
             } else if (ti.getStringCapability(.set_background)) |setb| {
                 // Rare case where setab is not defined.
                 // Red/blue are swapped for setb.
-                const t = switch (style.bg) {
+                const t = switch (bg) {
                     .cyan => .yellow,
                     .yellow => .cyan,
                     .red => .blue,
                     .blue => .red,
-                    else => style.bg,
+                    else => bg,
                 };
-                try TermInfo.writeParamSequence(setb, writer, .{@intFromEnum(t) - 1});
+                try TermInfo.writeParamSequence(setb, w, .{@intFromEnum(t) - 1});
             } else {
                 // No color support!
             }
@@ -238,7 +365,7 @@ pub fn dump(style: Style, writer: *std.io.Writer, opts: DumpOptions) !void {
             const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
             if (num_colors >= 16) {
                 if (ti.getStringCapability(.set_a_background)) |setab| {
-                    try TermInfo.writeParamSequence(setab, writer, .{@intFromEnum(style.bg) - 1});
+                    try TermInfo.writeParamSequence(setab, w, .{@intFromEnum(bg) - 1});
                 }
             }
         },
@@ -246,25 +373,35 @@ pub fn dump(style: Style, writer: *std.io.Writer, opts: DumpOptions) !void {
         .@"256" => |value| {
             const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
             if (num_colors >= 256) {
-                if (ti.getStringCapability(.set_a_background)) |setab| {
-                    try TermInfo.writeParamSequence(setab, writer, .{value});
-                }
+                try ti.write(w, .set_a_background, .{value});
             }
         },
-        .rgb => |rgb| {
-            if (opts.truecolor) {
-                try dump24BitColour(rgb, .bg, writer);
-            } else {
-                const index = approximateTruecolor(rgb);
+        .rgb => |rgb| switch (ti.truecolour) {
+            .none => {
                 const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
                 if (num_colors >= 256) {
-                    if (ti.getStringCapability(.set_a_background)) |setab| {
-                        try TermInfo.writeParamSequence(setab, writer, .{index});
-                    }
+                    const index = approximateTruecolor(rgb);
+                    try ti.write(w, .set_a_background, .{index});
                 }
-            }
+            },
+            .lunacy => {
+                const r, const g, const b = rgb;
+                const real_rgb = (@as(u24, r) << 16) | (@as(u24, g) << 8) | b;
+                try ti.write(w, .set_a_background, .{real_rgb});
+            },
+            .hardcoded => {
+                const r, const g, const b = rgb;
+                try TermInfo.writeParamSequence(TermInfo.hardcoded_setrgbb, w, .{ r, g, b });
+            },
+            .setrgb => {
+                if (ti.getExtendedString("setrgbb")) |setrgbb| {
+                    const r, const g, const b = rgb;
+                    try TermInfo.writeParamSequence(setrgbb, w, .{ r, g, b });
+                }
+            },
         },
     }
+    return false;
 }
 
 /// Given a 24 bit color value, return the index of the closest match in the 256 color table.
@@ -273,19 +410,11 @@ pub fn approximateTruecolor(rgb: [3]u8) u8 {
     return 16 + (r / 51) * 36 + (g / 51) * 6 + (b / 51);
 }
 
-pub fn dump24BitColour(rgb: [3]u8, comptime kind: enum { fg, bg }, writer: anytype) !void {
-    const fmt = switch (kind) {
-        .fg => "\x1b[38;2;{d};{d};{d}m",
-        .bg => "\x1b[48;2;{d};{d};{d}m",
-    };
-    const r, const g, const b = rgb;
-    try writer.print(fmt, .{ r, g, b });
-}
-
-/// Dumps attributes to `writer` using ANSI escape sequences. For better compatibility, prefer to
-/// use `dump`.
-fn dumpRaw(style: Style, writer: anytype) !void {
-    var buf: std.BoundedArray(u8, 64) = .{};
+/// Dumps attributes to `writer` using ECMA-48 escape sequences. This is likely to result in less
+/// bytes written to the terminal than using terminfo sequences.
+pub fn dumpEcma48(style: Style, w: *std.io.Writer) !void {
+    var buffer: [64]u8 = undefined;
+    var buf: std.ArrayListUnmanaged(u8) = .initBuffer(&buffer);
     buf.appendSliceAssumeCapacity("\x1B[");
 
     if (style.attrs.bold) buf.appendSliceAssumeCapacity("1;");
@@ -298,7 +427,7 @@ fn dumpRaw(style: Style, writer: anytype) !void {
     if (style.attrs.strikethrough) buf.appendSliceAssumeCapacity("9;");
 
     switch (style.fg) {
-        .none => {},
+        .none => buf.appendSliceAssumeCapacity("39;"),
         .black => buf.appendSliceAssumeCapacity("30;"),
         .red => buf.appendSliceAssumeCapacity("31;"),
         .green => buf.appendSliceAssumeCapacity("32;"),
@@ -316,18 +445,17 @@ fn dumpRaw(style: Style, writer: anytype) !void {
         .bright_cyan => buf.appendSliceAssumeCapacity("96;"),
         .bright_white => buf.appendSliceAssumeCapacity("97;"),
         .@"256" => |n| {
-            buf.writer().print("38;5;{d};", .{n}) catch unreachable;
+            buf.printAssumeCapacity("38;5;{d};", .{n});
         },
-        .rgb => {
-            buf.writer().print("38;2;{d};{d};{d};", .{
-                style.fg.rgb[0],
-                style.fg.rgb[1],
-                style.fg.rgb[2],
-            }) catch unreachable;
+        .rgb => |rgb| {
+            // TODO: These aren't in the ECMA-48 standard, we should pass a flag indicating
+            //       truecolor support like the other dump functions
+            const r, const g, const b = rgb;
+            buf.printAssumeCapacity("38;2;{d};{d};{d};", .{ r, g, b });
         },
     }
     switch (style.bg) {
-        .none => {},
+        .none => buf.appendSliceAssumeCapacity("49;"),
         .black => buf.appendSliceAssumeCapacity("40;"),
         .red => buf.appendSliceAssumeCapacity("41;"),
         .green => buf.appendSliceAssumeCapacity("42;"),
@@ -345,20 +473,19 @@ fn dumpRaw(style: Style, writer: anytype) !void {
         .bright_cyan => buf.appendSliceAssumeCapacity("106;"),
         .bright_white => buf.appendSliceAssumeCapacity("107;"),
         .@"256" => |n| {
-            buf.writer().print("48;5;{d};", .{n}) catch unreachable;
+            buf.printAssumeCapacity("48;5;{d};", .{n});
         },
-        .rgb => {
-            buf.writer().print("48;2;{d};{d};{d};", .{
-                style.bg.rgb[0],
-                style.bg.rgb[1],
-                style.bg.rgb[2],
-            }) catch unreachable;
+        .rgb => |rgb| {
+            // TODO: These aren't in the ECMA-48 standard, we should pass a flag indicating
+            //       truecolor support like the other dump functions
+            const r, const g, const b = rgb;
+            buf.printAssumeCapacity("48;2;{d};{d};{d};", .{ r, g, b });
         },
     }
     // Style was empty, we dont write anything in this case
-    if (buf.buffer[buf.len - 1] != ';') return;
+    if (buf.getLast() != ';') return;
 
-    buf.buffer[buf.len - 1] = 'm';
-    try writer.writeAll(buf.constSlice());
-    log.perf.debug("dump style {d} bytes", .{buf.len});
+    buf.items[buf.items.len - 1] = 'm';
+    try w.writeAll(buf.items);
+    log.perf.debug("dump style {d} bytes", .{buf.items.len});
 }
