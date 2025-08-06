@@ -398,7 +398,16 @@ pub const Writer = struct {
             .truncate => text.len,
         };
 
-        try w.s.text.replaceRange(w.s.gpa, w.cursor.text_offset, res.replace_len, truncated_text);
+        w.s.text.replaceRange(
+            w.s.gpa,
+            w.cursor.text_offset,
+            res.replace_len,
+            truncated_text,
+        ) catch |err| {
+            // Way easier than rolling back state or precalculating everything
+            w.clear();
+            return err;
+        };
 
         // Screen line, not rect line
         const line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
@@ -512,6 +521,7 @@ pub const Writer = struct {
             // We got a wide character. Blank the next cell.
             if (res.width == 2) {
                 @branchHint(.unlikely);
+                replace_len += cells.items(.lw)[width + 1].len;
                 cells.set(width + 1, .blank);
             }
             last_width = res.width;
@@ -890,7 +900,13 @@ pub fn dump(s: *const Screen, ti: *const TermInfo, w: *std.io.Writer) !void {
     }) {
         // try TermInfo.writeParamSequence(move, w, .{ y, 0 });
         const cells = s.cells.subslice(cell_off, s.width);
+        var last_wide = false;
         for (cells.items(.lw), cells.items(.style)) |lw, style| {
+            if (last_wide) {
+                last_wide = false;
+                continue;
+            }
+
             const text = s.text.items[off..][0..lw.len];
 
             if (!Style.eql(current_style, style)) {
@@ -905,6 +921,7 @@ pub fn dump(s: *const Screen, ti: *const TermInfo, w: *std.io.Writer) !void {
             }
 
             off += lw.len;
+            last_wide = lw.width != 0;
         }
 
         if (cell_off < s.cells.len - s.width)
@@ -960,7 +977,15 @@ pub fn dumpDiff(new: *Screen, old: *Screen, ti: *const TermInfo, w: *std.io.Writ
         const cells = new.cells.subslice(y * new.width, new.width);
         var total_len: usize = 0;
         var blank_start: usize = 0;
+        var last_wide = false;
         for (cells.items(.lw), cells.items(.style)) |lw, style| {
+            if (last_wide) {
+                assert(lw.len == 0);
+                assert(blank_start == 0);
+                last_wide = false;
+                continue;
+            }
+
             total_len += lw.len;
 
             const text = new.text.items[l1_off..][0..lw.len];
@@ -986,6 +1011,7 @@ pub fn dumpDiff(new: *Screen, old: *Screen, ti: *const TermInfo, w: *std.io.Writ
                 try w.writeAll(text);
                 blank_start = 0;
             }
+            last_wide = lw.width == 1;
         }
 
         if (blank_start > 0) {
@@ -1298,6 +1324,38 @@ test "flush partial codepoint" {
 
     try w.interface.writeByte(0xc1);
     try w.interface.flush();
+}
+
+test "replace with wide character" {
+    try initData();
+    defer deinitData();
+
+    var s: Screen = .init(std.testing.allocator, .grapheme);
+    defer s.deinit();
+
+    try s.resize(80, 20);
+
+    var buf: [128]u8 = undefined;
+    var w = s.writerFull(&buf, .wrap, .unicode);
+
+    try w.interface.writeAll("aa");
+    try w.setCursor(0, 0);
+
+    try std.testing.expectEqual(1, s.cells.items(.lw)[0].len);
+    try std.testing.expectEqual(1, s.cells.items(.lw)[1].len);
+    try std.testing.expectEqual(0, s.cells.items(.lw)[2].len);
+    try std.testing.expectEqual(2, s.lines.items[0].len);
+    try std.testing.expectEqual(2, s.text.items.len);
+
+    const str = "🧑‍🌾";
+    try w.interface.writeAll(str);
+    try w.setCursor(0, 0);
+
+    try std.testing.expectEqual(str.len, s.cells.items(.lw)[0].len);
+    try std.testing.expectEqual(0, s.cells.items(.lw)[1].len);
+    try std.testing.expectEqual(0, s.cells.items(.lw)[2].len);
+    try std.testing.expectEqual(str.len, s.lines.items[0].len);
+    try std.testing.expectEqual(str.len, s.text.items.len);
 }
 
 test "rectangular writes" {

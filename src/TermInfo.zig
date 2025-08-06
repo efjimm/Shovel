@@ -24,12 +24,12 @@ names: []u8 = &.{},
 string_table: []u8 = &.{},
 ext_string_table: []u8 = &.{},
 
-flags: std.EnumArray(Flag, bool) = std.EnumArray(Flag, bool).initFill(false),
-numbers: std.EnumArray(Number, i32) = std.EnumArray(Number, i32).initFill(-1),
+flags: std.EnumArray(Flag, bool) = .initFill(false),
+numbers: std.EnumArray(Number, i32) = .initFill(-1),
 
 // TODO: Store larger indexes, as merging terminfo definitions could in theory overflow
 //       maxInt(i16).
-strings: std.EnumArray(String, i16) = std.EnumArray(String, i16).initFill(-1),
+strings: std.EnumArray(String, i16) = .initFill(-1),
 
 ext_flags: std.StringHashMapUnmanaged(void) = .empty,
 ext_nums: std.StringHashMapUnmanaged(u31) = .empty,
