@@ -202,9 +202,6 @@ pub fn deinit(term: *Term, gpa: Allocator) void {
     if (!term.isCooked())
         term.cook() catch {};
 
-    if (term.grapheme_clustering_mode == .grapheme)
-        zg.deinitData(gpa, &.{.graphemes});
-
     term.terminfo.deinit(gpa);
     gpa.destroy(term.terminfo);
 
@@ -348,7 +345,6 @@ pub const UncookError =
 /// Enter raw mode.
 pub fn uncook(
     term: *Term,
-    allocator: std.mem.Allocator,
     options: UncookOptions,
 ) UncookError!void {
     if (!term.isCooked())
@@ -424,7 +420,7 @@ pub fn uncook(
     }
 
     if (options.request_mode_2027) {
-        term.enableMode2027(allocator, &bw.interface) catch return bw.err.?;
+        term.enableMode2027(&bw.interface) catch return bw.err.?;
     }
 
     if (options.request_mouse_tracking) {
@@ -437,7 +433,7 @@ pub fn uncook(
 /// proper grapheme cluster segmentation.
 ///
 /// https://github.com/contour-terminal/terminal-unicode-core
-pub fn enableMode2027(term: *Term, allocator: std.mem.Allocator, wr: *std.io.Writer) !void {
+pub fn enableMode2027(term: *Term, wr: *std.io.Writer) !void {
     try wr.writeAll(spells.enable_mode_2027);
     try wr.writeAll("\x1B[?2027$p");
     try wr.flush();
@@ -455,7 +451,6 @@ pub fn enableMode2027(term: *Term, allocator: std.mem.Allocator, wr: *std.io.Wri
             if (std.mem.eql(u8, buf[0..len], "\x1b[?2027;1$y") or
                 std.mem.eql(u8, buf[0..len], "\x1b[?2027;3$y"))
             {
-                try zg.initData(allocator, &.{.graphemes});
                 term.grapheme_clustering_mode = .grapheme;
                 log.info("Mode 2027 enabled", .{});
             }

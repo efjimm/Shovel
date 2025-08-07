@@ -338,21 +338,12 @@ pub const Writer = struct {
 
         // Screen line, not rect line
         const line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
-        if (res.data_len < res.replace_len) {
-            w.s.lines.items[line].len -= res.replace_len - res.data_len;
-        } else if (res.data_len > res.replace_len) {
-            w.s.lines.items[line].len += res.data_len - res.replace_len;
-        } else {
-            @branchHint(.likely);
-        }
+        w.s.lines.items[line].len -= res.replace_len;
+        w.s.lines.items[line].len += res.data_len;
         w.cursor.cell_offset += res.data_len;
         w.cursor.text_offset += res.data_len;
 
-        // If we truncated it means the text doesn't fully fit on this line, so we need to move to
-        // the next line. We may not have moved to the next line if the cursor is on the last cell
-        // but the next character is a wide character, so that's what this check does.
-        const truncated = res.data_len < text.len and w.cursor.cell_offset % w.rect.width != 0;
-        if (w.overflow_mode == .wrap and (truncated or !w.s.cellInRect(w.cursor.cell_offset, w.rect))) {
+        if (w.overflow_mode == .wrap and !w.s.cellInRect(w.cursor.cell_offset, w.rect)) {
             w.s.cursorTo(&w.cursor, line + 1, w.rect.x);
         }
 
@@ -411,11 +402,8 @@ pub const Writer = struct {
 
         // Screen line, not rect line
         const line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
-        if (res.data_len < res.replace_len) {
-            w.s.lines.items[line].len -= res.replace_len - res.data_len;
-        } else {
-            w.s.lines.items[line].len += res.data_len - res.replace_len;
-        }
+        w.s.lines.items[line].len -= res.replace_len;
+        w.s.lines.items[line].len += res.data_len;
 
         w.cursor.cell_offset += res.width;
         w.cursor.text_offset += res.data_len;
@@ -429,10 +417,12 @@ pub const Writer = struct {
         // If we truncated it means the text doesn't fully fit on this line, so we need to move to
         // the next line. We may not have moved to the next line if the cursor is on the last cell
         // but the next character is a wide character, so that's what this check does.
-        const truncated = res.data_len < valid_text.len and w.cursor.cell_offset % w.rect.width != 0;
-        if (!w.s.cellInRect(w.cursor.cell_offset, w.rect) or truncated) {
-            if (w.overflow_mode == .wrap)
+        if (!w.s.cellInRect(w.cursor.cell_offset, w.rect) or
+            (truncated_text.len < valid_text.len and res.discard_len == 0))
+        {
+            if (w.overflow_mode == .wrap) {
                 w.s.cursorTo(&w.cursor, line + 1, w.rect.x);
+            }
         }
 
         var cp_iter: zg.codepoint.Iterator = .initEnd(truncated_text);
@@ -490,6 +480,21 @@ pub const Writer = struct {
         var replace_len: usize = 0;
         var last_width: usize = 0;
         var discard_len: usize = 0;
+
+        if (w.cursor.cell_offset > 0) {
+            const lw = w.s.cells.items(.lw)[w.cursor.cell_offset - 1];
+            if (lw.width != 0) {
+                // We're overwriting the right-hand side of a wide character, so we need to erase
+                // it.
+
+                // The last cell of a line should never be a wide character.
+                assert(w.cursor.cell_offset % w.s.width != 0);
+                w.cursor.text_offset -= lw.len;
+                replace_len += lw.len;
+                w.s.cells.set(w.cursor.cell_offset - 1, .blank);
+            }
+        }
+
         while (iter.next()) |res| : (width += res.width) {
             assert(res.width <= 2);
 
@@ -520,7 +525,6 @@ pub const Writer = struct {
 
             // We got a wide character. Blank the next cell.
             if (res.width == 2) {
-                @branchHint(.unlikely);
                 replace_len += cells.items(.lw)[width + 1].len;
                 cells.set(width + 1, .blank);
             }
@@ -559,6 +563,21 @@ pub const Writer = struct {
         var cells = w.cellsAtCursor().subslice(0, tlen);
 
         var replace_len: usize = 0;
+
+        if (w.cursor.cell_offset > 0) {
+            const lw = w.s.cells.items(.lw)[w.cursor.cell_offset - 1];
+            if (lw.width != 0) {
+                // We're overwriting the right-hand side of a wide character, so we need to erase
+                // it.
+
+                // The last cell of a line should never be a wide character.
+                assert(w.cursor.cell_offset % w.s.width != 0);
+                w.cursor.text_offset -= lw.len;
+                replace_len += lw.len;
+                w.s.cells.set(w.cursor.cell_offset - 1, .blank);
+            }
+        }
+
         for (data[0..tlen], cells.items(.lw), cells.items(.style), 0..) |c, *lw, *style, i| {
             assert(c < 0x80); // Encountered non-ASCII byte in ASCII mode
             const width = ascii_widths[c];
@@ -586,6 +605,7 @@ pub const Writer = struct {
         };
     }
 
+    // TODO: Get test coverage for this
     /// Write `data` as a continuation of the last written grapheme cluster.
     ///
     /// Partial codepoints are handled by ignoring them and keeping them in the internal buffer
@@ -885,8 +905,7 @@ pub fn height(s: *const Screen) u16 {
     return @intCast(s.lines.items.len);
 }
 
-/// Write out the entire contents of the screen. Attempts to home the cursor first, if the given
-/// terminfo defines `clear_screen` or `cursor_home`. Otherwise uses zero escape sequences.
+/// Write out the entire contents of the screen.
 ///
 /// Generally you should use `DoubleBuffer.dump` instead.
 pub fn dump(s: *const Screen, ti: *const TermInfo, w: *std.io.Writer) !void {
@@ -894,16 +913,22 @@ pub fn dump(s: *const Screen, ti: *const TermInfo, w: *std.io.Writer) !void {
     var off: usize = 0;
     var cell_off: usize = 0;
     var y: u16 = 0;
+    const move = ti.getStringCapability(.cursor_address) orelse "";
     while (cell_off < s.cells.len) : ({
         cell_off += s.width;
         y += 1;
     }) {
-        // try TermInfo.writeParamSequence(move, w, .{ y, 0 });
         const cells = s.cells.subslice(cell_off, s.width);
         var last_wide = false;
-        for (cells.items(.lw), cells.items(.style)) |lw, style| {
+        for (cells.items(.lw), cells.items(.style), 0..) |lw, style, x| {
             if (last_wide) {
                 last_wide = false;
+                // See comment in `dumpDiff`.
+                try w.writeByte(' ');
+                try TermInfo.writeParamSequence(move, w, .{
+                    @as(i32, @intCast(y)),
+                    @as(i32, @intCast(x + 1)),
+                });
                 continue;
             }
 
@@ -978,11 +1003,33 @@ pub fn dumpDiff(new: *Screen, old: *Screen, ti: *const TermInfo, w: *std.io.Writ
         var total_len: usize = 0;
         var blank_start: usize = 0;
         var last_wide = false;
-        for (cells.items(.lw), cells.items(.style)) |lw, style| {
+        for (cells.items(.lw), cells.items(.style), 0..) |lw, style, x| {
             if (last_wide) {
                 assert(lw.len == 0);
                 assert(blank_start == 0);
                 last_wide = false;
+                // Not all terminals display wide characters with the same width. For example, the
+                // linux TTY renders 🧑 as a single column, while sane terminals display it using
+                // two columns. We COULD try to detect this by writing out the string and querying
+                // the cursor position, but this would have to be done for every wide character
+                // in the screen, because for example the Linux TTY displays 🧑 as 1 column but
+                // japanese characters as two. And it's likely that terminals that don't display
+                // these properly also don't support querying the cursor position.
+                //
+                // So the only sane way to handle this is to manually position the cursor after
+                // writing such a character. As an optimization we could special case certain
+                // TERMs as not requiring this extra cursor move.
+                //
+                // For terminal that don't support cursor addressing, you're shit out of luck.
+                // We write a space after the character and THEN move the cursor, so this'll
+                // work fine if the terminal renders wide characters as a single column. That's
+                // likely anyway, because what kind of terminal exists that supports unicode
+                // but not cursor addressing?
+                try w.writeByte(' ');
+                try TermInfo.writeParamSequence(move, w, .{
+                    @as(i32, @intCast(y)),
+                    @as(i32, @intCast(x + 1)),
+                });
                 continue;
             }
 
@@ -993,8 +1040,10 @@ pub fn dumpDiff(new: *Screen, old: *Screen, ti: *const TermInfo, w: *std.io.Writ
 
             if ((text.len == 0 or text[0] == ' ') and style.eql(current_style)) {
                 blank_start += 1;
+                assert(!last_wide);
                 continue;
             }
+            last_wide = lw.width != 0;
 
             if (blank_start > 0) {
                 try w.splatByteAll(' ', blank_start);
@@ -1011,7 +1060,6 @@ pub fn dumpDiff(new: *Screen, old: *Screen, ti: *const TermInfo, w: *std.io.Writ
                 try w.writeAll(text);
                 blank_start = 0;
             }
-            last_wide = lw.width == 1;
         }
 
         if (blank_start > 0) {
@@ -1356,6 +1404,42 @@ test "replace with wide character" {
     try std.testing.expectEqual(0, s.cells.items(.lw)[2].len);
     try std.testing.expectEqual(str.len, s.lines.items[0].len);
     try std.testing.expectEqual(str.len, s.text.items.len);
+}
+
+test "guhbuhduh" {
+    try initData();
+    defer deinitData();
+
+    var s: Screen = .init(std.testing.allocator, .codepoint);
+    defer s.deinit();
+
+    try s.resize(80, 20);
+
+    var buf: [128]u8 = undefined;
+    var w = s.writerFull(&buf, .wrap, .unicode);
+
+    try w.interface.writeAll("aa");
+    try w.setCursor(0, 0);
+
+    try std.testing.expectEqual(1, s.cells.items(.lw)[0].len);
+    try std.testing.expectEqual(1, s.cells.items(.lw)[1].len);
+    try std.testing.expectEqual(0, s.cells.items(.lw)[2].len);
+    try std.testing.expectEqual(2, s.lines.items[0].len);
+    try std.testing.expectEqual(2, s.text.items.len);
+
+    const cp1 = "🧑";
+    const cp2 = "🌾";
+    const str = "🧑‍🌾";
+    try w.interface.writeAll(str);
+    try w.flush();
+    // try w.setCursor(0, 0);
+
+    try std.testing.expectEqual(cp1.len + cp2.len, s.text.items.len);
+    try std.testing.expectEqual(cp1.len + cp2.len, s.lines.items[0].len);
+    try std.testing.expectEqual(cp1.len, s.cells.items(.lw)[0].len);
+    try std.testing.expectEqual(0, s.cells.items(.lw)[1].len);
+    try std.testing.expectEqual(cp2.len, s.cells.items(.lw)[2].len);
+    try std.testing.expectEqual(0, s.cells.items(.lw)[3].len);
 }
 
 test "rectangular writes" {

@@ -22,7 +22,7 @@ pub fn main() !void {
     });
     defer term.deinit(allocator);
 
-    try term.uncook(allocator, .{});
+    try term.uncook(.{});
     try term.fetchSize();
 
     var buf: [16]u8 = undefined;

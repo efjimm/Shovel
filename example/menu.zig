@@ -70,7 +70,7 @@ pub fn main() !void {
 
     // Shovel will return the terminal back to cooked state automatically
     // when we call `term.deinit()`.
-    try term.uncook(gpa, .{});
+    try term.uncook(.{});
 
     try term.fetchSize();
     try term.setWindowTitle("Shovel example: menu", .{});

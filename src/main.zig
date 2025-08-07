@@ -26,6 +26,7 @@ pub const Style = @import("Style.zig");
 pub const Term = @import("Term.zig");
 pub const TerminalCellWriter = @import("TerminalCellWriter.zig");
 pub const TermInfo = @import("TermInfo.zig");
+const wcWidth = @import("util.zig").wcWidth;
 
 pub const GraphemeClusteringMode = enum { codepoint, grapheme };
 
@@ -48,8 +49,9 @@ pub fn stringWidth(
             var width: u32 = 0;
             while (iter.next()) |cp| {
                 const w = @import("util.zig").wcWidth(cp.code);
-                if (width + w > opts.max_width)
+                if (width + w > opts.max_width) {
                     return .{ .len = cp.offset, .width = width };
+                }
                 width += w;
             }
             return .{ .len = bytes.len, .width = width };
@@ -140,9 +142,10 @@ pub fn writeTruncating(
     str: []const u8,
     max_width: u32,
     alignment: TextAlignment,
+    mode: GraphemeClusteringMode,
     writer: *std.io.Writer,
 ) !void {
-    const res = zg.display_width.strWidth(str, .{ .max_width = max_width });
+    const res = stringWidth(str, mode, .{ .max_width = max_width });
     const width: u32 = @intCast(res.width);
     if (res.len == str.len) {
         const pad = max_width - width;
@@ -155,10 +158,36 @@ pub fn writeTruncating(
     }
 
     const truncated = str[0..res.len];
+    if (truncated.len == 0) {
+        try writer.splatByteAll(' ', max_width);
+        return;
+    }
+
     if (width == max_width) {
-        var iter = zg.graphemes.reverseIterator(truncated);
-        const g = iter.prev().?;
-        try writer.print("{s}…", .{truncated[0..g.offset]});
+        // Replace the last character with '…'
+        const w, const off = blk: {
+            if (mode == .codepoint) {
+                var cp_iter: zg.codepoint.Iterator = .initEnd(truncated);
+                while (cp_iter.prev()) |cp| {
+                    const w = wcWidth(cp.code);
+                    if (wcWidth(cp.code) != 0) break :blk .{ w, cp.offset };
+                }
+
+                break :blk .{ 0, res.len };
+            }
+
+            var iter = zg.graphemes.reverseIterator(truncated);
+            const g = iter.prev().?;
+
+            var cp_iter: zg.codepoint.Iterator = .init(truncated[g.offset..]);
+            break :blk .{ wcWidth(cp_iter.next().?.code), g.offset };
+        };
+
+        try writer.print("{s}…", .{truncated[0..off]});
+
+        // If the last character we replaced was a wide character, we need to pad with an extra
+        // space.
+        if (w == 2) try writer.writeByte(' ');
         return;
     }
 
