@@ -68,8 +68,8 @@ pub fn main() !void {
         null,
     );
 
-    // Shovel will return the terminal back to cooked state automatically
-    // when we call `term.deinit()`.
+    // Shovel will return the terminal back to cooked state automatically when we call
+    // `term.deinit()`.
     try term.uncook(.{});
 
     try term.fetchSize();

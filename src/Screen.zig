@@ -274,6 +274,7 @@ pub const Writer = struct {
         try w.flush();
         var len: usize = 0;
         const cells = w.cellsAtCursor();
+        if (cells.len == 0) return;
         for (cells.items(.lw), cells.items(.style)) |*lw, *style| {
             style.* = w.cursor.style;
             len += lw.len;
@@ -457,6 +458,9 @@ pub const Writer = struct {
     };
 
     pub fn remainingCellsInLine(w: *const Writer) usize {
+        if (w.cursor.cell_offset >= w.s.cells.len)
+            return 0;
+
         const cx = w.cursor.cell_offset % w.s.width;
         return w.rect.width -| (cx -| w.rect.x);
     }
