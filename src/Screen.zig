@@ -270,19 +270,24 @@ pub const Writer = struct {
         }
     }
 
-    pub fn clearToEol(w: *Writer) !void {
-        try w.flush();
-        var len: usize = 0;
+    fn clearToEolNoFlush(w: *Writer) void {
         const cells = w.cellsAtCursor();
         if (cells.len == 0) return;
+
+        var replace_len: usize = 0;
         for (cells.items(.lw), cells.items(.style)) |*lw, *style| {
             style.* = w.cursor.style;
-            len += lw.len;
+            replace_len += lw.len;
             lw.len = 0;
         }
-        try w.s.text.replaceRange(w.s.gpa, w.cursor.text_offset, len, "");
+        w.s.text.replaceRange(w.s.gpa, w.cursor.text_offset, replace_len, "") catch unreachable;
         const line = w.cursor.cell_offset / w.s.width;
-        w.s.lines.items[line].len -= len;
+        w.s.lines.items[line].len -= replace_len;
+    }
+
+    pub fn clearToEol(w: *Writer) !void {
+        try w.flush();
+        w.clearToEolNoFlush();
     }
 
     pub fn padAscii(w: *Writer, c: u8) !void {
@@ -304,9 +309,17 @@ pub const Writer = struct {
         return res;
     }
 
+    inline fn write(w: *Writer, text: []const u8) std.mem.Allocator.Error!usize {
+        return switch (w.unicode_mode) {
+            .ascii => w.writeAscii(text),
+            .unicode => w.writeNonAscii(text),
+        };
+    }
+
     inline fn writeAscii(w: *Writer, text: []const u8) !usize {
         @branchHint(.likely);
 
+        // If the current cursor if off-screen, we don't write anything.
         if (!w.s.cellInRect(w.cursor.cell_offset, w.rect)) {
             @branchHint(.unlikely);
             return text.len;
@@ -314,18 +327,6 @@ pub const Writer = struct {
 
         const res = w.writeCellsAscii(text);
         const truncated_text = text[0..res.data_len];
-        if (res.data_len == 0) {
-            if (res.discard_len == 0) {
-                @branchHint(.unlikely);
-                const line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
-                if (line >= w.rect.y +| w.rect.height) return text.len;
-                w.s.cursorTo(&w.cursor, line + 1, w.rect.x);
-            }
-            return switch (w.overflow_mode) {
-                .wrap => res.discard_len,
-                .truncate => text.len,
-            };
-        }
 
         w.s.text.replaceRange(
             w.s.gpa,
@@ -337,29 +338,28 @@ pub const Writer = struct {
             return err;
         };
 
-        // Screen line, not rect line
         const line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
         w.s.lines.items[line].len -= res.replace_len;
         w.s.lines.items[line].len += res.data_len;
         w.cursor.cell_offset += res.data_len;
         w.cursor.text_offset += res.data_len;
 
-        if (w.overflow_mode == .wrap and !w.s.cellInRect(w.cursor.cell_offset, w.rect)) {
+        const have_newline = res.discard_byte and text[res.data_len] == '\n';
+        const eol = w.overflow_mode == .wrap and (!w.s.cellInRect(w.cursor.cell_offset, w.rect) or
+            (res.data_len < text.len and !res.discard_byte));
+
+        if (have_newline or eol) {
+            const current_line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
+            if (current_line == line)
+                w.clearToEolNoFlush();
             w.s.cursorTo(&w.cursor, line + 1, w.rect.x);
         }
 
         w.last_cp = 0;
 
         return switch (w.overflow_mode) {
-            .wrap => res.data_len,
+            .wrap => res.data_len + @intFromBool(have_newline),
             .truncate => text.len,
-        };
-    }
-
-    inline fn write(w: *Writer, text: []const u8) std.mem.Allocator.Error!usize {
-        return switch (w.unicode_mode) {
-            .ascii => w.writeAscii(text),
-            .unicode => w.writeNonAscii(text),
         };
     }
 
@@ -385,10 +385,6 @@ pub const Writer = struct {
 
         const res = w.writeCells(valid_text);
         const truncated_text = valid_text[0..res.data_len];
-        if (res.data_len == 0) return switch (w.overflow_mode) {
-            .wrap => res.discard_len,
-            .truncate => text.len,
-        };
 
         w.s.text.replaceRange(
             w.s.gpa,
@@ -415,22 +411,25 @@ pub const Writer = struct {
             .style = .{},
         };
 
+        const have_newline = res.discard_len > 0 and valid_text[res.data_len] == '\n';
+        const eol = w.overflow_mode == .wrap and (!w.s.cellInRect(w.cursor.cell_offset, w.rect) or
+            (res.data_len < text.len and res.discard_len == 0));
+
         // If we truncated it means the text doesn't fully fit on this line, so we need to move to
         // the next line. We may not have moved to the next line if the cursor is on the last cell
         // but the next character is a wide character, so that's what this check does.
-        if (!w.s.cellInRect(w.cursor.cell_offset, w.rect) or
-            (truncated_text.len < valid_text.len and res.discard_len == 0))
-        {
-            if (w.overflow_mode == .wrap) {
-                w.s.cursorTo(&w.cursor, line + 1, w.rect.x);
-            }
+        if (eol or have_newline) {
+            const current_line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
+            if (current_line == line)
+                w.clearToEolNoFlush();
+            w.s.cursorTo(&w.cursor, line + 1, w.rect.x);
         }
 
         var cp_iter: zg.codepoint.Iterator = .initEnd(truncated_text);
-        w.last_cp = cp_iter.prev().?.code;
+        if (cp_iter.prev()) |cp| w.last_cp = cp.code;
 
         return switch (w.overflow_mode) {
-            .wrap => res.data_len,
+            .wrap => res.data_len + res.discard_len,
             .truncate => text.len,
         };
     }
@@ -550,7 +549,7 @@ pub const Writer = struct {
         data_len: usize,
         /// Number of bytes to replace from the text buffer.
         replace_len: usize,
-        discard_len: usize,
+        discard_byte: bool,
     };
 
     inline fn writeCellsAscii(w: *Writer, data: []const u8) WriteCellsAsciiResult {
@@ -559,7 +558,7 @@ pub const Writer = struct {
             return .{
                 .data_len = 0,
                 .replace_len = 0,
-                .discard_len = 0,
+                .discard_byte = false,
             };
         }
 
@@ -593,7 +592,7 @@ pub const Writer = struct {
                 return .{
                     .data_len = i,
                     .replace_len = replace_len,
-                    .discard_len = 1,
+                    .discard_byte = true,
                 };
             }
 
@@ -605,7 +604,7 @@ pub const Writer = struct {
         return .{
             .data_len = tlen,
             .replace_len = replace_len,
-            .discard_len = 0,
+            .discard_byte = false,
         };
     }
 
@@ -1456,11 +1455,11 @@ test "rectangular writes" {
     try s.resize(80, 20);
 
     var buf: [128]u8 = undefined;
-    var wr = s.writer(&buf, .init(10, 10, 10, 10), .wrap, .ascii);
+    var wr = s.writer(&buf, .init(10, 10, 10, 10), .wrap, .unicode);
     const w = &wr.interface;
 
-    try w.writeAll("howdy");
-    try w.flush();
+    try w.writeAll("howdy\nnice");
+    try wr.flush();
 
     try expectEqualStrings("", s.colsText(10, 0, 10));
     try expectEqualStrings("", s.colsText(10, 10, 0));
@@ -1470,7 +1469,9 @@ test "rectangular writes" {
     try expectEqualStrings("howdy", s.colsText(10, 10, 10));
     try expectEqualStrings("dy", s.colsText(10, 13, 5));
     try expectEqualStrings("", s.colsText(10, 15, 5));
+    try expectEqualStrings("nice", s.colsText(11, 10, 10));
 
+    try wr.setCursor(0, 5);
     try w.writeAll("This is a long string");
     try w.flush();
 
