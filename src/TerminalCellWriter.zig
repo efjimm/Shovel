@@ -23,7 +23,9 @@ partial_cp_buf: [4]u8,
 partial_cp_buf_len: u8,
 
 /// Buffer for grapheme clusters which may overflow the width
-character_buf: std.BoundedArray(u8, 64),
+char_buf: [64]u8,
+char_buf_i: u8,
+
 state: zg.Graphemes.State = .reset,
 last_cp: u21,
 
@@ -43,7 +45,8 @@ pub fn init(
         .finished = width == 0,
         .partial_cp_buf = undefined,
         .partial_cp_buf_len = 0,
-        .character_buf = .{},
+        .char_buf = undefined,
+        .char_buf_i = 0,
         .last_cp = 0,
         .interface = .{
             .buffer = &.{},
@@ -57,8 +60,8 @@ pub fn init(
 pub fn finish(tcw: *TerminalCellWriter) !void {
     assert(tcw.partial_cp_buf_len == 0);
     try tcw.interface.flush();
-    if (tcw.character_buf.len > 0) {
-        const slice = tcw.character_buf.constSlice();
+    if (tcw.char_buf_i > 0) {
+        const slice = tcw.char_buf[0..tcw.char_buf_i];
         const width: u32 = @intCast(graphemeWidth(slice, .grapheme, .{}).width);
         try tcw.child.writeAll(slice);
         tcw.remaining_width -= width;
@@ -193,13 +196,13 @@ fn writeAsciiSlice(tcw: *TerminalCellWriter, bytes: []const u8) !bool {
     assert(firstNonAscii(bytes) == null);
     if (bytes.len == 0) return false;
 
-    if (tcw.character_buf.len != 0) {
+    if (tcw.char_buf_i != 0) {
         try tcw.truncate();
         return true;
     }
 
     if (tcw.remaining_width > bytes.len) {
-        assert(tcw.character_buf.len == 0);
+        assert(tcw.char_buf_i == 0);
         try tcw.child.writeAll(bytes);
         tcw.remaining_width -= @intCast(bytes.len);
         return false;
@@ -209,7 +212,11 @@ fn writeAsciiSlice(tcw: *TerminalCellWriter, bytes: []const u8) !bool {
         const slice = bytes[0 .. bytes.len - 1];
         try tcw.child.writeAll(slice);
         tcw.remaining_width -= @intCast(slice.len);
-        tcw.character_buf.appendAssumeCapacity(bytes[bytes.len - 1]);
+        if (tcw.char_buf_i < tcw.char_buf.len) {
+            @branchHint(.likely);
+            tcw.char_buf[tcw.char_buf_i] = bytes[bytes.len - 1];
+            tcw.char_buf_i += 1;
+        }
         return false;
     }
 
@@ -275,30 +282,28 @@ fn writeMode2027(tcw: *TerminalCellWriter, bytes: []const u8) !void {
 }
 
 fn bufferBytes(tcw: *TerminalCellWriter, bytes: []const u8) void {
-    tcw.character_buf.appendSlice(bytes) catch {
+    const dest = tcw.char_buf[tcw.char_buf_i..];
+    const src = if (dest.len < bytes.len) blk: {
         // The buffer doesn't have enough capacity to fit the entire grapheme cluster.
         // Truncate it.
-        const dest = tcw.character_buf.unusedCapacitySlice();
-        const src = blk: {
-            const src = bytes[0..dest.len];
-            if (isStartByte(bytes[dest.len]))
-                break :blk src;
+        const src = bytes[0..dest.len];
+        if (isStartByte(bytes[dest.len]))
+            break :blk src;
 
-            // We truncated in the middle of a utf-8 sequence, so we need to chop off the
-            // incomplete codepoint at the end.
-            const end = lastCodepointIndex(src);
-            break :blk src[0..end];
-        };
+        // We truncated in the middle of a utf-8 sequence, so we need to chop off the
+        // incomplete codepoint at the end.
+        const end = lastCodepointIndex(src);
+        break :blk src[0..end];
+    } else bytes;
 
-        @memcpy(dest[0..src.len], src);
-    };
-
-    tcw.last_cp = lastCodepoint(tcw.character_buf.constSlice());
+    @memcpy(dest[0..src.len], src);
+    tcw.char_buf_i += @intCast(src.len);
+    tcw.last_cp = lastCodepoint(tcw.char_buf[0..tcw.char_buf_i]);
 }
 
 inline fn writeContinuingGrapheme(tcw: *TerminalCellWriter, bytes: []const u8) !void {
     // Writing these bytes should not affect the output width.
-    if (tcw.character_buf.len > 0) {
+    if (tcw.char_buf_i > 0) {
         tcw.bufferBytes(bytes);
     } else {
         try tcw.child.writeAll(bytes);
@@ -321,7 +326,7 @@ inline fn writeCharacter(
     tcw.state = .reset;
 
     // If we already have a buffered character then we need to truncate.
-    if (tcw.character_buf.len > 0) {
+    if (tcw.char_buf_i > 0) {
         try tcw.truncate();
         return true;
     }
@@ -344,7 +349,7 @@ fn truncate(tcw: *TerminalCellWriter) !void {
     }
     tcw.state = .reset;
     tcw.last_cp = 0;
-    tcw.character_buf.clear();
+    tcw.char_buf_i = 0;
     tcw.finished = true;
 }
 
