@@ -17,8 +17,8 @@
             .hash = "critbit-0.0.1-In1cd8o0AADD5COO2u4_vLUOI3UERCp-i0zYKn4UBZ-K",
         },
         .zg = .{
-            .url = "git+https://github.com/efjimm/zg?ref=master#1aa43bdef430ba20d402743d6fde2cfbc66f2de2",
-            .hash = "zg-0.14.0-oGqU3F5FtgIg5jdX1sneoFVzNAM0rLoLTamCYWxDTHDr",
+            .url = "git+https://github.com/efjimm/zg?ref=master#f1dccb29a8341988c62a63ae54f7087f3ff5c02e",
+            .hash = "zg-0.14.0-oGqU3PpBtgKIH7ZhvMX93YIdYSNLdMX4ta4cgnLREAY0",
         },
     },
 }

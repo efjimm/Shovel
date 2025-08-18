@@ -553,7 +553,7 @@ pub fn getRenderContext(term: *Term, buf: []u8) WriteError!RenderContext {
 
     var rc: RenderContext = .{
         .term = term,
-        .writer = .initMode(.{ .handle = term.tty }, buf, .streaming),
+        .writer = .initStreaming(.{ .handle = term.tty }, buf),
     };
 
     term.terminfo.writeExt(&rc.writer.interface, "Sync", .{1}) catch
