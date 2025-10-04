@@ -358,7 +358,7 @@ pub const Writer = struct {
         w.last_cp = 0;
 
         return switch (w.overflow_mode) {
-            .wrap => res.data_len + @intFromBool(have_newline),
+            .wrap => res.data_len + @intFromBool(res.discard_byte),
             .truncate => text.len,
         };
     }
@@ -1226,10 +1226,36 @@ test "screen raw writes ascii" {
     try std.testing.expectEqual(1, bytes_written);
     bytes_written = try w.write("rap around");
     try std.testing.expectEqual(10, bytes_written);
+    bytes_written = try w.write("\x1b");
+    try std.testing.expectEqual(1, bytes_written);
+    bytes_written = try w.write("\x1b");
+    try std.testing.expectEqual(1, bytes_written);
 
     try std.testing.expectEqualStrings("idk someth", s.lineText(0));
     try std.testing.expectEqualStrings("some morew", s.lineText(1));
     try std.testing.expectEqualStrings("rap around", s.lineText(2));
+}
+
+test "screen zero width writes ascii" {
+    try initData();
+    defer deinitData();
+
+    var s: Screen = .init(std.testing.allocator, .grapheme);
+    defer s.deinit();
+
+    try s.resize(10, 3);
+
+    var buf: [128]u8 = undefined;
+    var w = s.writerFull(&buf, .truncate, .ascii);
+
+    var bytes_written = try w.write("\x1b");
+    try std.testing.expectEqual(1, bytes_written);
+    bytes_written = try w.write("\x1b");
+    try std.testing.expectEqual(1, bytes_written);
+
+    try std.testing.expectEqualStrings("", s.lineText(0));
+    try std.testing.expectEqualStrings("", s.lineText(1));
+    try std.testing.expectEqualStrings("", s.lineText(2));
 }
 
 test "screen writer" {
