@@ -11,10 +11,14 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var threaded: std.Io.Threaded = .init(allocator);
+    defer threaded.deinit();
+    const io = threaded.ioBasic();
+
     try shovel.initUnicodeData(allocator);
     defer shovel.deinitUnicodeData(allocator);
 
-    var term = try shovel.Term.init(allocator, .{
+    var term = try shovel.Term.init(allocator, io, .{
         .terminfo = .{
             .fallback = .@"xterm-256color",
             .fallback_mode = .last_resort,

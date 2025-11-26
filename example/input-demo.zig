@@ -35,10 +35,14 @@ pub fn main() !void {
     defer _ = dbg_allocator.deinit();
     const gpa = dbg_allocator.allocator();
 
+    var threaded: std.Io.Threaded = .init(gpa);
+    defer threaded.deinit();
+    const io = threaded.ioBasic();
+
     try shovel.initUnicodeData(gpa);
     defer shovel.deinitUnicodeData(gpa);
 
-    term = try shovel.Term.init(gpa, .{
+    term = try shovel.Term.init(gpa, io, .{
         .terminfo = .{
             .fallback = .@"xterm-256color",
             .fallback_mode = .merge,
@@ -46,7 +50,7 @@ pub fn main() !void {
     });
     defer term.deinit(gpa);
 
-    posix.sigaction(posix.SIG.WINCH, &.{
+    posix.sigaction(.WINCH, &.{
         .handler = .{ .handler = handleSigWinch },
         .mask = posix.sigemptyset(),
         .flags = 0,
@@ -225,7 +229,7 @@ fn render() !void {
     }
 }
 
-fn handleSigWinch(_: c_int) callconv(.c) void {
+fn handleSigWinch(_: std.posix.SIG) callconv(.c) void {
     term.fetchSize() catch {};
 }
 

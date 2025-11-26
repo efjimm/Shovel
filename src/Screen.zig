@@ -77,7 +77,7 @@ pub fn flatten(dest: *Screen, windows: []const Window) !void {
                 window.rect.width,
             );
 
-            var replace_len: usize = 0;
+            var replace_len: u31 = 0;
             for (dest_cells.items(.lw)) |lw| replace_len += lw.len;
 
             try dest.text.replaceRange(
@@ -91,7 +91,7 @@ pub fn flatten(dest: *Screen, windows: []const Window) !void {
             @memcpy(dest_cells.items(.style), src_line.cells.items(.style));
 
             dest.lines.items[y].len -= replace_len;
-            dest.lines.items[y].len += src_line.text.len;
+            dest.lines.items[y].len += @intCast(src_line.text.len);
         }
     }
 }
@@ -167,7 +167,7 @@ pub const OverflowMode = enum {
 pub const Writer = struct {
     s: *Screen,
     rect: Rect,
-    interface: std.io.Writer,
+    interface: std.Io.Writer,
     cursor: Cursor,
 
     overflow_mode: OverflowMode,
@@ -258,7 +258,7 @@ pub const Writer = struct {
                 w.rect.width,
             );
 
-            var remove_len: usize = 0;
+            var remove_len: u31 = 0;
             for (dest_cells.items(.lw)) |lw| remove_len += lw.len;
 
             w.s.text.replaceRangeAssumeCapacity(dest_cursor.text_offset, remove_len, "");
@@ -274,7 +274,7 @@ pub const Writer = struct {
         const cells = w.cellsAtCursor();
         if (cells.len == 0) return;
 
-        var replace_len: usize = 0;
+        var replace_len: u31 = 0;
         for (cells.items(.lw), cells.items(.style)) |*lw, *style| {
             style.* = w.cursor.style;
             replace_len += lw.len;
@@ -339,14 +339,15 @@ pub const Writer = struct {
         };
 
         const line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
+        w.s.lines.items[line].changed = true;
         w.s.lines.items[line].len -= res.replace_len;
         w.s.lines.items[line].len += res.data_len;
         w.cursor.cell_offset += res.data_len;
         w.cursor.text_offset += res.data_len;
 
-        const have_newline = res.discard_byte and text[res.data_len] == '\n';
+        const have_newline = res.discard_len > 0 and text[res.data_len + (res.discard_len - 1)] == '\n';
         const eol = w.overflow_mode == .wrap and (!w.s.cellInRect(w.cursor.cell_offset, w.rect) or
-            (res.data_len < text.len and !res.discard_byte));
+            (res.data_len < text.len and res.discard_len == 0));
 
         if (have_newline or eol) {
             const current_line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
@@ -358,8 +359,8 @@ pub const Writer = struct {
         w.last_cp = 0;
 
         return switch (w.overflow_mode) {
-            .wrap => res.data_len + @intFromBool(res.discard_byte),
-            .truncate => text.len,
+            .wrap => res.data_len + res.discard_len,
+            .truncate => if (res.discard_len != 0) res.data_len + res.discard_len else text.len,
         };
     }
 
@@ -399,6 +400,7 @@ pub const Writer = struct {
 
         // Screen line, not rect line
         const line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
+        w.s.lines.items[line].changed = true;
         w.s.lines.items[line].len -= res.replace_len;
         w.s.lines.items[line].len += res.data_len;
 
@@ -411,7 +413,7 @@ pub const Writer = struct {
             .style = .{},
         };
 
-        const have_newline = res.discard_len > 0 and valid_text[res.data_len] == '\n';
+        const have_newline = res.discard_len > 0 and valid_text[res.data_len + (res.discard_len - 1)] == '\n';
         const eol = w.overflow_mode == .wrap and (!w.s.cellInRect(w.cursor.cell_offset, w.rect) or
             (res.data_len < text.len and res.discard_len == 0));
 
@@ -430,13 +432,13 @@ pub const Writer = struct {
 
         return switch (w.overflow_mode) {
             .wrap => res.data_len + res.discard_len,
-            .truncate => text.len,
+            .truncate => if (res.discard_len > 0) res.data_len + res.discard_len else text.len,
         };
     }
 
     const WriteCellsResult = struct {
         /// Number of bytes to write from `data`.
-        data_len: usize,
+        data_len: u31,
         /// Total width of the bytes to write.
         width: usize,
 
@@ -445,7 +447,7 @@ pub const Writer = struct {
         discard_len: usize,
 
         /// Number of bytes to replace from the text buffer.
-        replace_len: usize,
+        replace_len: u31,
 
         /// When the grapheme clustering mode is set to `.grapheme`. this is the final state of the
         /// grapheme iterator when returning from this function. This is used to check if a subsequent
@@ -479,10 +481,9 @@ pub const Writer = struct {
         var iter: WidthIterator = .init(data, w.s.grapheme_clustering_mode, remaining_cells);
 
         var width: usize = 0;
-        var len: usize = 0;
-        var replace_len: usize = 0;
+        var len: u31 = 0;
+        var replace_len: u31 = 0;
         var last_width: usize = 0;
-        var discard_len: usize = 0;
 
         if (w.cursor.cell_offset > 0) {
             const lw = w.s.cells.items(.lw)[w.cursor.cell_offset - 1];
@@ -504,11 +505,17 @@ pub const Writer = struct {
             // We don't care about zero-width characters.
             if (res.width == 0) {
                 @branchHint(.unlikely);
-                discard_len = res.len;
-                break;
+                return .{
+                    .data_len = len,
+                    .replace_len = replace_len,
+                    .width = width,
+                    .state = iter.graphemes.state,
+                    .last_width = last_width,
+                    .discard_len = res.len,
+                };
             }
 
-            len = res.offset + res.len;
+            len = @intCast(res.offset + res.len);
             const char_bytes = data[res.offset..][0..res.len];
 
             // Grapheme cluster longer than 2^15 bytes, just ignore it.
@@ -534,6 +541,8 @@ pub const Writer = struct {
             last_width = res.width;
         }
 
+        const discard_len = if (std.mem.indexOfScalar(u8, data[len..], '\n')) |n| n + 1 else 0;
+
         return .{
             .data_len = len,
             .replace_len = replace_len,
@@ -546,10 +555,10 @@ pub const Writer = struct {
 
     const WriteCellsAsciiResult = struct {
         /// Number of bytes to write from `data`.
-        data_len: usize,
+        data_len: u31,
         /// Number of bytes to replace from the text buffer.
-        replace_len: usize,
-        discard_byte: bool,
+        replace_len: u31,
+        discard_len: u31,
     };
 
     inline fn writeCellsAscii(w: *Writer, data: []const u8) WriteCellsAsciiResult {
@@ -558,14 +567,14 @@ pub const Writer = struct {
             return .{
                 .data_len = 0,
                 .replace_len = 0,
-                .discard_byte = false,
+                .discard_len = 0,
             };
         }
 
-        const tlen = @min(data.len, remaining_cells);
+        const tlen: u31 = @intCast(@min(data.len, remaining_cells));
         var cells = w.cellsAtCursor().subslice(0, tlen);
 
-        var replace_len: usize = 0;
+        var replace_len: u31 = 0;
 
         if (w.cursor.cell_offset > 0) {
             const lw = w.s.cells.items(.lw)[w.cursor.cell_offset - 1];
@@ -590,9 +599,9 @@ pub const Writer = struct {
                 @branchHint(.unlikely);
 
                 return .{
-                    .data_len = i,
+                    .data_len = @intCast(i),
                     .replace_len = replace_len,
-                    .discard_byte = true,
+                    .discard_len = 1,
                 };
             }
 
@@ -601,10 +610,12 @@ pub const Writer = struct {
             style.* = w.cursor.style;
         }
 
+        const discard_len = if (std.mem.indexOfScalar(u8, data[tlen..], '\n')) |n| n + 1 else 0;
+
         return .{
             .data_len = tlen,
             .replace_len = replace_len,
-            .discard_byte = false,
+            .discard_len = @intCast(discard_len),
         };
     }
 
@@ -649,6 +660,7 @@ pub const Writer = struct {
 
         // Screen line, not rect line
         const line = w.last_cursor.cell_offset / w.s.width;
+        w.s.lines.items[line].changed = true;
         w.s.lines.items[line].len += end;
         cell_len.* += end;
         w.last_cursor.text_offset += end;
@@ -664,7 +676,7 @@ pub const Writer = struct {
         try ioFlush(&w.interface);
     }
 
-    fn ioFlush(w: *std.io.Writer) !void {
+    fn ioFlush(w: *std.Io.Writer) !void {
         const wr: *Writer = @fieldParentPtr("interface", w);
         switch (wr.unicode_mode) {
             .ascii => {
@@ -685,7 +697,7 @@ pub const Writer = struct {
         }
     }
 
-    fn drain(io_writer: *std.io.Writer, data: []const []const u8, splat: usize) !usize {
+    fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) !usize {
         const w: *Writer = @fieldParentPtr("interface", io_writer);
         const buffered = w.interface.buffered();
         if (buffered.len > 0) {
@@ -771,8 +783,9 @@ pub const Writer = struct {
     }
 };
 
-pub const Line = struct {
-    len: usize,
+pub const Line = packed struct {
+    len: u31,
+    changed: bool = true,
 };
 
 pub const Cell = struct {
@@ -911,7 +924,7 @@ pub fn height(s: *const Screen) u16 {
 /// Write out the entire contents of the screen.
 ///
 /// Generally you should use `DoubleBuffer.dump` instead.
-pub fn dump(s: *const Screen, ti: *const TermInfo, w: *std.io.Writer) !void {
+pub fn dump(s: *const Screen, ti: *const TermInfo, w: *std.Io.Writer) !void {
     var current_style: Style = .{};
     var off: usize = 0;
     var cell_off: usize = 0;
@@ -962,7 +975,7 @@ pub fn dump(s: *const Screen, ti: *const TermInfo, w: *std.io.Writer) !void {
 ///
 /// If the supplied terminfo does not have a sequence to address the cursor, the entire
 /// contents of `new` will by output.
-pub fn dumpDiff(new: *Screen, old: *Screen, ti: *const TermInfo, w: *std.io.Writer) !void {
+pub fn dumpDiff(new: *Screen, old: *Screen, ti: *const TermInfo, w: *std.Io.Writer) !void {
     assert(new.width == old.width);
     assert(new.height() == old.height());
 
@@ -981,6 +994,8 @@ pub fn dumpDiff(new: *Screen, old: *Screen, ti: *const TermInfo, w: *std.io.Writ
     var l1_off: usize = 0;
     var l2_off: usize = 0;
     for (new.lines.items, old.lines.items, 0..) |l1, l2, y| {
+        if (!l1.changed) continue;
+        // TODO
         const l1_text = new.text.items[l1_off..][0..l1.len];
         const l2_text = old.text.items[l2_off..][0..l2.len];
         l2_off += l2.len;
@@ -1107,7 +1122,7 @@ pub const DoubleBuffer = struct {
         d.dump_all = true;
     }
 
-    pub fn dump(d: *DoubleBuffer, w: *std.io.Writer) !void {
+    pub fn dump(d: *DoubleBuffer, w: *std.Io.Writer) !void {
         if (d.dump_all) {
             if (d.ti.getStringCapability(.clear_screen) orelse d.ti.getStringCapability(.cursor_home)) |clear|
                 try w.writeAll(clear);
@@ -1117,6 +1132,8 @@ pub const DoubleBuffer = struct {
         } else {
             try d.write.dumpDiff(&d.read, d.ti, w);
         }
+
+        // TODO: Elide this if nothing changed
 
         try d.read.text.ensureTotalCapacity(d.read.gpa, d.write.text.items.len);
         try d.read.ensureTotalCellCapacity(d.write.cells.len);
@@ -1154,6 +1171,8 @@ pub fn colsText(s: *const Screen, line: u16, col: u16, n: u16) []u8 {
 }
 
 pub fn cellInRect(s: *const Screen, cell: usize, rect: Rect) bool {
+    if (s.width == 0 or s.height() == 0) return false;
+
     const x = cell % s.width;
     const y = cell / s.width;
     return y >= rect.y and y - rect.y < rect.height and
@@ -1469,6 +1488,45 @@ test "guhbuhduh" {
     try std.testing.expectEqual(0, s.cells.items(.lw)[1].len);
     try std.testing.expectEqual(cp2.len, s.cells.items(.lw)[2].len);
     try std.testing.expectEqual(0, s.cells.items(.lw)[3].len);
+}
+
+test "newlines in truncate mode" {
+    try initData();
+    defer deinitData();
+
+    var db: DoubleBuffer = .init(std.testing.allocator, undefined, .codepoint);
+    defer db.deinit();
+    const s = &db.write;
+
+    try db.resize(80, 20);
+
+    var buf: [128]u8 = undefined;
+    var wr = s.writerFull(&buf, .truncate, .unicode);
+    const w = &wr.interface;
+
+    try w.writeAll("howdy\nnice");
+    try w.flush();
+
+    try expectEqualStrings("how", s.colsText(0, 0, 3));
+    try expectEqualStrings("howd", s.colsText(0, 0, 4));
+    try expectEqualStrings("howdy", s.colsText(0, 0, 5));
+    try expectEqualStrings("howdy", s.colsText(0, 0, 10));
+    try expectEqualStrings("dy", s.colsText(0, 3, 5));
+    try expectEqualStrings("", s.colsText(0, 5, 5));
+    try expectEqualStrings("nice", s.colsText(1, 0, 10));
+    try expectEqualStrings("ice", s.colsText(1, 1, 10));
+
+    try db.resize(3, 20);
+    wr = s.writerFull(&buf, .truncate, .unicode);
+
+    try w.writeAll("howdy\nnice\nguh\nbuh");
+    try w.flush();
+
+    try expectEqualStrings("how", s.colsText(0, 0, 3));
+    try expectEqualStrings("nic", s.colsText(1, 0, 3));
+    // try expectEqualStrings("guh", s.colsText(2, 0, 3));
+    // try expectEqualStrings("buh", s.colsText(3, 0, 3));
+    // try expectEqualStrings("ic", s.colsText(1, 1, 2));
 }
 
 test "rectangular writes" {

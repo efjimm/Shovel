@@ -13,6 +13,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const posix = std.posix;
@@ -25,7 +26,7 @@ const zg = @import("zg");
 const GraphemeClusteringMode = @import("main.zig").GraphemeClusteringMode;
 const input = @import("input.zig");
 const InputParser = input.InputParser;
-const log = @import("log.zig");
+const log = std.log.scoped(.shovel);
 const Screen = @import("Screen.zig");
 const spells = @import("spells.zig");
 pub const CursorShape = spells.CursorShape;
@@ -86,7 +87,8 @@ height: u16 = 0,
 /// Are we currently rendering?
 currently_rendering: bool = false,
 
-tty: posix.fd_t,
+tty: Io.File,
+io: Io,
 
 cursor_visible: bool = true,
 cursor_shape: CursorShape = .unknown,
@@ -107,7 +109,7 @@ pub fn inputParser(term: *Term, bytes: []const u8) InputParser {
 }
 
 pub fn writer(term: *Term, buffer: []u8) std.fs.File.Writer {
-    return .init(.{ .handle = term.tty }, buffer);
+    return .init(.{ .handle = term.tty.handle }, buffer);
 }
 
 // NotATerminal + a subset of posix.OpenError, removing all errors which aren't reachable due to how
@@ -128,11 +130,13 @@ pub const InitError = error{
     SystemFdQuotaExceeded,
     SystemResources,
     PermissionDenied,
+    Canceled,
+    AntivirusInterference,
     Unexpected,
 } || Allocator.Error;
 
-pub fn init(gpa: Allocator, conf: TermConfig) InitError!Term {
-    const tty = posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
+pub fn init(gpa: Allocator, io: Io, conf: TermConfig) InitError!Term {
+    const tty = Io.File.openAbsolute(io, "/dev/tty", .{ .mode = .read_write }) catch |err| switch (err) {
         // None of these are reachable with the flags we pass to posix.open
         error.DeviceBusy,
         error.FileLocksNotSupported,
@@ -141,16 +145,18 @@ pub fn init(gpa: Allocator, conf: TermConfig) InitError!Term {
         error.PathAlreadyExists,
         error.WouldBlock,
         error.NetworkNotFound,
-        error.InvalidWtf8,
         error.ProcessNotFound,
+        error.SharingViolation,
+        error.PipeBusy,
         => unreachable,
 
+        error.Canceled,
+        error.AntivirusInterference,
         error.AccessDenied,
         error.BadPathName,
         error.FileBusy,
         error.FileNotFound,
         error.FileTooBig,
-        error.InvalidUtf8,
         error.IsDir,
         error.NameTooLong,
         error.NoDevice,
@@ -162,17 +168,17 @@ pub fn init(gpa: Allocator, conf: TermConfig) InitError!Term {
         error.Unexpected,
         => |e| return e,
     };
-    errdefer posix.close(tty);
+    errdefer tty.close(io);
 
-    if (!posix.isatty(tty))
+    if (!posix.isatty(tty.handle))
         return error.NotATerminal;
 
     const terminfo = try gpa.create(TermInfo);
     errdefer gpa.destroy(terminfo);
-    terminfo.* = getTermInfo(gpa, conf.terminfo) catch |err| switch (err) {
+    terminfo.* = getTermInfo(gpa, io, conf.terminfo) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidFormat, error.NoTermInfo => blk: {
-            std.log.err("Failed to load fallback terminfo, proceeding without terminfo definitions", .{});
+            log.err("Failed to load fallback terminfo, proceeding without terminfo definitions", .{});
             break :blk .{};
         },
     };
@@ -192,6 +198,7 @@ pub fn init(gpa: Allocator, conf: TermConfig) InitError!Term {
     return .{
         .tty = tty,
         .terminfo = terminfo,
+        .io = io,
     };
 }
 
@@ -205,24 +212,24 @@ pub fn deinit(term: *Term, gpa: Allocator) void {
     term.terminfo.deinit(gpa);
     gpa.destroy(term.terminfo);
 
-    posix.close(term.tty);
+    term.tty.close(term.io);
     term.* = undefined;
 }
 
 /// Returns a terminfo defintion based on the configuration. Returns `error.NoTermInfo` if a valid
 /// terminfo file cannot be found.
-fn getTermInfo(gpa: Allocator, opts: TermInfoConfig) !TermInfo {
+fn getTermInfo(gpa: Allocator, io: Io, opts: TermInfoConfig) !TermInfo {
     switch (opts.fallback_mode) {
-        .always => return opts.fallback.getTermInfo(gpa),
+        .always => return opts.fallback.getTermInfo(gpa, io),
         .last_resort => {
             const term_var = posix.getenv("TERM") orelse {
                 log.info("No TERM variable defined", .{});
                 return error.NoTermInfo;
             };
 
-            return TermInfo.getTermInfoForTerm(gpa, term_var) catch |err| switch (err) {
+            return TermInfo.getTermInfoForTerm(gpa, io, term_var) catch |err| switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
-                error.NoTermInfo => opts.fallback.getTermInfo(gpa),
+                error.NoTermInfo => opts.fallback.getTermInfo(gpa, io),
             };
         },
         .merge => {
@@ -231,13 +238,13 @@ fn getTermInfo(gpa: Allocator, opts: TermInfoConfig) !TermInfo {
                 return error.NoTermInfo;
             };
 
-            var terminfo: TermInfo = TermInfo.getTermInfoForTerm(gpa, term_var) catch |err| switch (err) {
+            var terminfo: TermInfo = TermInfo.getTermInfoForTerm(gpa, io, term_var) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.NoTermInfo => .{},
             };
             errdefer terminfo.deinit(gpa);
 
-            var fallback: TermInfo = opts.fallback.getTermInfo(gpa) catch |err| switch (err) {
+            var fallback: TermInfo = opts.fallback.getTermInfo(gpa, io) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.NoTermInfo, error.InvalidFormat => .{},
             };
@@ -253,7 +260,7 @@ const SetBlockingReadError = posix.TermiosGetError || posix.TermiosSetError;
 
 pub fn setBlockingRead(term: Term, enabled: bool) SetBlockingReadError!void {
     const termios = blk: {
-        var raw = try posix.tcgetattr(term.tty);
+        var raw = try posix.tcgetattr(term.tty.handle);
 
         if (enabled) {
             raw.cc[@intFromEnum(posix.system.V.TIME)] = 0;
@@ -266,7 +273,18 @@ pub fn setBlockingRead(term: Term, enabled: bool) SetBlockingReadError!void {
         break :blk raw;
     };
 
-    try posix.tcsetattr(term.tty, .FLUSH, termios);
+    try posix.tcsetattr(term.tty.handle, .FLUSH, termios);
+}
+
+/// Helper function to read once from the tty.
+fn readOnce(term: *Term, buf: []u8) ![]u8 {
+    var r = term.tty.readerStreaming(term.io, buf);
+    r.interface.fillMore() catch |err| switch (err) {
+        error.EndOfStream => |e| return e,
+        // TODO: Prune unreachable errors
+        error.ReadFailed => return r.err.?,
+    };
+    return r.interface.buffered();
 }
 
 // Reads from stdin to the supplied buffer. Asserts that `buf.len >= 8`.
@@ -286,29 +304,11 @@ pub fn readInput(term: *Term, buf: []u8) ![]u8 {
         break :blk buf;
     };
 
-    // Use system.read instead of posix.read so it won't restart on signals.
-    const rc = posix.system.read(term.tty, buffer.ptr, buffer.len);
+    const slice = try term.readOnce(buffer);
 
-    const bytes_read: usize = switch (posix.errno(rc)) {
-        .SUCCESS => @intCast(rc),
-        .INTR => 0,
-        .INVAL => unreachable,
-        .FAULT => unreachable,
-        .AGAIN => return error.WouldBlock,
-        .BADF => return error.NotOpenForReading, // Can be a race condition.
-        .IO => return error.InputOutput,
-        .ISDIR => return error.IsDir,
-        .NOBUFS => return error.SystemResources,
-        .NOMEM => return error.SystemResources,
-        .CONNRESET => return error.ConnectionResetByPeer,
-        .TIMEDOUT => return error.ConnectionTimedOut,
-        else => |err| return posix.unexpectedErrno(err),
-    };
-
-    const slice = buffer[0..bytes_read];
     // Check if last part of the buffer is a partial utf-8 codepoint. If this happens, we write the
     // partial codepoint to an internal buffer, and complete it on the next call to readInput.
-    if (bytes_read == buffer.len and buffer[buffer.len - 1] > 0x7F) {
+    if (slice.len == buffer.len and buffer[buffer.len - 1] > 0x7F) {
         var i: usize = buffer.len;
         while (i > 0) {
             i -= 1;
@@ -354,7 +354,7 @@ pub fn uncook(
     // together from various sources, including termios(3) and
     // https://viewsourcecode.org/snaptoken/kilo/02.enteringRawMode.html.
 
-    term.cooked_termios = try posix.tcgetattr(term.tty);
+    term.cooked_termios = try posix.tcgetattr(term.tty.handle);
     errdefer term.cook() catch {};
 
     const raw_termios = blk: {
@@ -403,7 +403,7 @@ pub fn uncook(
         break :blk raw;
     };
 
-    try posix.tcsetattr(term.tty, .FLUSH, raw_termios);
+    try posix.tcsetattr(term.tty.handle, .FLUSH, raw_termios);
 
     var buf: [256]u8 = undefined;
     var bw = term.writer(&buf);
@@ -433,13 +433,13 @@ pub fn uncook(
 /// proper grapheme cluster segmentation.
 ///
 /// https://github.com/contour-terminal/terminal-unicode-core
-pub fn enableMode2027(term: *Term, wr: *std.io.Writer) !void {
+pub fn enableMode2027(term: *Term, wr: *std.Io.Writer) !void {
     try wr.writeAll(spells.enable_mode_2027);
     try wr.writeAll("\x1B[?2027$p");
     try wr.flush();
     var poll_fds: [1]posix.pollfd = .{
         .{
-            .fd = term.tty,
+            .fd = term.tty.handle,
             .events = posix.POLL.IN,
             .revents = 0,
         },
@@ -447,9 +447,9 @@ pub fn enableMode2027(term: *Term, wr: *std.io.Writer) !void {
     _ = posix.poll(&poll_fds, 5) catch {};
     if (poll_fds[0].revents & posix.POLL.IN != 0) {
         var buf: [16]u8 = undefined;
-        if (posix.read(term.tty, &buf)) |len| {
-            if (std.mem.eql(u8, buf[0..len], "\x1b[?2027;1$y") or
-                std.mem.eql(u8, buf[0..len], "\x1b[?2027;3$y"))
+        if (term.readOnce(&buf)) |slice| {
+            if (std.mem.eql(u8, slice, "\x1b[?2027;1$y") or
+                std.mem.eql(u8, slice, "\x1b[?2027;3$y"))
             {
                 term.grapheme_clustering_mode = .grapheme;
                 log.info("Mode 2027 enabled", .{});
@@ -462,13 +462,13 @@ pub fn enableMode2027(term: *Term, wr: *std.io.Writer) !void {
     }
 }
 
-fn enableKittyKeyboard(term: *Term, wr: *std.io.Writer) !void {
+fn enableKittyKeyboard(term: *Term, wr: *std.Io.Writer) !void {
     try wr.writeAll(spells.enable_kitty_keyboard);
     try wr.writeAll("\x1B[?u");
     try wr.flush();
     var poll_fds: [1]posix.pollfd = .{
         .{
-            .fd = term.tty,
+            .fd = term.tty.handle,
             .events = posix.POLL.IN,
             .revents = 0,
         },
@@ -476,8 +476,8 @@ fn enableKittyKeyboard(term: *Term, wr: *std.io.Writer) !void {
     _ = posix.poll(&poll_fds, 5) catch {};
     if (poll_fds[0].revents & posix.POLL.IN != 0) {
         var buf: [16]u8 = undefined;
-        if (posix.read(term.tty, &buf)) |len| {
-            if (std.mem.eql(u8, buf[0..len], "\x1b[?1u")) {
+        if (term.readOnce(&buf)) |slice| {
+            if (std.mem.eql(u8, slice, "\x1b[?1u")) {
                 // Got the correct response from the terminal, kitty keyboard is enabled
                 term.kitty_enabled = true;
                 log.info("Kitty keyboard enabled", .{});
@@ -497,7 +497,7 @@ pub fn cook(term: *Term) CookError!void {
     if (term.isCooked())
         return;
 
-    try posix.tcsetattr(term.tty, .FLUSH, term.cooked_termios.?);
+    try posix.tcsetattr(term.tty.handle, .FLUSH, term.cooked_termios.?);
     term.cooked_termios = null;
 
     var buf: [128]u8 = undefined;
@@ -521,7 +521,7 @@ pub fn cook(term: *Term) CookError!void {
 
 pub fn fetchSize(term: *Term) posix.UnexpectedError!void {
     var size = std.mem.zeroes(std.posix.winsize);
-    const err = posix.system.ioctl(term.tty, posix.system.T.IOCGWINSZ, @intFromPtr(&size));
+    const err = posix.system.ioctl(term.tty.handle, posix.system.T.IOCGWINSZ, @intFromPtr(&size));
     if (posix.errno(err) != .SUCCESS) {
         return posix.unexpectedErrno(@enumFromInt(err));
     }
@@ -553,7 +553,7 @@ pub fn getRenderContext(term: *Term, buf: []u8) WriteError!RenderContext {
 
     var rc: RenderContext = .{
         .term = term,
-        .writer = .initStreaming(.{ .handle = term.tty }, buf),
+        .writer = .initStreaming(.{ .handle = term.tty.handle }, buf),
     };
 
     term.terminfo.writeExt(&rc.writer.interface, "Sync", .{1}) catch
@@ -689,7 +689,7 @@ pub const RenderContext = struct {
     }
 };
 
-pub fn setCursorShape(term: *Term, w: *std.io.Writer, shape: CursorShape) !void {
+pub fn setCursorShape(term: *Term, w: *std.Io.Writer, shape: CursorShape) !void {
     assert(shape != .unknown);
     if (term.cursor_shape == shape) return;
 

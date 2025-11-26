@@ -143,7 +143,7 @@ pub fn writeTruncating(
     max_width: u32,
     alignment: TextAlignment,
     mode: GraphemeClusteringMode,
-    writer: *std.io.Writer,
+    writer: *std.Io.Writer,
 ) !void {
     const res = stringWidth(str, mode, .{ .max_width = max_width });
     const width: u32 = @intCast(res.width);

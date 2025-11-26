@@ -44,10 +44,14 @@ pub fn main() !void {
     };
     defer _ = if (is_debug) dbg_allocator.deinit();
 
+    var threaded: std.Io.Threaded = .init(gpa);
+    defer threaded.deinit();
+    const io = threaded.ioBasic();
+
     try shovel.initUnicodeData(gpa);
     defer shovel.deinitUnicodeData(gpa);
 
-    term = try shovel.Term.init(gpa, .{
+    term = try shovel.Term.init(gpa, io, .{
         .terminfo = .{
             .fallback = .@"xterm-256color",
             .fallback_mode = .merge,
@@ -59,7 +63,7 @@ pub fn main() !void {
     defer db.deinit();
 
     posix.sigaction(
-        posix.SIG.WINCH,
+        .WINCH,
         &.{
             .handler = .{ .handler = handleSigWinch },
             .mask = posix.sigemptyset(),
@@ -165,7 +169,7 @@ fn blit(s: *shovel.Screen, width: u16) !void {
 /// Signal handles can be called at ANY point in your programs execution, so you should never call
 /// functions that depend on application state. Instead, you should set a global flack that you
 /// check in your main loop.
-fn handleSigWinch(_: c_int) callconv(.c) void {
+fn handleSigWinch(_: std.posix.SIG) callconv(.c) void {
     needs_resize = true;
     needs_update = true;
 }

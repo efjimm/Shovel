@@ -71,7 +71,7 @@ pub fn formatInt(
     base: u8,
     case: std.fmt.Case,
     options: FormatOptions,
-    writer: *std.io.Writer,
+    writer: *std.Io.Writer,
 ) !void {
     assert(base >= 2);
 
@@ -107,7 +107,7 @@ pub fn formatInt(
 
 /// Writes the same slice many times, performing the underlying write call as
 /// many times as necessary.
-pub fn splatBytesAll(w: *std.io.Writer, bytes: []const u8, splat: usize) std.io.Writer.Error!void {
+pub fn splatBytesAll(w: *std.Io.Writer, bytes: []const u8, splat: usize) std.Io.Writer.Error!void {
     var remaining_bytes: usize = bytes.len * splat;
     remaining_bytes -= try w.splatBytes(bytes, splat);
     while (remaining_bytes > 0) {

@@ -2,6 +2,7 @@
 // TODO: Investigate using terminfo for mouse support
 // TODO: Validate all sequences on load
 const std = @import("std");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const expectError = std.testing.expectError;
@@ -9,9 +10,9 @@ const expectEqual = std.testing.expectEqual;
 const expectEqualSlices = std.testing.expectEqualSlices;
 
 const input = @import("input.zig");
-const log = @import("log.zig");
 const util = @import("util.zig");
 
+const log = std.log.scoped(.shovel);
 const native_endian = @import("builtin").cpu.arch.endian();
 // Maximum length of terminfo definition files
 pub const max_file_length = 32768;
@@ -137,7 +138,7 @@ pub fn queryTrueColour(ti: *TermInfo) void {
         }
     }
 
-    std.log.info("Truecolour set to {t}", .{ti.truecolour});
+    log.info("Truecolour set to {t}", .{ti.truecolour});
 
     // if (ti.getNumberCapability(.max_colors)) |colors| {
     //     if (colors >= 1 << 24) {
@@ -178,11 +179,11 @@ pub const Fallback = union(enum) {
         .custom_source = @embedFile("dumb"),
     };
 
-    pub fn getTermInfo(f: Fallback, gpa: std.mem.Allocator) !TermInfo {
+    pub fn getTermInfo(f: Fallback, gpa: Allocator, io: Io) !TermInfo {
         switch (f) {
             .terms => |terms| {
                 for (terms) |term| {
-                    return getTermInfoForTerm(gpa, term) catch continue;
+                    return getTermInfoForTerm(gpa, io, term) catch continue;
                 }
                 return error.NoTermInfo;
             },
@@ -244,14 +245,14 @@ pub fn merge(gpa: std.mem.Allocator, dest: *TermInfo, src: *const TermInfo) !voi
     dest.string_table = list.items[dest.names.len..];
 }
 
-pub fn getTermInfoForTerm(gpa: Allocator, term: []const u8) !TermInfo {
+pub fn getTermInfoForTerm(gpa: Allocator, io: Io, term: []const u8) !TermInfo {
     var buf: [8192]u8 = undefined;
 
     var iter: TermInfo.FileIter = .{ .term = term };
     while (iter.next()) |file| {
         defer file.close();
 
-        var r = file.readerStreaming(&buf);
+        var r = file.readerStreaming(io, &buf);
         return parse(gpa, &r.interface) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.ReadFailed => {
@@ -572,7 +573,7 @@ pub fn populateInputMap(ti: *TermInfo, gpa: Allocator) !void {
 
 pub const ParseError = error{InvalidFormat} || Allocator.Error;
 
-pub fn parse(gpa: Allocator, r: *std.io.Reader) !TermInfo {
+pub fn parse(gpa: Allocator, r: *std.Io.Reader) !TermInfo {
     return parseInternal(gpa, r) catch |err| switch (err) {
         error.EndOfStream => error.InvalidFormat,
         else => |e| e,
@@ -580,7 +581,7 @@ pub fn parse(gpa: Allocator, r: *std.io.Reader) !TermInfo {
 }
 
 pub fn parseBytes(gpa: Allocator, bytes: []const u8) ParseError!TermInfo {
-    var r: std.io.Reader = .fixed(bytes);
+    var r: std.Io.Reader = .fixed(bytes);
     return parse(gpa, &r) catch |err| switch (err) {
         error.ReadFailed => unreachable,
         else => |e| e,
@@ -600,7 +601,7 @@ fn validateHeader(h: anytype) bool {
     return true;
 }
 
-fn parseInternal(gpa: Allocator, r: *std.io.Reader) !TermInfo {
+fn parseInternal(gpa: Allocator, r: *std.Io.Reader) !TermInfo {
     const Header = extern struct {
         format: Format,
         names_len: u16,
@@ -1446,7 +1447,7 @@ pub fn validateParamSequence(sequence: []const u8, param_count: usize) ParamSequ
 pub const FormatError = error{InvalidFormat};
 
 /// Write the string capability to writer. If the string capability is not defined, does nothing.
-pub fn write(ti: *const TermInfo, w: *std.io.Writer, cap: String, args: anytype) !void {
+pub fn write(ti: *const TermInfo, w: *std.Io.Writer, cap: String, args: anytype) !void {
     if (ti.getStringCapability(cap)) |str| {
         try writeParamSequence(str, w, args);
     }
@@ -1454,14 +1455,14 @@ pub fn write(ti: *const TermInfo, w: *std.io.Writer, cap: String, args: anytype)
 
 /// Write the extended string capability to writer. If the string capability is not defined, does
 /// nothing.
-pub fn writeExt(ti: *const TermInfo, w: *std.io.Writer, key: []const u8, args: anytype) !void {
+pub fn writeExt(ti: *const TermInfo, w: *std.Io.Writer, key: []const u8, args: anytype) !void {
     if (ti.getExtendedString(key)) |str| {
         try writeParamSequence(str, w, args);
     }
 }
 
 /// Writes a paramterized escape sequence to the given writer, with the specified arguments.
-pub fn writeParamSequence(str: []const u8, writer: *std.io.Writer, args: anytype) !void {
+pub fn writeParamSequence(str: []const u8, writer: *std.Io.Writer, args: anytype) !void {
     // TODO: Move the validation from here to the loading of terminfo definitions.
     validateParamSequence(str, args.len) catch return error.InvalidFormat;
     const PrintFlags = packed struct(u4) {
@@ -2916,7 +2917,7 @@ test "xterm" {
 
 fn testParam(expected: anytype, sequence: []const u8, args: anytype) !void {
     var buf: [4096]u8 = undefined;
-    var writer = std.io.Writer.fixed(&buf);
+    var writer = std.Io.Writer.fixed(&buf);
 
     const res = validateParamSequence(sequence, args.len);
     if (comptime util.isZigString(@TypeOf(expected))) {

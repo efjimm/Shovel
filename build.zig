@@ -6,7 +6,6 @@ pub fn build(b: *Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const test_filter = b.option([]const u8, "test-filter", "Filter string for tests");
-    const enable_logging = b.option(bool, "logging", "Enable logging") orelse false;
     const llvm = b.option(bool, "llvm", "Use LLVM");
 
     const xterm = b.createModule(.{
@@ -27,13 +26,8 @@ pub fn build(b: *Build) void {
         .optimize = optimize,
     }).module("zg");
 
-    const opts = b.addOptions();
-    opts.addOption(bool, "logging_enabled", enable_logging);
-    const opts_module = opts.createModule();
-
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "critbit", .module = critbit },
-        .{ .name = "build_options", .module = opts_module },
         .{ .name = "zg", .module = zg },
         .{ .name = "xterm-256color", .module = xterm },
         .{ .name = "dumb", .module = dumb },

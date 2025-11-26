@@ -2,7 +2,7 @@
 //       Possibly implement this as a separate writer that wraps this one.
 const std = @import("std");
 const assert = std.debug.assert;
-const Writer = std.io.Writer;
+const Writer = std.Io.Writer;
 
 const zg = @import("zg");
 
@@ -395,7 +395,7 @@ fn utf8Iterator(bytes: []const u8) std.unicode.Utf8Iterator {
 // fn fuzz(_: void, input: []const u8) anyerror!void {
 //     if (input.len == 0) return;
 
-//     var tcw = terminalCellWriter(std.io.null_writer, .grapheme, input[0] +| 1);
+//     var tcw = terminalCellWriter(std.Io.null_writer, .grapheme, input[0] +| 1);
 //     const codepoints = std.mem.bytesAsSlice(u21, input[0 .. input.len - input.len % 4]);
 //     for (codepoints) |cp| {
 //         const valid_codepoint = std.unicode.utf8ValidCodepoint(cp);

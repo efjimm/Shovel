@@ -18,7 +18,7 @@
 const std = @import("std");
 const Style = @This();
 const TermInfo = @import("TermInfo.zig");
-const log = @import("log.zig");
+const log = std.log.scoped(.shovel);
 
 pub const Colour = union(enum(u5)) {
     const colour_desc = @import("colour_description.zig");
@@ -88,7 +88,7 @@ pub const DumpOptions = struct {
 };
 
 /// Dumps the attributes to `writer`, using the capabilities reported by `ti`.
-pub fn dump(style: Style, writer: *std.io.Writer, opts: DumpOptions) !void {
+pub fn dump(style: Style, writer: *std.Io.Writer, opts: DumpOptions) !void {
     const ti = opts.terminfo orelse return style.dumpEcma48(writer);
     if (opts.diff != null) return dumpDiff(style, writer, opts);
 
@@ -156,7 +156,7 @@ pub fn dump(style: Style, writer: *std.io.Writer, opts: DumpOptions) !void {
 }
 
 /// Write only the difference between two styles.
-pub fn dumpDiff(style: Style, writer: *std.io.Writer, opts: DumpOptions) !void {
+pub fn dumpDiff(style: Style, writer: *std.Io.Writer, opts: DumpOptions) !void {
     const ti = opts.terminfo orelse return style.dumpEcma48(writer);
     const diff = opts.diff.?;
 
@@ -243,7 +243,7 @@ pub fn dumpDiff(style: Style, writer: *std.io.Writer, opts: DumpOptions) !void {
 /// to the terminal's default. There is no standard way with terminfo to reset only the
 /// foreground/background colour, so resetting the foreground colour also resets the background
 /// colour. If this happens, true is returned. Otherwise returns false.
-pub fn dumpFg(fg: Colour, ti: *const TermInfo, w: *std.io.Writer) !bool {
+pub fn dumpFg(fg: Colour, ti: *const TermInfo, w: *std.Io.Writer) !bool {
     switch (fg) {
         .none => {
             if (ti.getStringCapability(.orig_pair)) |op| {
@@ -326,7 +326,7 @@ pub fn dumpFg(fg: Colour, ti: *const TermInfo, w: *std.io.Writer) !bool {
 }
 
 /// May reset the foreground colour.
-pub fn dumpBg(bg: Colour, ti: *const TermInfo, w: *std.io.Writer) !bool {
+pub fn dumpBg(bg: Colour, ti: *const TermInfo, w: *std.Io.Writer) !bool {
     switch (bg) {
         .none => {
             if (ti.getStringCapability(.orig_pair)) |op| {
@@ -412,7 +412,7 @@ pub fn approximateTruecolor(rgb: [3]u8) u8 {
 
 /// Dumps attributes to `writer` using ECMA-48 escape sequences. This is likely to result in less
 /// bytes written to the terminal than using terminfo sequences.
-pub fn dumpEcma48(style: Style, w: *std.io.Writer) !void {
+pub fn dumpEcma48(style: Style, w: *std.Io.Writer) !void {
     var buffer: [64]u8 = undefined;
     var buf: std.ArrayListUnmanaged(u8) = .initBuffer(&buffer);
     buf.appendSliceAssumeCapacity("\x1B[");
@@ -487,5 +487,5 @@ pub fn dumpEcma48(style: Style, w: *std.io.Writer) !void {
 
     buf.items[buf.items.len - 1] = 'm';
     try w.writeAll(buf.items);
-    log.perf.debug("dump style {d} bytes", .{buf.items.len});
+    // log.debug("dump style {d} bytes", .{buf.items.len});
 }

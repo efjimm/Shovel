@@ -93,7 +93,7 @@ const BenchCanvas = struct {
     }
 
     fn render(b: *BenchCanvas) !void {
-        try b.canvas.dump(.{}, std.io.null_writer);
+        try b.canvas.dump(.{}, std.Io.null_writer);
     }
 
     fn deinit(b: *BenchCanvas) void {
@@ -109,7 +109,7 @@ const BenchVaxis = struct {
     fn init(allocator: std.mem.Allocator, lines: u16, cols: u16) !BenchVaxis {
         const vx = try allocator.create(vaxis.Vaxis);
         vx.* = try vaxis.init(allocator, .{});
-        try vx.resize(allocator, std.io.null_writer.any(), .{
+        try vx.resize(allocator, std.Io.null_writer.any(), .{
             .cols = cols,
             .rows = lines,
             .x_pixel = 0,
@@ -119,7 +119,7 @@ const BenchVaxis = struct {
     }
 
     fn deinit(b: *BenchVaxis, allocator: std.mem.Allocator) void {
-        b.vx.deinit(allocator, std.io.null_writer.any());
+        b.vx.deinit(allocator, std.Io.null_writer.any());
         allocator.destroy(b.vx);
     }
 
@@ -174,8 +174,8 @@ pub fn main() !void {
     } else .{};
     defer inline for (&benches) |*bench| bench.deinit(alloc);
 
-    const stdout = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout);
+    const stdout = std.Io.getStdOut().writer();
+    var bw = std.Io.bufferedWriter(stdout);
     const writer = bw.writer();
 
     inline for (&benches) |*bench| {

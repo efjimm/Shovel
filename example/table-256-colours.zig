@@ -1,5 +1,6 @@
 const std = @import("std");
-const io = std.io;
+const Io = std.Io;
+const builtin = @import("builtin");
 
 const shovel = @import("shovel");
 
@@ -13,16 +14,24 @@ pub const std_options: std.Options = .{
 };
 
 pub fn main() !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer _ = gpa.deinit();
+    var dbg_allocator: std.heap.DebugAllocator(.{}) = .init;
+    const gpa, const is_debug = switch (builtin.mode) {
+        .Debug, .ReleaseSafe => .{ dbg_allocator.allocator(), true },
+        .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
+    };
+    defer _ = if (is_debug) dbg_allocator.deinit();
 
-    var term = try shovel.Term.init(gpa.allocator(), .{
+    var threaded: std.Io.Threaded = .init(gpa);
+    defer threaded.deinit();
+    const io = threaded.ioBasic();
+
+    var term = try shovel.Term.init(gpa, io, .{
         .terminfo = .{
             .fallback = .@"xterm-256color",
             .fallback_mode = .last_resort,
         },
     });
-    defer term.deinit(gpa.allocator());
+    defer term.deinit(gpa);
 
     var file_writer = std.fs.File.stdout().writer(&.{});
     const writer = &file_writer.interface;
@@ -84,7 +93,7 @@ pub fn main() !void {
     try writer.writeByte('\n');
 }
 
-fn writeTitle(ti: ?*shovel.TermInfo, writer: *std.io.Writer, bytes: []const u8) !void {
+fn writeTitle(ti: ?*shovel.TermInfo, writer: *Io.Writer, bytes: []const u8) !void {
     try title.dump(writer, .{ .terminfo = ti });
     try writer.writeByte('\n');
     try writer.writeAll(bytes);

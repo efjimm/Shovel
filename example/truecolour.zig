@@ -10,7 +10,11 @@ pub fn main() !void {
     defer _ = dbg.deinit();
     const gpa = dbg.allocator();
 
-    var term: shovel.Term = try .init(gpa, .{
+    var threaded: std.Io.Threaded = .init(gpa);
+    defer threaded.deinit();
+    const io = threaded.ioBasic();
+
+    var term: shovel.Term = try .init(gpa, io, .{
         .terminfo = .{
             .fallback = .@"xterm-256color",
             .fallback_mode = .last_resort,
