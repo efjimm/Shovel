@@ -104,24 +104,3 @@ pub fn formatInt(
         try writer.splatByteAll(' ', width -| precision -| digit_count -| write_sign);
     }
 }
-
-/// Writes the same slice many times, performing the underlying write call as
-/// many times as necessary.
-pub fn splatBytesAll(w: *std.Io.Writer, bytes: []const u8, splat: usize) std.Io.Writer.Error!void {
-    var remaining_bytes: usize = bytes.len * splat;
-    remaining_bytes -= try w.splatBytes(bytes, splat);
-    while (remaining_bytes > 0) {
-        const leftover = remaining_bytes % bytes.len;
-        const buffers: [2][]const u8 = .{ bytes[bytes.len - leftover ..], bytes };
-        remaining_bytes -= try w.writeSplat(&buffers, splat);
-    }
-}
-
-// Converts values in the range [0, 100) to a string.
-fn digits2(value: usize) [2]u8 {
-    return ("0001020304050607080910111213141516171819" ++
-        "2021222324252627282930313233343536373839" ++
-        "4041424344454647484950515253545556575859" ++
-        "6061626364656667686970717273747576777879" ++
-        "8081828384858687888990919293949596979899")[value * 2 ..][0..2].*;
-}

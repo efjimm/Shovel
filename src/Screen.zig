@@ -1,4 +1,3 @@
-// TODO: Allow automatically resizing screens to fit content.
 const std = @import("std");
 const assert = std.debug.assert;
 const expectEqualStrings = std.testing.expectEqualStrings;
@@ -214,7 +213,7 @@ pub const Writer = struct {
         if (w.rect.x == 0 and w.rect.width == w.s.width) {
             if (w.rect.y == 0 and w.rect.height == w.s.height()) {
                 w.s.text.clearRetainingCapacity();
-                @memset(w.s.cells.items(.lw), .{ .len = 0, .width = 0 });
+                @memset(w.s.cells.items(.lw), .{ .len = 0, .wide = false });
                 @memset(w.s.cells.items(.style), .{});
                 @memset(w.s.lines.items, .{ .len = 0 });
                 w.cursor = .{
@@ -229,7 +228,7 @@ pub const Writer = struct {
             const cells_start = w.rect.y * w.s.width;
             const cells_len = w.rect.height * w.s.width;
             const cells = w.s.cells.subslice(cells_start, cells_len);
-            @memset(cells.items(.lw), .{ .len = 0, .width = 0 });
+            @memset(cells.items(.lw), .{ .len = 0, .wide = false });
             @memset(cells.items(.style), .{});
 
             var text_off: usize = 0;
@@ -263,7 +262,7 @@ pub const Writer = struct {
 
             w.s.text.replaceRangeAssumeCapacity(dest_cursor.text_offset, remove_len, "");
 
-            @memset(dest_cells.items(.lw), .{ .len = 0, .width = 0 });
+            @memset(dest_cells.items(.lw), .{ .len = 0, .wide = false });
             @memset(dest_cells.items(.style), .{});
 
             w.s.lines.items[y].len -= remove_len;
@@ -487,7 +486,7 @@ pub const Writer = struct {
 
         if (w.cursor.cell_offset > 0) {
             const lw = w.s.cells.items(.lw)[w.cursor.cell_offset - 1];
-            if (lw.width != 0) {
+            if (lw.wide) {
                 // We're overwriting the right-hand side of a wide character, so we need to erase
                 // it.
 
@@ -528,7 +527,7 @@ pub const Writer = struct {
             cells.set(width, .{
                 .lw = .{
                     .len = @intCast(char_bytes.len),
-                    .width = @intCast(res.width - 1),
+                    .wide = res.width > 1,
                 },
                 .style = w.cursor.style,
             });
@@ -578,7 +577,7 @@ pub const Writer = struct {
 
         if (w.cursor.cell_offset > 0) {
             const lw = w.s.cells.items(.lw)[w.cursor.cell_offset - 1];
-            if (lw.width != 0) {
+            if (lw.wide) {
                 // We're overwriting the right-hand side of a wide character, so we need to erase
                 // it.
 
@@ -606,7 +605,7 @@ pub const Writer = struct {
             }
 
             replace_len += lw.len;
-            lw.* = .{ .len = 1, .width = 0 };
+            lw.* = .{ .len = 1, .wide = false };
             style.* = w.cursor.style;
         }
 
@@ -791,12 +790,12 @@ pub const Line = packed struct {
 pub const Cell = struct {
     lw: packed struct {
         len: u15,
-        width: u1,
+        wide: bool,
     },
     style: Style,
 
     pub const blank: Cell = .{
-        .lw = .{ .len = 0, .width = 0 },
+        .lw = .{ .len = 0, .wide = false },
         .style = .{},
     };
 };
@@ -853,7 +852,7 @@ pub fn resizeAssumeCapacity(s: *Screen, new_width: u16, new_height: u16) void {
     const n = @as(u32, new_width) * new_height;
     s.cells.len = n;
     s.lines.items.len = new_height;
-    @memset(s.cells.items(.lw), .{ .len = 0, .width = 0 });
+    @memset(s.cells.items(.lw), .{ .len = 0, .wide = false });
     @memset(s.cells.items(.style), .{});
     @memset(s.lines.items, .{ .len = 0 });
     s.width = new_width;
@@ -962,7 +961,7 @@ pub fn dump(s: *const Screen, ti: *const TermInfo, w: *std.Io.Writer) !void {
             }
 
             off += lw.len;
-            last_wide = lw.width != 0;
+            last_wide = lw.wide;
         }
 
         if (cell_off < s.cells.len - s.width)
@@ -1061,7 +1060,7 @@ pub fn dumpDiff(new: *Screen, old: *Screen, ti: *const TermInfo, w: *std.Io.Writ
                 assert(!last_wide);
                 continue;
             }
-            last_wide = lw.width != 0;
+            last_wide = lw.wide;
 
             if (blank_start > 0) {
                 try w.splatByteAll(' ', blank_start);

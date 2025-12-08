@@ -44,7 +44,7 @@ pub fn main() !void {
     };
     defer _ = if (is_debug) dbg_allocator.deinit();
 
-    var threaded: std.Io.Threaded = .init(gpa);
+    var threaded: std.Io.Threaded = .init_single_threaded;
     defer threaded.deinit();
     const io = threaded.ioBasic();
 
@@ -96,7 +96,10 @@ pub fn main() !void {
             needs_update = false;
         }
 
-        const slice = try term.readInput(&input_buf);
+        const slice = term.readInputSingleThreadedBlocking(&input_buf) catch |err| switch (err) {
+            error.Interrupted => &.{},
+            else => |e| return e,
+        };
         var it = term.inputParser(slice);
         while (it.next()) |in| {
             // The input descriptor parser is not only useful for user-configuration.

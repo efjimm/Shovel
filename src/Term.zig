@@ -93,9 +93,6 @@ io: Io,
 cursor_visible: bool = true,
 cursor_shape: CursorShape = .unknown,
 
-codepoint: [4]u8 = undefined,
-codepoint_len: u3 = 0,
-
 terminfo: *TermInfo,
 
 /// True if the kitty keyboard protocol is active.
@@ -136,7 +133,7 @@ pub const InitError = error{
 } || Allocator.Error;
 
 pub fn init(gpa: Allocator, io: Io, conf: TermConfig) InitError!Term {
-    const tty = Io.File.openAbsolute(io, "/dev/tty", .{ .mode = .read_write }) catch |err| switch (err) {
+    const tty = Io.Dir.cwd().openFile(io, "/dev/tty", .{ .mode = .read_write }) catch |err| switch (err) {
         // None of these are reachable with the flags we pass to posix.open
         error.DeviceBusy,
         error.FileLocksNotSupported,
@@ -287,46 +284,94 @@ fn readOnce(term: *Term, buf: []u8) ![]u8 {
     return r.interface.buffered();
 }
 
-// Reads from stdin to the supplied buffer. Asserts that `buf.len >= 8`.
-pub fn readInput(term: *Term, buf: []u8) ![]u8 {
+/// `std.posix.read` without restarting behaviour on signal interrupt.
+fn posixReadNoRestart(fd: std.posix.fd_t, buf: []u8) ReadSingleThreadedBlockingError!usize {
+    if (buf.len == 0) return 0;
+    if (builtin.os.tag == .windows) {
+        return std.os.windows.ReadFile(fd, buf, null);
+    }
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
+        const iovs = [1]std.posix.iovec{.{
+            .base = buf.ptr,
+            .len = buf.len,
+        }};
+
+        var nread: usize = undefined;
+        switch (std.os.wasi.fd_read(fd, &iovs, iovs.len, &nread)) {
+            .SUCCESS => return nread,
+            .INTR => unreachable,
+            .INVAL => unreachable,
+            .FAULT => unreachable,
+            .AGAIN => unreachable,
+            .BADF => return error.NotOpenForReading, // Can be a race condition.
+            .IO => return error.InputOutput,
+            .ISDIR => return error.IsDir,
+            .NOBUFS => return error.SystemResources,
+            .NOMEM => return error.SystemResources,
+            .NOTCONN => return error.SocketUnconnected,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            .TIMEDOUT => return error.Timeout,
+            .NOTCAPABLE => return error.AccessDenied,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+
+    // Prevents EINVAL.
+    const max_count = switch (builtin.os.tag) {
+        .linux => 0x7ffff000,
+        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => std.math.maxInt(i32),
+        else => std.math.maxInt(isize),
+    };
+    const rc = std.posix.system.read(fd, buf.ptr, @min(buf.len, max_count));
+    return switch (std.posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .INTR => error.Interrupted,
+        .INVAL => unreachable,
+        .FAULT => unreachable,
+        .SRCH => error.ProcessNotFound,
+        .AGAIN => error.WouldBlock,
+        .CANCELED => error.Canceled,
+        .BADF => error.NotOpenForReading, // Can be a race condition.
+        .IO => error.InputOutput,
+        .ISDIR => error.IsDir,
+        .NOBUFS => error.SystemResources,
+        .NOMEM => error.SystemResources,
+        .NOTCONN => error.SocketUnconnected,
+        .CONNRESET => error.ConnectionResetByPeer,
+        .TIMEDOUT => error.Timeout,
+        else => |err| std.posix.unexpectedErrno(err),
+    };
+}
+
+pub const ReadSingleThreadedBlockingError = error{Interrupted} || std.posix.ReadError;
+
+/// Reads from stdin to the supplied buffer. Asserts that `buf.len >= 8`. Uses posix.system.read
+/// instead of the stored io parameter to allow syscalls to be interrupted by signals. In
+/// `std.Io.Threaded` syscalls are restarted on signal interrupt which can be avoided with
+/// cancellation, but this is not possible in single threaded mode as obtaining a future is
+/// impossible.
+///
+/// If the read call is interrupted by a signal, returns `error.Interrupted`.
+pub fn readInputSingleThreadedBlocking(
+    term: *Term,
+    buf: []u8,
+) ReadSingleThreadedBlockingError![]u8 {
     assert(buf.len >= 8); // Ensures that at least one full escape sequence can be handled
     assert(!term.currently_rendering);
     assert(!term.isCooked());
 
-    // If we have a partial codepoint from the last read, append it to the buffer
-    const buffer = blk: {
-        const len = term.codepoint_len;
-        if (len > 0) {
-            @memcpy(buf[0..len], term.codepoint[0..len]);
-            term.codepoint_len = 0;
-            break :blk buf[len..];
-        }
-        break :blk buf;
-    };
+    const bytes_read = try posixReadNoRestart(term.tty.handle, buf);
+    return buf[0..bytes_read];
+}
 
-    const slice = try term.readOnce(buffer);
-
-    // Check if last part of the buffer is a partial utf-8 codepoint. If this happens, we write the
-    // partial codepoint to an internal buffer, and complete it on the next call to readInput.
-    if (slice.len == buffer.len and buffer[buffer.len - 1] > 0x7F) {
-        var i: usize = buffer.len;
-        while (i > 0) {
-            i -= 1;
-            if (buffer[i] & 0xC0 == 0xC0) break;
-        } else return slice; // Have invalid utf-8, pass it through
-
-        const codepoint_len = std.unicode.utf8ByteSequenceLength(buffer[i]) catch return slice;
-        const len = buffer.len - i; // Length of unfinished codepoint
-        if (codepoint_len <= len) return slice; // Have invalid utf-8
-
-        // Copy unfinished codepoint into internal buffer
-        @memcpy(term.codepoint[0..len], buffer[i..]);
-        term.codepoint_len = @intCast(len);
-        // Return the buffer without the trailing unfinished codepoint
-        return buffer[0..i];
-    }
-
-    return slice;
+/// Reads from stdin to the supplied buffer. Asserts that `buf.len >= 8`.
+///
+/// Uses the io parameter stored in this terminal.
+pub fn readInput(term: *Term, buf: []u8) ![]u8 {
+    assert(buf.len >= 8); // Ensures that at least one full escape sequence can be handled
+    assert(!term.currently_rendering);
+    assert(!term.isCooked());
+    return try term.readOnce(buf);
 }
 
 pub inline fn isCooked(term: *const Term) bool {
