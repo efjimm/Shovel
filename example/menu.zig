@@ -8,24 +8,6 @@ const builtin = @import("builtin");
 
 const shovel = @import("shovel");
 
-pub const std_options: std.Options = .{
-    .log_level = .debug,
-    .logFn = log,
-};
-
-var logfile: std.fs.File = undefined;
-
-pub fn log(
-    comptime _: std.log.Level,
-    comptime _: @TypeOf(.enum_literal),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    var wr = logfile.writerStreaming(&.{});
-    wr.interface.print(format ++ "\n", args) catch @panic("");
-    wr.interface.flush() catch @panic("");
-}
-
 var term: shovel.Term = undefined;
 var running: bool = true;
 
@@ -33,25 +15,14 @@ var cursor: usize = 0;
 
 const entries = [_][]const u8{ "foo", "bar", "baz", "longer", "→µ←" };
 
-pub fn main() !void {
-    logfile = try std.fs.cwd().createFile("log.txt", .{});
-    defer logfile.close();
-
-    var dbg_allocator: std.heap.DebugAllocator(.{}) = .init;
-    const gpa, const is_debug = switch (builtin.mode) {
-        .Debug, .ReleaseSafe => .{ dbg_allocator.allocator(), true },
-        .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
-    };
-    defer _ = if (is_debug) dbg_allocator.deinit();
-
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    defer threaded.deinit();
-    const io = threaded.ioBasic();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
 
     try shovel.initUnicodeData(gpa);
     defer shovel.deinitUnicodeData(gpa);
 
-    term = try shovel.Term.init(gpa, io, .{
+    term = try shovel.Term.init(gpa, io, init.minimal.environ, .{
         .terminfo = .{
             .fallback = .@"xterm-256color",
             .fallback_mode = .merge,

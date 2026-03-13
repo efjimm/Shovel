@@ -6,25 +6,20 @@ pub const std_options: std.Options = .{
     .log_level = .err,
 };
 
-pub fn main() !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
 
-    var threaded: std.Io.Threaded = .init(allocator);
-    defer threaded.deinit();
-    const io = threaded.ioBasic();
+    try shovel.initUnicodeData(gpa);
+    defer shovel.deinitUnicodeData(gpa);
 
-    try shovel.initUnicodeData(allocator);
-    defer shovel.deinitUnicodeData(allocator);
-
-    var term = try shovel.Term.init(allocator, io, .{
+    var term = try shovel.Term.init(gpa, io, init.minimal.environ, .{
         .terminfo = .{
             .fallback = .@"xterm-256color",
             .fallback_mode = .last_resort,
         },
     });
-    defer term.deinit(allocator);
+    defer term.deinit(gpa);
 
     try term.uncook(.{});
     try term.fetchSize();

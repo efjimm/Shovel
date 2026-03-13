@@ -125,14 +125,14 @@ pub const hardcoded_setrgbb = "\x1b[48;2;%p1%d;%p2%d;%p3%dm";
 
 /// Queries the current terminal for truecolour support. If found, sets the `setrgbf` and `setrgbb`
 /// extended strings.
-pub fn queryTrueColour(ti: *TermInfo) void {
+pub fn queryTrueColour(ti: *TermInfo, env: std.process.Environ) void {
     if (ti.getExtendedString("setrgbf") != null and ti.getExtendedString("setrgbb") != null) {
         ti.truecolour = .setrgb;
     } else if (ti.getExtendedFlag("RGB")) {
         ti.truecolour = .lunacy;
     } else if (ti.getExtendedFlag("Tc")) {
         ti.truecolour = .hardcoded;
-    } else if (std.posix.getenv("COLORTERM")) |colorterm| {
+    } else if (env.getPosix("COLORTERM")) |colorterm| {
         if (std.mem.eql(u8, colorterm, "truecolor") or std.mem.eql(u8, colorterm, "24bit")) {
             ti.truecolour = .hardcoded;
         }
@@ -179,11 +179,11 @@ pub const Fallback = union(enum) {
         .custom_source = @embedFile("dumb"),
     };
 
-    pub fn getTermInfo(f: Fallback, gpa: Allocator, io: Io) !TermInfo {
+    pub fn getTermInfo(f: Fallback, gpa: Allocator, io: Io, env: std.process.Environ) !TermInfo {
         switch (f) {
             .terms => |terms| {
                 for (terms) |term| {
-                    return getTermInfoForTerm(gpa, io, term) catch continue;
+                    return getTermInfoForTerm(gpa, io, env, term) catch continue;
                 }
                 return error.NoTermInfo;
             },
@@ -245,12 +245,12 @@ pub fn merge(gpa: std.mem.Allocator, dest: *TermInfo, src: *const TermInfo) !voi
     dest.string_table = list.items[dest.names.len..];
 }
 
-pub fn getTermInfoForTerm(gpa: Allocator, io: Io, term: []const u8) !TermInfo {
+pub fn getTermInfoForTerm(gpa: Allocator, io: Io, env: std.process.Environ, term: []const u8) !TermInfo {
     var buf: [8192]u8 = undefined;
 
-    var iter: TermInfo.FileIter = .{ .term = term };
+    var iter: TermInfo.FileIter = .{ .term = term, .io = io, .env = env };
     while (iter.next()) |file| {
-        defer file.close();
+        defer file.close(io);
 
         var r = file.readerStreaming(io, &buf);
         return parse(gpa, &r.interface) catch |err| switch (err) {
@@ -270,16 +270,16 @@ pub fn getTermInfoForTerm(gpa: Allocator, io: Io, term: []const u8) !TermInfo {
     return error.NoTermInfo;
 }
 
-fn searchTermInfoDirectory(term: []const u8) ?std.fs.File {
+fn searchTermInfoDirectory(io: std.Io, env: std.process.Environ, term: []const u8) ?std.Io.File {
     assert(term.len > 0);
 
-    const dir_path = std.posix.getenv("TERMINFO") orelse return null;
+    const dir_path = env.getPosix("TERMINFO") orelse return null;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&buf);
     const path = std.fs.path.join(fba.allocator(), &.{ dir_path, term[0..1], term }) catch
         return null;
 
-    if (std.fs.openFileAbsolute(path, .{})) |file| {
+    if (std.Io.Dir.openFileAbsolute(io, path, .{})) |file| {
         log.info("Found terminfo description at '{s}'", .{path});
         return file;
     } else |err| {
@@ -288,16 +288,16 @@ fn searchTermInfoDirectory(term: []const u8) ?std.fs.File {
     }
 }
 
-fn searchHomeDirectory(term: []const u8) ?std.fs.File {
+fn searchHomeDirectory(io: std.Io, env: std.process.Environ, term: []const u8) ?std.Io.File {
     assert(term.len > 0);
 
-    const home = std.posix.getenv("HOME") orelse return null;
+    const home = env.getPosix("HOME") orelse return null;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&buf);
     const path = std.fs.path.join(fba.allocator(), &.{ home, ".terminfo", term[0..1], term }) catch
         return null;
 
-    if (std.fs.openFileAbsolute(path, .{})) |file| {
+    if (std.Io.Dir.openFileAbsolute(io, path, .{})) |file| {
         log.info("Found terminfo description at '{s}'", .{path});
         return file;
     } else |err| {
@@ -306,21 +306,21 @@ fn searchHomeDirectory(term: []const u8) ?std.fs.File {
     }
 }
 
-fn searchTermInfoDirs(term: []const u8) ?std.fs.File {
-    const dirs = std.posix.getenv("TERMINFO_DIRS") orelse return null;
+fn searchTermInfoDirs(io: std.Io, env: std.process.Environ, term: []const u8) ?std.Io.File {
+    const dirs = env.getPosix("TERMINFO_DIRS") orelse return null;
     var iter = std.mem.splitScalar(u8, dirs, ':');
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
 
     while (iter.next()) |dir_path| {
         if (dir_path.len == 0)
-            return searchDefaultDirs(term) orelse continue;
+            return searchDefaultDirs(io, term) orelse continue;
 
         var fba: std.heap.FixedBufferAllocator = .init(&buf);
         const path = std.fs.path.join(fba.allocator(), &.{ dir_path, term[0..1], term }) catch
             continue;
 
-        if (std.fs.openFileAbsolute(path, .{})) |file| {
+        if (std.Io.Dir.openFileAbsolute(io, path, .{})) |file| {
             log.info("Found terminfo decription at '{s}'", .{path});
             return file;
         } else |err| {
@@ -332,7 +332,7 @@ fn searchTermInfoDirs(term: []const u8) ?std.fs.File {
     return null;
 }
 
-fn searchDefaultDirs(term: []const u8) ?std.fs.File {
+fn searchDefaultDirs(io: std.Io, term: []const u8) ?std.Io.File {
     assert(term.len > 0);
 
     const dirs = [_][]const u8{
@@ -347,7 +347,7 @@ fn searchDefaultDirs(term: []const u8) ?std.fs.File {
     var fba: std.heap.FixedBufferAllocator = .init(&buf);
     for (dirs) |dir| {
         const path = std.fs.path.join(fba.allocator(), &.{ dir, term[0..1], term }) catch continue;
-        if (std.fs.openFileAbsolute(path, .{})) |file| {
+        if (std.Io.Dir.openFileAbsolute(io, path, .{})) |file| {
             log.info("Found terminfo decription at '{s}'", .{path});
             return file;
         } else |err| {
@@ -362,6 +362,8 @@ fn searchDefaultDirs(term: []const u8) ?std.fs.File {
 pub const FileIter = struct {
     term: []const u8,
     state: State = .terminfo_var,
+    io: std.Io,
+    env: std.process.Environ,
 
     pub const State = enum(u3) {
         terminfo_var,
@@ -371,16 +373,16 @@ pub const FileIter = struct {
         done,
     };
 
-    pub fn next(iter: *FileIter) ?std.fs.File {
+    pub fn next(iter: *FileIter) ?std.Io.File {
         if (iter.term.len == 0) return null;
 
         const old_state = iter.state;
         iter.state = @enumFromInt(@min(@intFromEnum(State.done), @intFromEnum(iter.state) + 1));
         return switch (old_state) {
-            .terminfo_var => searchTermInfoDirectory(iter.term) orelse iter.next(),
-            .home => searchHomeDirectory(iter.term) orelse iter.next(),
-            .terminfo_dirs => searchTermInfoDirs(iter.term) orelse iter.next(),
-            .system => searchDefaultDirs(iter.term) orelse iter.next(),
+            .terminfo_var => searchTermInfoDirectory(iter.io, iter.env, iter.term) orelse iter.next(),
+            .home => searchHomeDirectory(iter.io, iter.env, iter.term) orelse iter.next(),
+            .terminfo_dirs => searchTermInfoDirs(iter.io, iter.env, iter.term) orelse iter.next(),
+            .system => searchDefaultDirs(iter.io, iter.term) orelse iter.next(),
             .done => null,
         };
     }

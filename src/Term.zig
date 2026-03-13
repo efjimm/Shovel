@@ -17,7 +17,6 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const posix = std.posix;
-pub const WriteError = std.posix.WriteError;
 const builtin = @import("builtin");
 const mode = @import("builtin").mode;
 
@@ -105,8 +104,8 @@ pub fn inputParser(term: *Term, bytes: []const u8) InputParser {
     return input.inputParser(bytes, term);
 }
 
-pub fn writer(term: *Term, buffer: []u8) std.fs.File.Writer {
-    return .init(.{ .handle = term.tty.handle }, buffer);
+pub fn writer(term: *Term, buffer: []u8) std.Io.File.Writer {
+    return term.tty.writer(term.io, buffer);
 }
 
 // NotATerminal + a subset of posix.OpenError, removing all errors which aren't reachable due to how
@@ -132,19 +131,17 @@ pub const InitError = error{
     Unexpected,
 } || Allocator.Error;
 
-pub fn init(gpa: Allocator, io: Io, conf: TermConfig) InitError!Term {
+pub fn init(gpa: Allocator, io: Io, env: std.process.Environ, conf: TermConfig) InitError!Term {
     const tty = Io.Dir.cwd().openFile(io, "/dev/tty", .{ .mode = .read_write }) catch |err| switch (err) {
         // None of these are reachable with the flags we pass to posix.open
         error.DeviceBusy,
-        error.FileLocksNotSupported,
         error.NoSpaceLeft,
         error.NotDir,
         error.PathAlreadyExists,
         error.WouldBlock,
         error.NetworkNotFound,
-        error.ProcessNotFound,
-        error.SharingViolation,
         error.PipeBusy,
+        error.FileLocksUnsupported,
         => unreachable,
 
         error.Canceled,
@@ -167,12 +164,12 @@ pub fn init(gpa: Allocator, io: Io, conf: TermConfig) InitError!Term {
     };
     errdefer tty.close(io);
 
-    if (!posix.isatty(tty.handle))
+    if (!(tty.isTty(io) catch false))
         return error.NotATerminal;
 
     const terminfo = try gpa.create(TermInfo);
     errdefer gpa.destroy(terminfo);
-    terminfo.* = getTermInfo(gpa, io, conf.terminfo) catch |err| switch (err) {
+    terminfo.* = getTermInfo(gpa, io, env, conf.terminfo) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidFormat, error.NoTermInfo => blk: {
             log.err("Failed to load fallback terminfo, proceeding without terminfo definitions", .{});
@@ -184,9 +181,9 @@ pub fn init(gpa: Allocator, io: Io, conf: TermConfig) InitError!Term {
 
     switch (conf.truecolour) {
         .disable => terminfo.truecolour = .none,
-        .check => terminfo.queryTrueColour(),
+        .check => terminfo.queryTrueColour(env),
         .force => {
-            terminfo.queryTrueColour();
+            terminfo.queryTrueColour(env);
             if (terminfo.truecolour == .none)
                 terminfo.truecolour = .hardcoded;
         },
@@ -215,33 +212,33 @@ pub fn deinit(term: *Term, gpa: Allocator) void {
 
 /// Returns a terminfo defintion based on the configuration. Returns `error.NoTermInfo` if a valid
 /// terminfo file cannot be found.
-fn getTermInfo(gpa: Allocator, io: Io, opts: TermInfoConfig) !TermInfo {
+fn getTermInfo(gpa: Allocator, io: Io, env: std.process.Environ, opts: TermInfoConfig) !TermInfo {
     switch (opts.fallback_mode) {
-        .always => return opts.fallback.getTermInfo(gpa, io),
+        .always => return opts.fallback.getTermInfo(gpa, io, env),
         .last_resort => {
-            const term_var = posix.getenv("TERM") orelse {
+            const term_var = env.getPosix("TERM") orelse {
                 log.info("No TERM variable defined", .{});
                 return error.NoTermInfo;
             };
 
-            return TermInfo.getTermInfoForTerm(gpa, io, term_var) catch |err| switch (err) {
+            return TermInfo.getTermInfoForTerm(gpa, io, env, term_var) catch |err| switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
-                error.NoTermInfo => opts.fallback.getTermInfo(gpa, io),
+                error.NoTermInfo => opts.fallback.getTermInfo(gpa, io, env),
             };
         },
         .merge => {
-            const term_var = posix.getenv("TERM") orelse {
+            const term_var = env.getPosix("TERM") orelse {
                 log.info("No TERM variable defined", .{});
                 return error.NoTermInfo;
             };
 
-            var terminfo: TermInfo = TermInfo.getTermInfoForTerm(gpa, io, term_var) catch |err| switch (err) {
+            var terminfo: TermInfo = TermInfo.getTermInfoForTerm(gpa, io, env, term_var) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.NoTermInfo => .{},
             };
             errdefer terminfo.deinit(gpa);
 
-            var fallback: TermInfo = opts.fallback.getTermInfo(gpa, io) catch |err| switch (err) {
+            var fallback: TermInfo = opts.fallback.getTermInfo(gpa, io, env) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.NoTermInfo, error.InvalidFormat => .{},
             };
@@ -328,7 +325,7 @@ fn posixReadNoRestart(fd: std.posix.fd_t, buf: []u8) ReadSingleThreadedBlockingE
         .INTR => error.Interrupted,
         .INVAL => unreachable,
         .FAULT => unreachable,
-        .SRCH => error.ProcessNotFound,
+        // .SRCH => error.ProcessNotFound,
         .AGAIN => error.WouldBlock,
         .CANCELED => error.Canceled,
         .BADF => error.NotOpenForReading, // Can be a race condition.
@@ -338,7 +335,7 @@ fn posixReadNoRestart(fd: std.posix.fd_t, buf: []u8) ReadSingleThreadedBlockingE
         .NOMEM => error.SystemResources,
         .NOTCONN => error.SocketUnconnected,
         .CONNRESET => error.ConnectionResetByPeer,
-        .TIMEDOUT => error.Timeout,
+        // .TIMEDOUT => error.Timeout,
         else => |err| std.posix.unexpectedErrno(err),
     };
 }
@@ -378,20 +375,20 @@ pub inline fn isCooked(term: *const Term) bool {
     return term.cooked_termios == null;
 }
 
-pub const UncookError =
-    std.mem.Allocator.Error ||
-    posix.TermiosGetError ||
-    posix.TermiosSetError ||
-    posix.WriteError ||
-    posix.FcntlError ||
-    posix.ReadError ||
-    posix.PollError;
+// pub const UncookError =
+//     std.mem.Allocator.Error ||
+//     posix.TermiosGetError ||
+//     posix.TermiosSetError ||
+//     posix.WriteError ||
+//     posix.FcntlError ||
+//     posix.ReadError ||
+//     posix.PollError;
 
 /// Enter raw mode.
 pub fn uncook(
     term: *Term,
     options: UncookOptions,
-) UncookError!void {
+) !void {
     if (!term.isCooked())
         return;
 
@@ -535,10 +532,8 @@ fn enableKittyKeyboard(term: *Term, wr: *std.Io.Writer) !void {
     }
 }
 
-pub const CookError = posix.WriteError || posix.TermiosSetError;
-
 /// Enter cooked mode.
-pub fn cook(term: *Term) CookError!void {
+pub fn cook(term: *Term) !void {
     if (term.isCooked())
         return;
 
@@ -575,7 +570,7 @@ pub fn fetchSize(term: *Term) posix.UnexpectedError!void {
 }
 
 /// Set window title using OSC 2. Shall not be called while rendering.
-pub fn setWindowTitle(term: *Term, comptime fmt: []const u8, args: anytype) WriteError!void {
+pub fn setWindowTitle(term: *Term, comptime fmt: []const u8, args: anytype) !void {
     assert(!term.currently_rendering);
     var buf: [1024]u8 = undefined;
     var bw = term.writer(&buf);
@@ -592,13 +587,13 @@ pub fn doubleBuffer(term: *const Term, gpa: std.mem.Allocator) Screen.DoubleBuff
     return .init(gpa, term.terminfo, term.grapheme_clustering_mode);
 }
 
-pub fn getRenderContext(term: *Term, buf: []u8) WriteError!RenderContext {
+pub fn getRenderContext(term: *Term, buf: []u8) !RenderContext {
     assert(!term.currently_rendering);
     assert(!term.isCooked());
 
     var rc: RenderContext = .{
         .term = term,
-        .writer = .initStreaming(.{ .handle = term.tty.handle }, buf),
+        .writer = term.tty.writerStreaming(term.io, buf),
     };
 
     term.terminfo.writeExt(&rc.writer.interface, "Sync", .{1}) catch
@@ -617,10 +612,10 @@ pub fn getRenderContext(term: *Term, buf: []u8) WriteError!RenderContext {
 
 pub const RenderContext = struct {
     term: *Term,
-    writer: std.fs.File.Writer,
+    writer: std.Io.File.Writer,
 
     /// Finishes the render operation. The render context may not be used any further.
-    pub fn done(rc: *RenderContext) WriteError!void {
+    pub fn done(rc: *RenderContext) !void {
         assert(rc.term.currently_rendering);
         assert(!rc.term.isCooked());
         defer rc.term.currently_rendering = false;
@@ -632,7 +627,7 @@ pub const RenderContext = struct {
     /// Clears all content. Avoid calling often, as fully clearing and redrawing the screen can
     /// cause flicker on some terminals (such as the Linux tty). Prefer more granular clearing
     /// functions like `clearToEol` and `clearToBot`.
-    pub fn clear(rc: *RenderContext) WriteError!void {
+    pub fn clear(rc: *RenderContext) !void {
         assert(rc.term.currently_rendering);
         rc.term.terminfo.write(
             &rc.writer.interface,
@@ -641,46 +636,46 @@ pub const RenderContext = struct {
         ) catch return rc.writer.err.?;
     }
 
-    pub fn write(rc: *RenderContext, str: TermInfo.String, args: anytype) WriteError!void {
+    pub fn write(rc: *RenderContext, str: TermInfo.String, args: anytype) !void {
         assert(rc.term.currently_rendering);
         rc.term.terminfo.write(&rc.writer.interface, str, args) catch return rc.writer.err.?;
     }
 
-    pub fn writeExt(rc: *RenderContext, str: []const u8, args: anytype) WriteError!void {
+    pub fn writeExt(rc: *RenderContext, str: []const u8, args: anytype) !void {
         assert(rc.term.currently_rendering);
         rc.term.terminfo.writeExt(&rc.writer.interface, str, args) catch return rc.writer.err.?;
     }
 
     /// Clears the screen from the current line to the bottom.
-    pub fn clearToBot(rc: *RenderContext) WriteError!void {
+    pub fn clearToBot(rc: *RenderContext) !void {
         try rc.write(.clr_eos, .{});
     }
 
     /// Clears from the cursor position to the end of the line.
-    pub fn clearToEol(rc: *RenderContext) WriteError!void {
+    pub fn clearToEol(rc: *RenderContext) !void {
         try rc.write(.clr_eol, .{});
     }
 
     /// Clears the screen from the cursor to the beginning of the line.
-    pub fn clearToBol(rc: *RenderContext) WriteError!void {
+    pub fn clearToBol(rc: *RenderContext) !void {
         try rc.write(.clr_bol, .{});
     }
 
     /// Move the cursor to the specified cell.
-    pub fn moveCursorTo(rc: *RenderContext, row: u16, col: u16) WriteError!void {
+    pub fn moveCursorTo(rc: *RenderContext, row: u16, col: u16) !void {
         try rc.write(.cursor_address, .{ row, col });
     }
 
-    pub fn saveCursor(rc: *RenderContext) WriteError!void {
+    pub fn saveCursor(rc: *RenderContext) !void {
         try rc.write(.save_cursor, .{});
     }
 
-    pub fn restoreCursor(rc: *RenderContext) WriteError!void {
+    pub fn restoreCursor(rc: *RenderContext) !void {
         try rc.write(.restore_cursor, .{});
     }
 
     /// Hide the cursor.
-    pub fn hideCursor(rc: *RenderContext) WriteError!void {
+    pub fn hideCursor(rc: *RenderContext) !void {
         assert(rc.term.currently_rendering);
         if (!rc.term.cursor_visible) return;
         try rc.write(.cursor_invisible, .{});
@@ -688,7 +683,7 @@ pub const RenderContext = struct {
     }
 
     /// Show the cursor.
-    pub fn showCursor(rc: *RenderContext) WriteError!void {
+    pub fn showCursor(rc: *RenderContext) !void {
         assert(rc.term.currently_rendering);
         if (rc.term.cursor_visible) return;
         try rc.write(.cursor_normal, .{});
@@ -696,7 +691,7 @@ pub const RenderContext = struct {
     }
 
     /// Set the text attributes for all following writes.
-    pub fn setStyle(rc: *RenderContext, attr: Style) WriteError!void {
+    pub fn setStyle(rc: *RenderContext, attr: Style) !void {
         assert(rc.term.currently_rendering);
         attr.dump(&rc.writer.interface, .{
             .terminfo = rc.term.terminfo,
@@ -713,7 +708,7 @@ pub const RenderContext = struct {
     }
 
     /// Write all bytes, wrapping at the end of the line.
-    pub fn writeAllWrapping(rc: *RenderContext, bytes: []const u8) WriteError!void {
+    pub fn writeAllWrapping(rc: *RenderContext, bytes: []const u8) !void {
         assert(rc.term.currently_rendering);
         const wr = &rc.writer.interface;
         const enable = rc.term.terminfo.getStringCapability(.enter_am_mode) orelse return;
@@ -723,7 +718,7 @@ pub const RenderContext = struct {
         wr.writeAll(disable) catch return rc.writer.err.?;
     }
 
-    pub fn setCursorShape(rc: *RenderContext, shape: CursorShape) WriteError!void {
+    pub fn setCursorShape(rc: *RenderContext, shape: CursorShape) !void {
         assert(rc.term.currently_rendering);
         assert(shape != .unknown);
 

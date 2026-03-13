@@ -5,16 +5,11 @@ pub const std_options: std.Options = .{
     .log_level = .err,
 };
 
-pub fn main() !void {
-    var dbg: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = dbg.deinit();
-    const gpa = dbg.allocator();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
 
-    var threaded: std.Io.Threaded = .init(gpa);
-    defer threaded.deinit();
-    const io = threaded.ioBasic();
-
-    var term: shovel.Term = try .init(gpa, io, .{
+    var term: shovel.Term = try .init(gpa, io, init.minimal.environ, .{
         .terminfo = .{
             .fallback = .@"xterm-256color",
             .fallback_mode = .last_resort,
@@ -64,7 +59,7 @@ pub fn main() !void {
 
     try w.flush();
 
-    var wr = std.fs.File.stdout().writerStreaming(&buf);
+    var wr = std.Io.File.stdout().writerStreaming(io, &buf);
     try screen.dump(term.terminfo, &wr.interface);
     try shovel.Style.dump(.{}, &wr.interface, .{});
     try wr.interface.flush();

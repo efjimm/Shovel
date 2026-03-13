@@ -18,8 +18,8 @@ const parsed = shovel.Style.Colour.fromDescription("magenta") catch
 const magenta = shovel.Style{ .fg = parsed, .attrs = .{ .dimmed = true } };
 const reset = shovel.Style{};
 
-pub fn main() !void {
-    var stdout = std.fs.File.stdout().writer(&.{});
+pub fn main(init: std.process.Init) !void {
+    var stdout = std.Io.File.stdout().writer(init.io, &.{});
     const writer = &stdout.interface;
 
     try red.dump(writer, .{});

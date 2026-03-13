@@ -13,36 +13,29 @@ var buf: [32]u8 = undefined;
 var read: usize = undefined;
 var empty = true;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const args = init.minimal.args.vector;
     const force_legacy = blk: {
         var i: usize = 1;
-        while (i < os.argv.len) : (i += 1) {
-            if (mem.eql(u8, mem.span(os.argv[i]), "--force-legacy")) break :blk true;
+        while (i < args.len) : (i += 1) {
+            if (mem.eql(u8, mem.span(args[i]), "--force-legacy")) break :blk true;
         }
         break :blk false;
     };
     const mouse = blk: {
         var i: usize = 1;
-        while (i < os.argv.len) : (i += 1) {
-            if (mem.eql(u8, mem.span(os.argv[i]), "--mouse")) break :blk true;
+        while (i < args.len) : (i += 1) {
+            if (mem.eql(u8, mem.span(args[i]), "--mouse")) break :blk true;
         }
         break :blk false;
     };
-    log_file = try std.fs.cwd().createFile("log.txt", .{});
-    defer log_file.close();
-
-    var dbg_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = dbg_allocator.deinit();
-    const gpa = dbg_allocator.allocator();
-
-    var threaded: std.Io.Threaded = .init(gpa);
-    defer threaded.deinit();
-    const io = threaded.ioBasic();
+    const gpa = init.gpa;
+    const io = init.io;
 
     try shovel.initUnicodeData(gpa);
     defer shovel.deinitUnicodeData(gpa);
 
-    term = try shovel.Term.init(gpa, io, .{
+    term = try shovel.Term.init(gpa, io, init.minimal.environ, .{
         .terminfo = .{
             .fallback = .@"xterm-256color",
             .fallback_mode = .merge,
@@ -70,25 +63,6 @@ pub fn main() !void {
         empty = false;
         try render();
     }
-}
-
-var log_file: std.fs.File = undefined;
-
-pub const std_options: std.Options = .{
-    .log_level = .debug,
-    .logFn = log,
-};
-
-pub fn log(
-    comptime level: std.log.Level,
-    comptime scope: @TypeOf(.EnumLiteral),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    var writer = log_file.writer(&.{});
-    writer.interface.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
-    writer.interface.print(format, args) catch {};
-    writer.interface.writeByte('\n') catch {};
 }
 
 fn render() !void {

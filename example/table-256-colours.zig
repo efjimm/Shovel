@@ -13,19 +13,11 @@ pub const std_options: std.Options = .{
     .log_level = .err,
 };
 
-pub fn main() !void {
-    var dbg_allocator: std.heap.DebugAllocator(.{}) = .init;
-    const gpa, const is_debug = switch (builtin.mode) {
-        .Debug, .ReleaseSafe => .{ dbg_allocator.allocator(), true },
-        .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
-    };
-    defer _ = if (is_debug) dbg_allocator.deinit();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
 
-    var threaded: std.Io.Threaded = .init(gpa);
-    defer threaded.deinit();
-    const io = threaded.ioBasic();
-
-    var term = try shovel.Term.init(gpa, io, .{
+    var term = try shovel.Term.init(gpa, io, init.minimal.environ, .{
         .terminfo = .{
             .fallback = .@"xterm-256color",
             .fallback_mode = .last_resort,
@@ -33,7 +25,7 @@ pub fn main() !void {
     });
     defer term.deinit(gpa);
 
-    var file_writer = std.fs.File.stdout().writer(&.{});
+    var file_writer = std.Io.File.stdout().writer(io, &.{});
     const writer = &file_writer.interface;
 
     var colour: u8 = 0;
