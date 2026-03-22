@@ -39,6 +39,8 @@ const UncookOptions = struct {
     request_kitty_keyboard_protocol: bool = true,
     request_mouse_tracking: bool = false,
     request_mode_2027: bool = true,
+    alt_screen: bool = true,
+    hide_cursor: bool = true,
 };
 
 pub const TermInfoConfig = struct {
@@ -98,6 +100,7 @@ terminfo: *TermInfo,
 kitty_enabled: bool = false,
 
 grapheme_clustering_mode: GraphemeClusteringMode = .codepoint,
+alt_screen: bool = false,
 
 /// See `input.inputParser`
 pub fn inputParser(term: *Term, bytes: []const u8) InputParser {
@@ -449,12 +452,23 @@ pub fn uncook(
 
     var buf: [256]u8 = undefined;
     var bw = term.writer(&buf);
+    if (options.alt_screen) {
+        term.terminfo.write(&bw.interface, .enter_ca_mode, .{}) catch return bw.err.?;
+        term.alt_screen = true;
+    }
+
+    if (options.hide_cursor) {
+        term.terminfo.write(&bw.interface, .cursor_invisible, .{}) catch return bw.err.?;
+        term.cursor_visible = false;
+    } else {
+        term.terminfo.write(&bw.interface, .cursor_visible, .{}) catch return bw.err.?;
+        term.cursor_visible = true;
+    }
+
     inline for (.{
         .save_cursor,
-        .enter_ca_mode,
         .exit_insert_mode,
         .exit_am_mode,
-        .cursor_invisible,
     }) |str| term.terminfo.write(&bw.interface, str, .{}) catch return bw.err.?;
 
     if (options.request_kitty_keyboard_protocol) {
@@ -548,10 +562,14 @@ pub fn cook(term: *Term) !void {
         term.kitty_enabled = false;
     }
 
+    if (term.alt_screen) {
+        term.terminfo.write(&bw.interface, .exit_ca_mode, .{}) catch return bw.err.?;
+        term.terminfo.write(&bw.interface, .clear_screen, .{}) catch return bw.err.?;
+        term.alt_screen = false;
+    }
+
     inline for (.{
         spells.disable_mouse_tracking,
-        term.terminfo.getStringCapability(.clear_screen) orelse "",
-        term.terminfo.getStringCapability(.exit_ca_mode) orelse "",
         term.terminfo.getStringCapability(.cursor_visible) orelse "",
         term.terminfo.getStringCapability(.exit_attribute_mode) orelse "",
         term.terminfo.getStringCapability(.enter_am_mode) orelse "",
