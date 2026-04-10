@@ -131,6 +131,7 @@ pub const InitError = error{
     PermissionDenied,
     Canceled,
     AntivirusInterference,
+    ReadOnlyFileSystem,
     Unexpected,
 } || Allocator.Error;
 
@@ -162,6 +163,7 @@ pub fn init(gpa: Allocator, io: Io, env: std.process.Environ, conf: TermConfig) 
         error.SystemFdQuotaExceeded,
         error.SystemResources,
         error.PermissionDenied,
+        error.ReadOnlyFileSystem,
         error.Unexpected,
         => |e| return e,
     };
