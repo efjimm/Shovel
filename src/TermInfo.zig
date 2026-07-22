@@ -38,24 +38,6 @@ ext_nums: std.StringHashMapUnmanaged(u31) = .empty,
 //       exceed maxInt(u15).
 ext_strs: std.StringHashMapUnmanaged(u15) = .empty,
 
-/// Whether or not the target terminal conforms to the ECMA-48 standard. This does not affect what
-/// capabilities are reported, which are solely based on terminfo definitions. This field is only
-/// ever set manually by the user of the library, as there is no way to actually detect this.
-///
-/// If set to true, some functions in Shovel that take a `TermInfo` parameter will use hardcoded
-/// ECMA-48 escape sequences instead of the terminfo ones. This allows, for example, setting
-/// colours/attributes in fewer bytes, and resetting foreground/background colours individually (as
-/// terminfo does not expose a sequence to reset them individually, but the ECMA-48 standard does.)
-///
-/// For terminals that support ECMA-48 sequences, setting this to true does not alter behaviour and
-/// simply allows some small optimizations.
-///
-/// For terminals that do not support ECMA-48 sequences, setting this to true may break rendering.
-///
-/// Note that virtually every terminal emulator in use supports ECMA-48 sequences, but this is still
-/// disabled by default for slightly increased portability.
-ecma48: bool = false,
-
 /// How this terminal supports truecolour.
 truecolour: TrueColour = .none,
 
@@ -94,34 +76,6 @@ pub const TrueColour = enum {
 
 pub const hardcoded_setrgbf = "\x1b[38;2;%p1%d;%p2%d;%p3%dm";
 pub const hardcoded_setrgbb = "\x1b[48;2;%p1%d;%p2%d;%p3%dm";
-
-/// Sets the setrgbf and setrgbb extended strings to hardcoded values.
-// pub fn hardcodeTruecolor(ti: *TermInfo, gpa: std.mem.Allocator) !void {
-//     const extra_len = hardcoded_setrgbb.len + 1 + hardcoded_setrgbb.len + 1;
-//     if (ti.ext_string_table.len + extra_len > std.math.maxInt(u15)) {
-//         @branchHint(.cold);
-//         return error.StringTableTooLarge;
-//     }
-
-//     try ti.ext_strs.ensureUnusedCapacity(gpa, 2);
-//     var list: std.ArrayListUnmanaged(u8) = .fromOwnedSlice(ti.ext_string_table);
-//     try list.ensureTotalCapacityPrecise(gpa, list.capacity + extra_len);
-//     errdefer comptime unreachable;
-
-//     const f_index: u15 = @intCast(list.items.len);
-//     list.appendSliceAssumeCapacity(hardcoded_setrgbf);
-//     list.appendAssumeCapacity(0);
-
-//     const b_index: u15 = @intCast(list.items.len);
-//     list.appendSliceAssumeCapacity(hardcoded_setrgbb);
-//     list.appendAssumeCapacity(0);
-
-//     ti.ext_strs.putAssumeCapacity("setrgbf", f_index);
-//     ti.ext_strs.putAssumeCapacity("setrgbb", b_index);
-
-//     assert(list.items.len == list.capacity);
-//     ti.ext_string_table = list.items;
-// }
 
 /// Queries the current terminal for truecolour support. If found, sets the `setrgbf` and `setrgbb`
 /// extended strings.
@@ -546,7 +500,7 @@ pub fn populateInputMap(ti: *TermInfo, gpa: Allocator) !void {
     inline for (keys) |k| {
         const key_name, const in = k;
         const name = comptime print("key_{s}", .{key_name});
-        const tag = comptime std.meta.stringToEnum(String, name).?;
+        const tag = String.name_map.get(name).?;
         if (ti.getStringCapability(tag)) |str| {
             map.put(gpa, str, in) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
@@ -557,7 +511,7 @@ pub fn populateInputMap(ti: *TermInfo, gpa: Allocator) !void {
 
     inline for (0..64) |i| {
         const name = comptime print("key_f{d}", .{i});
-        const tag = comptime std.meta.stringToEnum(String, name).?;
+        const tag = String.name_map.get(name).?;
         if (ti.getStringCapability(tag)) |str| {
             map.put(gpa, str, .{
                 .content = .{ .function = i },
@@ -850,6 +804,15 @@ pub const Number = enum {
 };
 
 pub const String = enum {
+    const name_map = blk: {
+        const Map = std.StaticStringMap(String);
+        var kvs: []const struct { []const u8, String } = &.{};
+        for (@typeInfo(String).@"enum".field_names) |name| {
+            kvs = kvs ++ .{.{ name, @field(String, name) }};
+        }
+        break :blk Map.initComptime(kvs);
+    };
+
     back_tab,
     bell,
     carriage_return,

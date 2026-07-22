@@ -1,1609 +1,1759 @@
+//! Virtual representation of a terminal screen. Allows writing out the minimal number of bytes !
+//! necessary to tranform one screen into another, allowing for good rendering performance across
+//! all terminal emulators without having to manually track what changed. Use `DoubleBuffer` for
+//! this.
+//
+// This implementation is somewhat based off of Ghostty's page implementation. See license
+// attribution at the end of this file.
+//
+// TODO:
+//   The width of characters is not 100% consistent between terminal emulators. The best way to
+//   handle this would be to create separate tables for width data for each terminal emulator and
+//   set it based on TERM.
+//
+//   Right now width data is based on what `zg` reports, which is derived from the East_Asian_Width
+//   unicode property. This should be 99.9% correct, but currently I know of a few edge cases in
+//   certain terminal emulators which are not correct. The Linux TTY displays emojis as narrow
+//   characters, and non mode 2027 terminals have inconsistent widths for the emoji variation
+//   selector.
+
+// TODO:
+//   - Represent actual terminal cursor
+//   - Benchmarks
 const std = @import("std");
 const assert = std.debug.assert;
-const expectEqualStrings = std.testing.expectEqualStrings;
+const Allocator = std.mem.Allocator;
+
+const Style = @import("Style.zig");
+const stringWidth = @import("main.zig").stringWidth;
+const BitmapAllocator = @import("bma.zig").BitmapAllocator;
+const GraphemeClusteringMode = @import("main.zig").GraphemeClusteringMode;
 
 const zg = @import("zg");
 
-const GraphemeClusteringMode = @import("main.zig").GraphemeClusteringMode;
-const spells = @import("spells.zig");
-const stringWidth = @import("main.zig").stringWidth;
-const Style = @import("Style.zig");
-const TermInfo = @import("TermInfo.zig");
-const util = @import("util.zig");
-
 const Screen = @This();
 
-text: std.ArrayListUnmanaged(u8),
-lines: std.ArrayListUnmanaged(Line),
-cells: std.MultiArrayList(Cell).Slice,
+const GraphemeAlloc = BitmapAllocator(grapheme_chunk_len);
+const GraphemeMap = std.AutoHashMapUnmanaged(Cell.Index, GraphemeSlice);
+const grapheme_chunk_len = 16;
 
-width: u16,
-grapheme_clustering_mode: GraphemeClusteringMode,
-
-gpa: std.mem.Allocator,
-
-pub const Window = struct {
-    screen: *const Screen,
-    rect: Rect,
-    x: u16,
-    y: u16,
-    visible: bool = true,
+const GraphemeSlice = struct {
+    offset: usize,
+    len: usize,
 };
 
-pub fn fullRect(s: *const Screen) Rect {
+rows: std.ArrayList(Row),
+cells: std.ArrayList(Cell),
+
+grapheme_alloc: GraphemeAlloc,
+grapheme_map: GraphemeMap,
+
+styles: std.MultiArrayList(struct {
+    refcount: u16,
+    style: Style.Packed,
+}),
+
+size: struct { rows: u16, cols: u16 },
+
+pub const empty: Screen = .{
+    .rows = .empty,
+    .cells = .empty,
+    .grapheme_alloc = .empty,
+    .grapheme_map = .empty,
+    .styles = .empty,
+    .size = .{ .rows = 0, .cols = 0 },
+};
+
+pub const Cell = packed struct(u64) {
+    unused: u11 = 0,
+    style: Cell.CellStyle,
+    content_tag: enum(u2) {
+        ascii,
+        codepoint,
+        codepoint_grapheme,
+    },
+    wide: enum(u2) {
+        narrow,
+        wide,
+        spacer_tail,
+        spacer_head,
+    },
+    codepoint: u21,
+
+    pub const CellStyle = packed struct(u28) {
+        attrs: Style.Attribute,
+        color_type: enum(u1) { palette, rgb },
+        colors: packed union(u18) {
+            palette: packed struct(u18) {
+                fg: packed struct(u9) {
+                    none: bool,
+                    @"256": u8,
+                },
+                bg: packed struct(u9) {
+                    none: bool,
+                    @"256": u8,
+                },
+            },
+            rgb: packed struct(u18) {
+                unused: u2 = 0,
+                id: u16,
+            },
+        },
+
+        pub const default: CellStyle = .{
+            .attrs = .none,
+            .color_type = .palette,
+            .colors = .{
+                .palette = .{
+                    .fg = .{ .none = true, .@"256" = 0 },
+                    .bg = .{ .none = true, .@"256" = 0 },
+                },
+            },
+        };
+    };
+
+    pub const Index = enum(u32) {
+        _,
+    };
+};
+
+pub const Row = struct {
+    grapheme: bool = false,
+};
+
+/// Deinitialize the screen, freeing any backing memory. Do NOT call
+/// this if you allocated the backing memory yourself (i.e. you used
+/// initBuf).
+pub inline fn deinit(s: *Screen, gpa: Allocator) void {
+    s.cells.deinit(gpa);
+    s.rows.deinit(gpa);
+    s.styles.deinit(gpa);
+    s.grapheme_map.deinit(gpa);
+    s.grapheme_alloc.deinit(gpa);
+    s.* = undefined;
+}
+
+pub fn resize(s: *Screen, gpa: Allocator, new_height: u16, new_width: u16) !void {
+    std.log.debug("Resize to {d} rows, {d} cols", .{ new_height, new_width });
+    const new_area = @as(u32, new_height) * @as(u32, new_width);
+    if (new_height > s.rows.capacity or new_area > s.cells.capacity) {
+        const old_area = @as(u32, s.size.rows) * @as(u32, s.size.cols);
+
+        var adjusted_area = old_area;
+        while (adjusted_area < new_area) adjusted_area = adjusted_area *| 2 + 32;
+
+        try s.cells.ensureTotalCapacity(gpa, adjusted_area);
+        try s.rows.ensureTotalCapacity(gpa, new_height);
+    }
+    s.cells.items.len = new_area;
+    s.rows.items.len = new_height;
+
+    s.clear();
+    s.size = .{ .rows = new_height, .cols = new_width };
+}
+
+pub fn addStyle(s: *Screen, gpa: Allocator, style: Style) !u16 {
+    const packed_style = style.toPacked();
+
+    for (s.styles.items(.style), 0..) |ps, i| {
+        if (ps == packed_style) return @intCast(i);
+    }
+
+    // Need to create a new style.
+    // Attempt to re-use a style slot with zero references.
+    for (s.styles.items(.refcount), s.styles.items(.style), 0..) |refcount, *ps, i| {
+        if (refcount == 0) {
+            ps.* = style.toPacked();
+            return @intCast(i);
+        }
+    }
+
+    const ret = s.styles.len;
+    if (ret > std.math.maxInt(u16)) {
+        // TODO
+        std.log.err("Reached maximum style count, using first available", .{});
+        return 0;
+    }
+
+    try s.styles.append(gpa, .{
+        .refcount = 0, // Incremented when cell is set
+        .style = packed_style,
+    });
+
+    return @intCast(ret);
+}
+
+pub fn getRowCells(s: *const Screen, row: u16) []Cell {
+    const start = @as(usize, row) * @as(usize, s.size.cols);
+    return s.cells.items[start..][0..s.size.cols];
+}
+
+pub fn getCell(s: *const Screen, cell_index: Cell.Index) *Cell {
+    return &s.cells.items[@intFromEnum(cell_index)];
+}
+
+pub fn getCellRowCol(s: *const Screen, row: u16, col: u16) *Cell {
+    const index = s.cellIndex(row, col);
+    return s.getCell(index);
+}
+
+pub fn getRowFromCell(s: *const Screen, cell_index: Cell.Index) *Row {
+    const n = @intFromEnum(cell_index) / s.size.cols;
+    return s.getRows()[n];
+}
+
+fn cellIndex(s: *const Screen, row: u16, col: u16) Cell.Index {
+    return @enumFromInt(@as(u32, row) * s.size.cols + col);
+}
+
+fn cellIndexPtr(s: *const Screen, cell: *const Cell) Cell.Index {
+    return @enumFromInt(
+        @divExact(@intFromPtr(cell) - @intFromPtr(s.cells.items.ptr), @sizeOf(Cell)),
+    );
+}
+
+/// Erases the cell at the given address.
+pub fn eraseCell(s: *Screen, row: u16, col: u16, new_style: ?Cell.CellStyle) void {
+    const cell = s.getCellRowCol(row, col);
+    defer assert(cell.* == Cell{
+        .codepoint = 0,
+        .content_tag = .ascii,
+        .style = new_style orelse cell.style,
+        .wide = .narrow,
+    });
+
+    const r = &s.rows.items[row];
+    if (cell.content_tag == .codepoint_grapheme) {
+        assert(r.grapheme);
+        const grapheme_slice = s.grapheme_map.fetchRemove(s.cellIndex(row, col)).?.value;
+        const cps = s.grapheme_alloc.chunkPtr(u21, grapheme_slice.offset)[0..grapheme_slice.len];
+        s.grapheme_alloc.free(cps);
+    }
+
+    switch (cell.wide) {
+        .narrow => {},
+        .spacer_head => {},
+        .spacer_tail => {
+            return s.eraseCell(row, col - 1, new_style);
+        },
+        .wide => {
+            assert(col < s.size.cols - 1);
+            const spacer = s.getCellRowCol(row, col + 1);
+            assert(spacer.wide == .spacer_tail);
+            spacer.* = .{
+                .codepoint = 0,
+                .content_tag = .ascii,
+                .style = spacer.style,
+                .wide = .narrow,
+            };
+            if (new_style) |style| s.setCellStyle(spacer, style);
+        },
+    }
+
+    cell.* = .{
+        .codepoint = 0,
+        .content_tag = .ascii,
+        .style = cell.style,
+        .wide = .narrow,
+    };
+
+    if (new_style) |style| s.setCellStyle(cell, style);
+}
+
+fn setCellStyle(s: *Screen, cell: *Cell, style: Cell.CellStyle) void {
+    if (style.color_type == .rgb) {
+        const id = style.colors.rgb.id;
+        s.styles.items(.refcount)[id] += 1;
+    }
+
+    if (cell.style.color_type == .rgb) {
+        const id = cell.style.colors.rgb.id;
+        s.styles.items(.refcount)[id] -= 1;
+    }
+
+    cell.style = style;
+}
+
+/// Append a codepoint to the given cell as a grapheme.
+fn appendGrapheme(
+    s: *Screen,
+    gpa: Allocator,
+    row: *Row,
+    cell: *Cell,
+    cp: u21,
+) Allocator.Error!void {
+    // defer self.assertIntegrity();
+    // if (build_options.slow_runtime_safety) assert(cell.codepoint() != 0);
+
+    const cell_index = s.cellIndexPtr(cell);
+
+    // If this cell has no graphemes, we can go faster by knowing we
+    // need to allocate a new grapheme slice and update the map.
+    if (cell.content_tag != .codepoint_grapheme) {
+        const cps = try s.grapheme_alloc.alloc(gpa, u21, 1);
+        errdefer s.grapheme_alloc.free(cps);
+        cps[0] = cp;
+
+        try s.grapheme_map.putNoClobber(gpa, cell_index, .{
+            .offset = s.grapheme_alloc.chunkOffset(cps),
+            .len = 1,
+        });
+        errdefer s.grapheme_map.remove(cell_index);
+
+        cell.content_tag = .codepoint_grapheme;
+        row.grapheme = true;
+
+        return;
+    }
+
+    // The cell already has graphemes. We need to append to the existing
+    // grapheme slice and update the map.
+    assert(row.grapheme);
+
+    const slice = s.grapheme_map.getPtr(cell_index).?;
+
+    // If our slice len doesn't divide evenly by the grapheme chunk
+    // length then we can utilize the additional chunk space.
+    if (slice.len % grapheme_chunk_len != 0) {
+        const cps = s.grapheme_alloc.chunkPtr(u21, slice.offset);
+        cps[slice.len] = cp;
+        slice.len += 1;
+        return;
+    }
+
+    // We are out of chunk space. There is no fast path here. We need
+    // to allocate a larger chunk. This is a very slow path. We expect
+    // most graphemes to fit within our chunk size.
+    const cps = try s.grapheme_alloc.alloc(gpa, u21, slice.len + 1);
+    errdefer s.grapheme_alloc.free(cps);
+    const old_cps = s.grapheme_alloc.chunkPtr(u21, slice.offset)[0..slice.len];
+    @memcpy(cps[0..old_cps.len], old_cps);
+    cps[slice.len] = cp;
+    slice.* = .{
+        .offset = s.grapheme_alloc.chunkOffset(cps),
+        .len = slice.len + 1,
+    };
+
+    // Free our old chunk
+    s.grapheme_alloc.free(old_cps);
+}
+
+const WriteResult = struct {
+    bytes_consumed: usize,
+    grapheme_break: bool,
+};
+
+/// Get the row and cell for the given X/Y within this page.
+pub inline fn getRowAndCell(self: *const Screen, x: usize, y: usize) struct { *Row, *Cell } {
+    assert(y < self.size.rows);
+    assert(x < self.size.cols);
+
+    const rows = self.rows.ptr(self.memory);
+    const row = &rows[y];
+    const cell = &row.cells.ptr(self.memory)[x];
+
+    return .{ row, cell };
+}
+
+pub fn writer(s: *Screen, gpa: Allocator, rect: Rect) Writer {
     return .{
-        .width = s.width,
-        .height = s.height(),
+        .s = s,
+        .gpa = gpa,
+        .rect = rect,
+        .cursor = .origin,
+        .grapheme_clustering_mode = .grapheme,
+        .edge_mode = .wrap,
+    };
+}
+
+pub fn writerFull(s: *Screen, gpa: Allocator) Writer {
+    return s.writer(gpa, .{
+        .height = s.size.rows,
+        .width = s.size.cols,
         .x = 0,
         .y = 0,
-    };
+    });
 }
 
-/// Clamps the width/height of `rect` to the screen.
-pub fn clampedRect(s: *const Screen, rect: Rect) Rect {
-    return .{
-        .height = @min(rect.height, s.height() -| rect.y),
-        .width = @min(rect.width, s.width -| rect.x),
-        .x = @min(rect.x, s.width),
-        .y = @min(rect.y, s.height()),
-    };
-}
-
-/// Draw all windows to `dest` in order. When windows overlap, the last drawn window takes
-/// precedence.
-pub fn flatten(dest: *Screen, windows: []const Window) !void {
-    for (windows) |*window| {
-        if (window.rect.x == 0 and window.rect.y == 0 and
-            window.rect.width == dest.width and window.rect.height == dest.height())
-        {
-            try dest.text.ensureTotalCapacity(dest.gpa, window.screen.text.items.len);
-            dest.text.clearRetainingCapacity();
-            dest.text.appendSliceAssumeCapacity(window.screen.text.items);
-            @memcpy(dest.lines.items, window.screen.lines.items);
-            @memcpy(dest.cells.items(.lw), window.screen.cells.items(.lw));
-            @memcpy(dest.cells.items(.style), window.screen.cells.items(.style));
-            continue;
-        }
-
-        var dest_cursor: Cursor = .reset;
-        var src_iter = window.screen.iterator(window.rect);
-        var y = window.y;
-        while (src_iter.next()) |src_line| : (y += 1) {
-            dest.cursorTo(&dest_cursor, y, window.x);
-
-            const dest_cells = dest.cells.subslice(
-                dest_cursor.cell_offset,
-                window.rect.width,
-            );
-
-            var replace_len: u31 = 0;
-            for (dest_cells.items(.lw)) |lw| replace_len += lw.len;
-
-            try dest.text.replaceRange(
-                dest.gpa,
-                dest_cursor.text_offset,
-                replace_len,
-                src_line.text,
-            );
-
-            @memcpy(dest_cells.items(.lw), src_line.cells.items(.lw));
-            @memcpy(dest_cells.items(.style), src_line.cells.items(.style));
-
-            dest.lines.items[y].len -= replace_len;
-            dest.lines.items[y].len += @intCast(src_line.text.len);
-        }
-    }
-}
-
-/// Iterator over the lines in `rect`.
-pub fn iterator(s: *const Screen, rect: Rect) Iterator {
-    return .{
-        .rect = rect,
-        .s = s,
-        .cursor = s.cursorAt(rect.y, rect.x, .{}),
-    };
-}
-
-pub const Iterator = struct {
-    s: *const Screen,
-    rect: Rect,
-    cursor: Cursor,
-
-    pub const NextResult = struct {
-        cells: std.MultiArrayList(Cell).Slice,
-        text: []u8,
-        text_off: usize,
-    };
-
-    pub fn next(iter: *Iterator) ?NextResult {
-        const cy = iter.cursor.cell_offset / iter.s.width;
-        if (cy - iter.rect.y >= iter.rect.height)
-            return null;
-
-        const cells = iter.s.cells.subslice(iter.cursor.cell_offset, iter.rect.width);
-        var text_len: usize = 0;
-        for (cells.items(.lw)) |lw| text_len += lw.len;
-        const text_off = iter.cursor.text_offset;
-        const text = iter.s.text.items[text_off..][0..text_len];
-
-        iter.cursor = iter.s.cursorAt(@intCast(cy + 1), iter.rect.x, .{});
+pub fn styleToCellStyle(s: *Screen, gpa: Allocator, style: Style) !Cell.CellStyle {
+    if (style.fg == .rgb or style.bg == .rgb) {
+        const id = try s.addStyle(gpa, style);
         return .{
-            .cells = cells,
-            .text = text,
-            .text_off = text_off,
+            .attrs = style.attrs,
+            .color_type = .rgb,
+            .colors = .{ .rgb = .{ .id = id } },
         };
     }
-};
+    return .{
+        .attrs = style.attrs,
+        .color_type = .palette,
+        .colors = .{ .palette = .{
+            .fg = .{ .none = style.fg == .none, .@"256" = style.fg.palette() orelse 0 },
+            .bg = .{ .none = style.bg == .none, .@"256" = style.bg.palette() orelse 0 },
+        } },
+    };
+}
 
+pub fn styleRect(s: *Screen, gpa: Allocator, r: Rect, style: Style) !void {
+    s.styleRectCell(r, try s.styleToCellStyle(gpa, style));
+}
+
+pub fn styleRectCell(s: *Screen, r: Rect, style: Cell.CellStyle) void {
+    var row: u16 = 0;
+    while (row < r.height) : (row += 1) {
+        const cells = s.getRowCells(r.y + row);
+        for (cells[r.x..][0..r.width]) |*c| {
+            s.setCellStyle(c, style);
+        }
+    }
+}
+
+/// Represents a sub-rectangle of a screen.
 pub const Rect = struct {
     x: u16,
     y: u16,
     width: u16,
     height: u16,
 
-    pub fn eql(a: Rect, b: Rect) bool {
-        return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
-    }
-
-    pub fn init(x: u16, y: u16, w: u16, h: u16) Rect {
-        return .{
-            .height = h,
-            .width = w,
-            .x = x,
-            .y = y,
-        };
-    }
-};
-
-pub const OverflowMode = enum {
-    /// Truncate any text written past the end of the rectangle.
-    truncate,
-    /// Wrap to the next line of the rectangle.
-    wrap,
-};
-
-/// Writes to a rectangle on the screen.
-pub const Writer = struct {
-    s: *Screen,
-    rect: Rect,
-    interface: std.Io.Writer,
-    cursor: Cursor,
-
-    overflow_mode: OverflowMode,
-
-    /// The last position we successfully wrote at. This is used when a write call continues the last
-    /// grapheme cluster of the previous write call.
-    last_cursor: Cursor = .reset,
-    /// The last codepoint written to the screen. This is used to check if a write is a continuation of
-    /// a previously written grapheme cluster.
-    last_cp: u21 = 0,
-    /// This is used to check if a write is a continuation of a previously written grapheme cluster.
-    state: zg.Graphemes.State = .reset,
-
-    /// When this is set to `.ascii`, optimizes writes for ASCII characters.
-    unicode_mode: UnicodeMode,
-
-    pub const UnicodeMode = enum {
-        ascii,
-        unicode,
-    };
-
-    /// Writes the current style to all cells until the end of the line.
-    pub fn styleToEol(w: *Writer) !void {
-        try w.flush();
-        for (w.cellsAtCursor().items(.style)) |*style| style.* = w.cursor.style;
-    }
-
-    /// Write the current style to the next `n` cells after the cursor.
-    pub fn styleN(w: *Writer, n: u16) !void {
-        try w.flush();
-        for (w.cellsAtCursor().items(.style)[0..n]) |*style| style.* = w.cursor.style;
-    }
-
-    pub fn styleRect(w: *Writer, rect: Rect, style: Style) void {
-        var iter = w.s.iterator(rect);
-        while (iter.next()) |line| {
-            for (line.cells.items(.style)) |*s|
-                s.* = style;
-        }
-    }
-
-    /// Clear the rectangle
-    pub fn clear(w: *Writer) void {
-        if (w.rect.x == 0 and w.rect.width == w.s.width) {
-            if (w.rect.y == 0 and w.rect.height == w.s.height()) {
-                w.s.text.clearRetainingCapacity();
-                @memset(w.s.cells.items(.lw), .{ .len = 0, .wide = false });
-                @memset(w.s.cells.items(.style), .{});
-                @memset(w.s.lines.items, .{ .len = 0 });
-                w.cursor = .{
-                    .cell_offset = 0,
-                    .text_offset = 0,
-                    .style = w.cursor.style,
-                };
-                return;
-            }
-
-            // Cells are contiguous
-            const cells_start = w.rect.y * w.s.width;
-            const cells_len = w.rect.height * w.s.width;
-            const cells = w.s.cells.subslice(cells_start, cells_len);
-            @memset(cells.items(.lw), .{ .len = 0, .wide = false });
-            @memset(cells.items(.style), .{});
-
-            var text_off: usize = 0;
-            for (w.s.lines.items[0..w.rect.y]) |line| text_off += line.len;
-            var text_len: usize = 0;
-            for (w.s.lines.items[w.rect.y..][0..w.rect.height]) |*line| {
-                text_len += line.len;
-                line.len = 0;
-            }
-            w.s.text.replaceRange(w.s.gpa, text_off, text_len, "") catch unreachable;
-            w.cursor = .{
-                .cell_offset = w.rect.y * w.s.width,
-                .text_offset = text_off,
-                .style = w.cursor.style,
-            };
-            return;
-        }
-
-        var dest_cursor: Cursor = .reset;
-        var y: u16 = w.rect.y;
-        while (y < w.rect.y + w.rect.height) : (y += 1) {
-            w.s.cursorTo(&dest_cursor, y, w.rect.x);
-
-            const dest_cells = w.s.cells.subslice(
-                dest_cursor.cell_offset,
-                w.rect.width,
-            );
-
-            var remove_len: u31 = 0;
-            for (dest_cells.items(.lw)) |lw| remove_len += lw.len;
-
-            w.s.text.replaceRangeAssumeCapacity(dest_cursor.text_offset, remove_len, "");
-
-            @memset(dest_cells.items(.lw), .{ .len = 0, .wide = false });
-            @memset(dest_cells.items(.style), .{});
-
-            w.s.lines.items[y].len -= remove_len;
-        }
-    }
-
-    fn clearToEolNoFlush(w: *Writer) void {
-        const cells = w.cellsAtCursor();
-        if (cells.len == 0) return;
-
-        var replace_len: u31 = 0;
-        for (cells.items(.lw), cells.items(.style)) |*lw, *style| {
-            style.* = w.cursor.style;
-            replace_len += lw.len;
-            lw.len = 0;
-        }
-        w.s.text.replaceRange(w.s.gpa, w.cursor.text_offset, replace_len, "") catch unreachable;
-        const line = w.cursor.cell_offset / w.s.width;
-        w.s.lines.items[line].len -= replace_len;
-    }
-
-    pub fn clearToEol(w: *Writer) !void {
-        try w.flush();
-        w.clearToEolNoFlush();
-    }
-
-    pub fn padAscii(w: *Writer, c: u8) !void {
-        try w.flush();
-        const remaining = w.remainingCellsInLine();
-        try w.interface.splatByteAll(c, remaining);
-    }
-
-    pub fn setUnicodeMode(w: *Writer, mode: UnicodeMode) !void {
-        if (w.unicode_mode != mode) {
-            try w.flush();
-            w.unicode_mode = mode;
-        }
-    }
-
-    inline fn isAsciiOnly(text: []const u8) bool {
-        var res = true;
-        for (text) |c| res = res and c < 0x80;
-        return res;
-    }
-
-    inline fn write(w: *Writer, text: []const u8) std.mem.Allocator.Error!usize {
-        return switch (w.unicode_mode) {
-            .ascii => w.writeAscii(text),
-            .unicode => w.writeNonAscii(text),
-        };
-    }
-
-    inline fn writeAscii(w: *Writer, text: []const u8) !usize {
-        @branchHint(.likely);
-
-        // If the current cursor if off-screen, we don't write anything.
-        if (!w.s.cellInRect(w.cursor.cell_offset, w.rect)) {
-            @branchHint(.unlikely);
-            return text.len;
-        }
-
-        const res = w.writeCellsAscii(text);
-        const truncated_text = text[0..res.data_len];
-
-        w.s.text.replaceRange(
-            w.s.gpa,
-            w.cursor.text_offset,
-            res.replace_len,
-            truncated_text,
-        ) catch |err| {
-            w.clear();
-            return err;
-        };
-
-        const line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
-        w.s.lines.items[line].changed = true;
-        w.s.lines.items[line].len -= res.replace_len;
-        w.s.lines.items[line].len += res.data_len;
-        w.cursor.cell_offset += res.data_len;
-        w.cursor.text_offset += res.data_len;
-
-        const have_newline = res.discard_len > 0 and text[res.data_len + (res.discard_len - 1)] == '\n';
-        const eol = w.overflow_mode == .wrap and (!w.s.cellInRect(w.cursor.cell_offset, w.rect) or
-            (res.data_len < text.len and res.discard_len == 0));
-
-        if (have_newline or eol) {
-            const current_line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
-            if (current_line == line)
-                w.clearToEolNoFlush();
-            w.s.cursorTo(&w.cursor, line + 1, w.rect.x);
-        }
-
-        w.last_cp = 0;
-
-        return switch (w.overflow_mode) {
-            .wrap => res.data_len + res.discard_len,
-            .truncate => if (res.discard_len != 0) res.data_len + res.discard_len else text.len,
-        };
-    }
-
-    fn writeNonAscii(w: *Writer, text: []const u8) std.mem.Allocator.Error!usize {
-        if (text.len == 0) return 0;
-
-        if (text[0] > 0x7f and w.s.grapheme_clustering_mode == .grapheme and
-            !zg.graphemes.isBreak(w.last_cp, zg.codepoint.decode(text).code, &w.state))
-        {
-            @branchHint(.unlikely);
-            return w.continuePreviousWrite(text);
-        } else if (!w.s.cellInRect(w.cursor.cell_offset, w.rect)) {
-            @branchHint(.unlikely);
-            return text.len;
-        } else if (isAsciiOnly(text)) {
-            return w.writeAscii(text);
-        }
-
-        w.state = .reset;
-        const end = util.truncatePartialCodepoint(text) catch
-            unreachable; // Invalid UTF-8
-        const valid_text = text[0..end];
-
-        const res = w.writeCells(valid_text);
-        const truncated_text = valid_text[0..res.data_len];
-
-        w.s.text.replaceRange(
-            w.s.gpa,
-            w.cursor.text_offset,
-            res.replace_len,
-            truncated_text,
-        ) catch |err| {
-            // Way easier than rolling back state or precalculating everything
-            w.clear();
-            return err;
-        };
-
-        // Screen line, not rect line
-        const line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
-        w.s.lines.items[line].changed = true;
-        w.s.lines.items[line].len -= res.replace_len;
-        w.s.lines.items[line].len += res.data_len;
-
-        w.cursor.cell_offset += res.width;
-        w.cursor.text_offset += res.data_len;
-
-        w.last_cursor = .{
-            .cell_offset = w.cursor.cell_offset - res.last_width,
-            .text_offset = w.cursor.text_offset,
-            .style = .{},
-        };
-
-        const have_newline = res.discard_len > 0 and valid_text[res.data_len + (res.discard_len - 1)] == '\n';
-        const eol = w.overflow_mode == .wrap and (!w.s.cellInRect(w.cursor.cell_offset, w.rect) or
-            (res.data_len < text.len and res.discard_len == 0));
-
-        // If we truncated it means the text doesn't fully fit on this line, so we need to move to
-        // the next line. We may not have moved to the next line if the cursor is on the last cell
-        // but the next character is a wide character, so that's what this check does.
-        if (eol or have_newline) {
-            const current_line: u16 = @intCast(w.cursor.cell_offset / w.s.width);
-            if (current_line == line)
-                w.clearToEolNoFlush();
-            w.s.cursorTo(&w.cursor, line + 1, w.rect.x);
-        }
-
-        var cp_iter: zg.codepoint.Iterator = .initEnd(truncated_text);
-        if (cp_iter.prev()) |cp| w.last_cp = cp.code;
-
-        return switch (w.overflow_mode) {
-            .wrap => res.data_len + res.discard_len,
-            .truncate => if (res.discard_len > 0) res.data_len + res.discard_len else text.len,
-        };
-    }
-
-    const WriteCellsResult = struct {
-        /// Number of bytes to write from `data`.
-        data_len: u31,
-        /// Total width of the bytes to write.
-        width: usize,
-
-        /// Number of bytes to discard from `data` after writing.
-        /// This is used to discard zero width characters.
-        discard_len: usize,
-
-        /// Number of bytes to replace from the text buffer.
-        replace_len: u31,
-
-        /// When the grapheme clustering mode is set to `.grapheme`. this is the final state of the
-        /// grapheme iterator when returning from this function. This is used to check if a subsequent
-        /// write continues the last grapheme cluster of the previous write.
-        state: zg.Graphemes.State,
-
-        /// Width of the last character written. This is used to get the last written cell position.
-        last_width: usize,
-    };
-
-    pub fn remainingCellsInLine(w: *const Writer) usize {
-        if (w.cursor.cell_offset >= w.s.cells.len)
-            return 0;
-
-        const cx = w.cursor.cell_offset % w.s.width;
-        return w.rect.width -| (cx -| w.rect.x);
-    }
-
-    fn cellsAtCursor(w: *const Writer) std.MultiArrayList(Cell).Slice {
-        const len = w.remainingCellsInLine();
-        const off = w.cursor.cell_offset;
-        return w.s.cells.subslice(off, len);
-    }
-
-    fn writeCells(w: *Writer, data: []const u8) WriteCellsResult {
-        const WidthIterator = @import("main.zig").WidthIterator;
-
-        const remaining_cells = w.remainingCellsInLine();
-        var cells = w.cellsAtCursor();
-
-        var iter: WidthIterator = .init(data, w.s.grapheme_clustering_mode, remaining_cells);
-
-        var width: usize = 0;
-        var len: u31 = 0;
-        var replace_len: u31 = 0;
-        var last_width: usize = 0;
-
-        if (w.cursor.cell_offset > 0) {
-            const lw = w.s.cells.items(.lw)[w.cursor.cell_offset - 1];
-            if (lw.wide) {
-                // We're overwriting the right-hand side of a wide character, so we need to erase
-                // it.
-
-                // The last cell of a line should never be a wide character.
-                assert(w.cursor.cell_offset % w.s.width != 0);
-                w.cursor.text_offset -= lw.len;
-                replace_len += lw.len;
-                w.s.cells.set(w.cursor.cell_offset - 1, .blank);
-            }
-        }
-
-        while (iter.next()) |res| : (width += res.width) {
-            assert(res.width <= 2);
-
-            // We don't care about zero-width characters.
-            if (res.width == 0) {
-                @branchHint(.unlikely);
-                return .{
-                    .data_len = len,
-                    .replace_len = replace_len,
-                    .width = width,
-                    .state = iter.graphemes.state,
-                    .last_width = last_width,
-                    .discard_len = res.len,
-                };
-            }
-
-            len = @intCast(res.offset + res.len);
-            const char_bytes = data[res.offset..][0..res.len];
-
-            // Grapheme cluster longer than 2^15 bytes, just ignore it.
-            if (char_bytes.len > std.math.maxInt(u15)) {
-                @branchHint(.cold);
-                continue;
-            }
-
-            replace_len += cells.items(.lw)[width].len;
-            cells.set(width, .{
-                .lw = .{
-                    .len = @intCast(char_bytes.len),
-                    .wide = res.width > 1,
-                },
-                .style = w.cursor.style,
-            });
-
-            // We got a wide character. Blank the next cell.
-            if (res.width == 2) {
-                replace_len += cells.items(.lw)[width + 1].len;
-                cells.set(width + 1, .blank);
-            }
-            last_width = res.width;
-        }
-
-        const discard_len = if (std.mem.indexOfScalar(u8, data[len..], '\n')) |n| n + 1 else 0;
+    /// Returns a rectangle whose width and height is clamped to avoid extending outside of the
+    /// parent rectangle.
+    pub fn clamped(source: Rect, subrect: Rect) Rect {
+        const new_x = source.x + subrect.x;
+        const new_y = source.y + subrect.y;
+        const width = @min(subrect.width, source.width -| subrect.x);
+        const height = @min(subrect.height, source.height -| subrect.y);
 
         return .{
-            .data_len = len,
-            .replace_len = replace_len,
+            .x = new_x,
+            .y = new_y,
             .width = width,
-            .state = iter.graphemes.state,
-            .last_width = last_width,
-            .discard_len = discard_len,
+            .height = height,
         };
     }
 
-    const WriteCellsAsciiResult = struct {
-        /// Number of bytes to write from `data`.
-        data_len: u31,
-        /// Number of bytes to replace from the text buffer.
-        replace_len: u31,
-        discard_len: u31,
-    };
-
-    inline fn writeCellsAscii(w: *Writer, data: []const u8) WriteCellsAsciiResult {
-        const remaining_cells = w.remainingCellsInLine();
-        if (remaining_cells == 0) {
-            return .{
-                .data_len = 0,
-                .replace_len = 0,
-                .discard_len = 0,
-            };
-        }
-
-        const tlen: u31 = @intCast(@min(data.len, remaining_cells));
-        var cells = w.cellsAtCursor().subslice(0, tlen);
-
-        var replace_len: u31 = 0;
-
-        if (w.cursor.cell_offset > 0) {
-            const lw = w.s.cells.items(.lw)[w.cursor.cell_offset - 1];
-            if (lw.wide) {
-                // We're overwriting the right-hand side of a wide character, so we need to erase
-                // it.
-
-                // The last cell of a line should never be a wide character.
-                assert(w.cursor.cell_offset % w.s.width != 0);
-                w.cursor.text_offset -= lw.len;
-                replace_len += lw.len;
-                w.s.cells.set(w.cursor.cell_offset - 1, .blank);
-            }
-        }
-
-        for (data[0..tlen], cells.items(.lw), cells.items(.style), 0..) |c, *lw, *style, i| {
-            assert(c < 0x80); // Encountered non-ASCII byte in ASCII mode
-            const width = ascii_widths[c];
-
-            // We don't care about zero-width characters.
-            if (width == 0) {
-                @branchHint(.unlikely);
-
-                return .{
-                    .data_len = @intCast(i),
-                    .replace_len = replace_len,
-                    .discard_len = 1,
-                };
-            }
-
-            replace_len += lw.len;
-            lw.* = .{ .len = 1, .wide = false };
-            style.* = w.cursor.style;
-        }
-
-        const discard_len = if (std.mem.indexOfScalar(u8, data[tlen..], '\n')) |n| n + 1 else 0;
-
+    /// Returns a rectangle position at `row`,`col` whose width and height extends to the edges of
+    /// the parent rectangle.
+    pub fn extended(source: Rect, row: u16, col: u16) Rect {
+        assert(row < source.height);
+        assert(col < source.width);
         return .{
-            .data_len = tlen,
-            .replace_len = replace_len,
-            .discard_len = @intCast(discard_len),
+            .x = source.x + col,
+            .y = source.y + row,
+            .width = source.width - col,
+            .height = source.height - row,
         };
     }
 
-    // TODO: Get test coverage for this
-    /// Write `data` as a continuation of the last written grapheme cluster.
-    ///
-    /// Partial codepoints are handled by ignoring them and keeping them in the internal buffer
-    /// instead. This works because codepoints are a maximum of 4 bytes. The partial codepoints
-    /// will then be completed by subsequent calls that fill up the writer's internal buffer.
-    ///
-    /// Grapheme clusters on the other hand, have an unbounded length. A maliciously crafted
-    /// grapheme cluster can be terabytes in size, and it would be valid unicode. We only
-    /// handle grapheme clusters up to 2^15 in size but we don't want to impose such high space
-    /// requirements on the writer's internal buffer. So instead, we commit partial grapheme
-    /// clusters to the underlying screen and check if a following write call continues the last
-    /// written grapheme cluster. If it does, we append in-place to the last position we wrote
-    /// to. That is what this branch does.
-    fn continuePreviousWrite(w: *Writer, data: []const u8) !usize {
-        @branchHint(.unlikely);
-        assert(w.s.grapheme_clustering_mode == .grapheme);
-
-        // Get the first grapheme
-        var iter = zg.graphemes.iterator(data);
-        iter.state = w.state;
-        const first = iter.nextState().?;
-
-        // Check how many bytes we can fit
-        const cell_len = &w.s.cells.items(.lw)[w.last_cursor.cell_offset].len;
-        const remaining_len = std.math.maxInt(u15) - cell_len.*;
-        const len: u15 = @intCast(@min(remaining_len, first.len));
-        if (len == 0) {
-            @branchHint(.cold);
-            return first.len;
+    pub fn advance(rect: Rect, row: u16, col: u16, n: u32) [2]u16 {
+        const x = col + n;
+        const row_advance = x / rect.width;
+        if (row + row_advance >= rect.height) {
+            @branchHint(.unlikely);
+            return .{ rect.height, 0 };
         }
 
-        const end: u15 = @intCast(util.truncatePartialCodepoint(first.bytes(data)[0..len]) catch
-            unreachable); // Invalid UTF-8
-        const bytes = data[0..end];
-
-        try w.s.text.insertSlice(w.s.gpa, w.last_cursor.text_offset, bytes);
-        errdefer comptime unreachable;
-
-        // Screen line, not rect line
-        const line = w.last_cursor.cell_offset / w.s.width;
-        w.s.lines.items[line].changed = true;
-        w.s.lines.items[line].len += end;
-        cell_len.* += end;
-        w.last_cursor.text_offset += end;
-
-        var cp_iter: zg.codepoint.Iterator = .initEnd(bytes);
-        w.last_cp = cp_iter.prev().?.code;
-        w.state = iter.state;
-
-        return first.len;
+        return .{ @intCast(row + x / rect.width), @intCast(x % rect.width) };
     }
 
-    pub fn flush(w: *Writer) !void {
-        try ioFlush(&w.interface);
+    pub fn advanceRect(rect: Rect, parent: Rect, n: u32, new_width: u16) Rect {
+        return parent.clamped(.{
+            .x = @intCast(rect.x +| n),
+            .y = rect.y,
+            .width = new_width,
+            .height = rect.height,
+        });
     }
-
-    fn ioFlush(w: *std.Io.Writer) !void {
-        const wr: *Writer = @fieldParentPtr("interface", w);
-        switch (wr.unicode_mode) {
-            .ascii => {
-                while (w.end != 0) {
-                    const bytes_written = wr.write(w.buffered()) catch return error.WriteFailed;
-                    _ = w.consume(bytes_written);
-                }
-            },
-            .unicode => {
-                while (w.end != 0) {
-                    const buffered = w.buffered();
-                    const expected_len = std.unicode.utf8ByteSequenceLength(buffered[0]) catch 1;
-                    if (buffered.len < expected_len) break;
-                    const bytes_written = wr.write(buffered) catch return error.WriteFailed;
-                    _ = w.consume(bytes_written);
-                }
-            },
-        }
-    }
-
-    fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) !usize {
-        const w: *Writer = @fieldParentPtr("interface", io_writer);
-        const buffered = w.interface.buffered();
-        if (buffered.len > 0) {
-            const bytes_written = w.write(buffered) catch return error.WriteFailed;
-            _ = w.interface.consume(bytes_written);
-
-            if (bytes_written != buffered.len) return 0;
-        }
-
-        var total_len: usize = 0;
-        for (data[0 .. data.len - 1]) |slice| {
-            const bytes_written = w.write(slice) catch
-                return error.WriteFailed;
-
-            total_len += bytes_written;
-
-            if (bytes_written < slice.len) return total_len;
-        }
-
-        const pattern = data[data.len - 1];
-        for (0..splat) |_| {
-            const bytes_written = w.write(pattern) catch
-                return error.WriteFailed;
-
-            total_len += bytes_written;
-
-            if (bytes_written < pattern.len) return total_len;
-        }
-        return total_len;
-    }
-
-    pub fn setStyle(w: *Writer, style: Style) !void {
-        try w.flush();
-        w.cursor.style = style;
-    }
-
-    /// Sets the current cursor position, flushing any buffered text beforehand. It is allowed to
-    /// set the cursor position off the screen. Writing to a position off screen will do nothing.
-    pub fn setCursor(w: *Writer, row: u16, col: u16) !void {
-        try w.flush(); // Avoid vtable
-        // w.s.cursorTo(&w.cursor, w.rect.y + row, w.rect.x + col);
-        w.cursor = w.s.cursorAt(w.rect.y + row, w.rect.x + col, w.cursor.style);
-    }
-
-    /// Asserts that rect does not go off screen.
-    ///
-    /// Also see `setRectClamp`.
-    pub fn setRect(w: *Writer, rect: Rect) !void {
-        assert(rect.y + rect.height <= w.s.height());
-        assert(rect.x + rect.width <= w.s.width);
-
-        try w.flush();
-
-        w.rect = rect;
-        w.s.cursorTo(&w.cursor, rect.y, rect.x);
-    }
-
-    /// Sets the current rectangle of the writer. If the rectangle does not entirely fit within the
-    /// screen, it's dimensions are adjusted to make it fit. Zero sized rectangles are allowed.
-    pub fn setRectClamp(w: *Writer, rect: Rect) !void {
-        try w.setRect(w.s.clampedRect(rect));
-    }
-
-    pub fn setRectAtCursor(w: *Writer, rect_width: u16, rect_height: u16) !void {
-        try w.flush();
-        const cx: u16 = @intCast(w.cursor.cell_offset % w.s.width);
-        const cy: u16 = @intCast(w.cursor.cell_offset / w.s.width);
-
-        w.rect = .init(cx, cy, rect_width, rect_height);
-    }
-
-    pub fn setRectClampAtCursor(w: *Writer, rect_width: u16, rect_height: u16) !void {
-        try w.flush();
-        const cx: u16 = @intCast(w.cursor.cell_offset % w.s.width);
-        const cy: u16 = @intCast(w.cursor.cell_offset / w.s.width);
-
-        w.rect = .{
-            .height = @min(rect_height, w.s.height() -| cy),
-            .width = @min(rect_width, w.s.width -| cx),
-            .x = @min(cx, w.s.width),
-            .y = @min(cy, w.s.height()),
-        };
-    }
-};
-
-pub const Line = packed struct {
-    len: u31,
-    changed: bool = true,
-};
-
-pub const Cell = struct {
-    lw: packed struct {
-        len: u15,
-        wide: bool,
-    },
-    style: Style,
-
-    pub const blank: Cell = .{
-        .lw = .{ .len = 0, .wide = false },
-        .style = .{},
-    };
 };
 
 pub const Cursor = struct {
-    cell_offset: usize,
-    text_offset: usize,
-    style: Style,
+    row: u16,
+    col: u16,
+    style: Cell.CellStyle,
 
-    pub const reset: Cursor = .{
-        .cell_offset = 0,
-        .text_offset = 0,
-        .style = .{},
+    pub const origin: Cursor = .{
+        .row = 0,
+        .col = 0,
+        .style = .default,
     };
 };
 
-/// Asserts `buffer.len >= 4`.
-pub fn init(
-    gpa: std.mem.Allocator,
+// TODO: Consider a different name to avoid conflation with `std.Io.Writer`.
+/// State required for writing to the screen. Contains a cursor that moves as text is written,
+/// performing wrapping and properly handling wide characters and grapheme cluster segmentation.
+///
+/// Only writes text in the bounds of the given rectangle, wrapping or truncating at the edges.
+pub const Writer = struct {
+    s: *Screen,
+    gpa: Allocator,
+    rect: Rect,
+
+    /// Coordinates relative to the parent rectangle.
+    cursor: Cursor,
+
+    grapheme_state: zg.Graphemes.State = .reset,
+    last_cp: u21 = 0,
+    last_cursor: Cursor = .origin,
+
     grapheme_clustering_mode: GraphemeClusteringMode,
-) Screen {
-    return .{
-        .grapheme_clustering_mode = grapheme_clustering_mode,
-        .text = .empty,
-        .lines = .empty,
-        .cells = .empty,
-        .width = 0,
-        .gpa = gpa,
-    };
-}
+    edge_mode: EdgeMode,
 
-pub fn deinit(s: *Screen) void {
-    s.text.deinit(s.gpa);
-    s.lines.deinit(s.gpa);
-    s.cells.deinit(s.gpa);
-}
+    pub const EdgeMode = enum { wrap, truncate };
 
-/// Allocate enough memory to fit the given width and height. Does not allocate any extra memory
-/// for text, just cell and line data.
-pub fn ensureResizeCapacity(s: *Screen, new_width: u16, new_height: u16) !void {
-    const n = @as(u32, new_width) * new_height;
-    try s.ensureTotalCellCapacity(n);
-    try s.lines.ensureTotalCapacity(s.gpa, new_height);
-}
+    pub fn setRect(w: *Writer, r: Rect) void {
+        w.rect = r;
+        w.setCursor(0, 0);
+    }
 
-/// Resizes the screen to fit the new dimensions, clearing all text.
-pub fn resize(s: *Screen, new_width: u16, new_height: u16) !void {
-    try s.ensureResizeCapacity(new_width, new_height);
-    s.resizeAssumeCapacity(new_width, new_height);
-}
+    pub fn setRectClamp(w: *Writer, r: Rect) void {
+        w.rect = w.s.screenRect().clamped(r);
+        w.setCursor(0, 0);
+    }
 
-/// Resizes the screen and clears all text.
-pub fn resizeAssumeCapacity(s: *Screen, new_width: u16, new_height: u16) void {
-    const n = @as(u32, new_width) * new_height;
-    s.cells.len = n;
-    s.lines.items.len = new_height;
-    @memset(s.cells.items(.lw), .{ .len = 0, .wide = false });
-    @memset(s.cells.items(.style), .{});
-    @memset(s.lines.items, .{ .len = 0 });
-    s.width = new_width;
-}
+    pub fn advanceRect(w: *Writer, n: u16, new_width: u16) void {
+        w.setCursor(0, 0);
+        w.rect.x = @min(w.rect.x +| n, w.s.size.cols);
+        w.rect.width = @min(w.s.size.cols - w.rect.x, new_width);
+    }
 
-/// Move the cursor to `row, col`. Moves from the current position, so it'll be more efficient if
-/// the new position is near the old one.
-pub fn cursorTo(s: *const Screen, cursor: *Cursor, row: u16, col: u16) void {
-    if (row >= s.height() or col >= s.width) {
-        cursor.* = .{
-            .cell_offset = s.cells.len,
-            .text_offset = s.text.items.len,
-            .style = cursor.style,
+    pub fn advanceRectToEol(w: *Writer, n: u16) void {
+        w.advanceRect(n, w.s.size.cols);
+    }
+
+    pub fn extendRectToEol(w: *Writer) void {
+        w.rect.width = w.s.size.cols - w.rect.x;
+    }
+
+    pub fn setRectWidth(w: *Writer, new_width: u16) void {
+        w.rect.width = @max(w.s.size.cols - w.rect.x, new_width);
+        w.setCursor(0, 0);
+    }
+
+    pub fn splatByteAll(w: *Writer, byte: u8, n: usize) !void {
+        for (0..n) |_| {
+            _ = try w.write(&.{byte});
+        }
+    }
+
+    pub fn write(w: *Writer, bytes: []const u8) !usize {
+        if (bytes.len == 0) {
+            @branchHint(.unlikely);
+            return 0;
+        }
+
+        if (w.cursor.row >= w.rect.height or w.cursor.col >= w.rect.width) {
+            @branchHint(.unlikely);
+            return bytes.len;
+        }
+
+        // ASCII
+        if (bytes[0] & 0x80 == 0) {
+            @branchHint(.likely);
+
+            if (bytes[0] < 0x20) {
+                // Control characters are currently ignored.
+                // TODO: Handle newlines, carriage returns, and tabs.
+                return 1;
+            }
+
+            w.eraseCurrentCell();
+            const cell = w.getCurrentCell();
+            cell.* = .{
+                .style = cell.style, // Erase already set the style
+                .content_tag = .ascii,
+                .wide = .narrow,
+                .codepoint = bytes[0],
+            };
+
+            w.last_cp = bytes[0];
+            w.grapheme_state = .reset;
+
+            w.last_cursor = w.cursor;
+            w.advanceCursor(1);
+
+            return 1;
+        }
+
+        const cp = zg.codepoint.decode(bytes);
+
+        if (w.last_cp != 0 and w.grapheme_clustering_mode == .grapheme) {
+            // Check if we're continuing a previous grapheme cluster
+            var grapheme_state = w.grapheme_state;
+            if (!zg.graphemes.isBreak(w.last_cp, cp.code, &grapheme_state)) {
+                @branchHint(.unlikely);
+                // Continue last write
+                const last_cell = w.getLastCell();
+                const last_row = w.getLastRow();
+                try w.s.appendGrapheme(w.gpa, last_row, last_cell, cp.code);
+
+                if (cp.code == 0xFE0F and last_cell.wide != .wide) {
+                    // Emoji variation selector.
+                    // Mode 2027 spec says this *must* have a width of 2.
+                    last_cell.wide = .wide;
+                    assert(w.cursor.col == w.last_cursor.col + 1);
+                    w.eraseCurrentCell();
+                    w.getCurrentCell().* = .{
+                        .codepoint = 0,
+                        .content_tag = .ascii,
+                        .wide = .spacer_tail,
+                        .style = last_cell.style,
+                    };
+                    w.advanceCursor(1);
+                }
+
+                w.last_cp = cp.code;
+                w.grapheme_state = grapheme_state;
+                return cp.len;
+            }
+        }
+
+        w.last_cp = cp.code;
+        w.grapheme_state = .reset;
+
+        // New grapheme
+        const cell = w.getCurrentCell();
+        const row = w.getRow();
+        const cp_width = zg.display_width.codePointWidth(cp.code);
+        switch (cp_width) {
+            0 => {
+                // Zero width starting character - ignore.
+                return cp.len;
+            },
+            1 => {
+                w.eraseCurrentCell();
+                cell.* = .{
+                    .style = w.cursor.style,
+                    .content_tag = .codepoint,
+                    .wide = .narrow,
+                    .codepoint = cp.code,
+                };
+                row.grapheme = true;
+                w.last_cursor = w.cursor;
+                w.advanceCursor(1);
+            },
+            2, 3 => {
+                w.eraseCurrentCell();
+                if (w.rect.width == 1) {
+                    @branchHint(.unlikely);
+                    w.last_cp = 0;
+                    return cp.len;
+                }
+
+                const remaining_width = w.rect.width - w.cursor.col;
+                if (remaining_width == 1) {
+                    // We need to wrap
+                    cell.* = .{
+                        .style = w.cursor.style,
+                        .content_tag = .ascii,
+                        .wide = .spacer_head,
+                        .codepoint = 0,
+                    };
+                    w.advanceCursor(1);
+                    w.eraseCurrentCell();
+                }
+
+                w.last_cursor = w.cursor;
+
+                // TODO: Re-use grapheme slice if possible.
+                const new_cell = w.getCurrentCell();
+                const new_row = w.getRow();
+                new_cell.* = .{
+                    .style = w.cursor.style,
+                    .content_tag = .codepoint,
+                    .wide = .wide,
+                    .codepoint = cp.code,
+                };
+
+                w.advanceCursor(1);
+                assert(w.getRow() == new_row);
+                w.getCurrentCell().* = .{
+                    .style = w.cursor.style,
+                    .content_tag = .codepoint,
+                    .wide = .spacer_tail,
+                    .codepoint = 0,
+                };
+                w.advanceCursor(1);
+            },
+            else => unreachable,
+        }
+
+        return cp.len;
+    }
+
+    pub fn setStyle(w: *Writer, style: Style) !void {
+        w.cursor.style = try w.s.styleToCellStyle(w.gpa, style);
+    }
+
+    pub fn getStyle(w: *const Writer) Style {
+        return w.s.getCellStyle(w.cursor.style);
+    }
+
+    pub fn styleToEol(w: *Writer) void {
+        const r: Rect = .{
+            .height = 1,
+            .width = w.rect.width - w.cursor.col,
+            .x = w.rect.x + w.cursor.col,
+            .y = w.rect.y + w.cursor.row,
         };
-        return;
+        w.s.styleRectCell(r, w.cursor.style);
+        w.advanceCursor(r.width);
     }
 
-    var off: usize = 0;
-    const old_row = cursor.cell_offset / s.width;
-    if (row != old_row) {
-        for (s.lines.items[0..row]) |line|
-            off += line.len;
-        for (s.cells.items(.lw)[row * s.width ..][0..col]) |lw|
-            off += lw.len;
-    } else {
-        off = cursor.text_offset;
-        const old_col = cursor.cell_offset % s.width;
-        if (old_col < col) {
-            for (s.cells.items(.lw)[row * s.width ..][old_col..col]) |lw|
-                off += lw.len;
-        } else {
-            for (s.cells.items(.lw)[row * s.width ..][col..old_col]) |lw|
-                off -= lw.len;
+    pub fn clearToEol(w: *Writer) !void {
+        try w.splatByteAll(' ', w.rect.width -| w.cursor.col);
+    }
+
+    pub fn writeByte(w: *Writer, c: u8) !void {
+        try w.writeAll(&.{c});
+    }
+
+    /// Advance the cursor by `n` cells.
+    fn advanceCursor(w: *Writer, n: u32) void {
+        switch (w.edge_mode) {
+            .wrap => {
+                w.cursor.row, w.cursor.col = w.rect.advance(w.cursor.row, w.cursor.col, n);
+            },
+            .truncate => {
+                w.cursor.col +|= @intCast(n);
+            },
         }
     }
 
-    cursor.* = .{
-        .cell_offset = row * s.width + col,
-        .text_offset = off,
-        .style = cursor.style,
-    };
-}
+    /// Returns the cell this writer is currently at.
+    pub fn getCurrentCell(w: *Writer) *Cell {
+        return w.s.getCellRowCol(w.rect.y + w.cursor.row, w.rect.x + w.cursor.col);
+    }
 
-/// Returns a cursor at the given position.
-fn cursorAt(s: *const Screen, row: u16, col: u16, style: Style) Cursor {
-    if (row >= s.height() or col >= s.width) return .{
-        .cell_offset = s.cells.len,
-        .text_offset = s.text.items.len,
-        .style = style,
-    };
+    pub fn getLastCell(w: *Writer) *Cell {
+        return w.s.getCellRowCol(w.rect.y + w.last_cursor.row, w.rect.x + w.last_cursor.col);
+    }
 
-    var off: usize = 0;
-    for (s.lines.items[0..row]) |line|
-        off += line.len;
-    for (s.cells.items(.lw)[row * s.width ..][0..col]) |c|
-        off += c.len;
+    pub fn getRow(w: *Writer) *Row {
+        return &w.s.rows.items[w.rect.y + w.cursor.row];
+    }
+
+    pub fn getLastRow(w: *Writer) *Row {
+        return &w.s.rows.items[w.rect.y + w.last_cursor.row];
+    }
+
+    pub fn eraseCurrentCell(w: *Writer) void {
+        w.s.eraseCell(w.rect.y + w.cursor.row, w.rect.x + w.cursor.col, w.cursor.style);
+    }
+
+    pub fn setCursor(w: *Writer, row: u16, col: u16) void {
+        w.cursor.row = row;
+        w.cursor.col = col;
+        w.last_cp = 0;
+    }
+
+    pub fn writeAll(w: *Writer, bytes: []const u8) !void {
+        var i: usize = 0;
+        while (i < bytes.len) i += try w.write(bytes[i..]);
+    }
+
+    pub fn print(w: *Writer, comptime fmt: []const u8, args: anytype) !void {
+        var buf: [1024]u8 = undefined;
+        var wrapper: StdlibWriterWrapper = .{
+            .w = w,
+            .interface = .{
+                .buffer = &buf,
+                .vtable = &.{
+                    .drain = StdlibWriterWrapper.drain,
+                },
+            },
+        };
+        wrapper.interface.print(fmt, args) catch return error.OutOfMemory;
+        wrapper.interface.flush() catch return error.OutOfMemory;
+    }
+
+    pub fn writeSplatAll(w: *Writer, data: [][]const u8, splat: usize) !void {
+        var buf: [1024]u8 = undefined;
+        var wrapper: StdlibWriterWrapper = .{
+            .w = w,
+            .interface = .{
+                .buffer = &buf,
+                .vtable = &.{
+                    .drain = StdlibWriterWrapper.drain,
+                },
+            },
+        };
+        wrapper.interface.writeSplatAll(data, splat) catch return error.OutOfMemory;
+        wrapper.interface.flush() catch return error.OutOfMemory;
+    }
+
+    pub fn clear(w: *Writer) void {
+        w.s.clearRect(w.rect, w.cursor.style);
+    }
+
+    pub const StdlibWriterWrapper = struct {
+        w: *Writer,
+        interface: std.Io.Writer,
+
+        pub fn drain(
+            io_writer: *std.Io.Writer,
+            data: []const []const u8,
+            splat: usize,
+        ) std.Io.Writer.Error!usize {
+            const wrapper: *StdlibWriterWrapper = @fieldParentPtr("interface", io_writer);
+            const w = wrapper.w;
+
+            const buffered = wrapper.interface.buffered();
+            if (buffered.len > 0) {
+                const bytes_written = w.write(buffered) catch return error.WriteFailed;
+                _ = wrapper.interface.consume(bytes_written);
+
+                if (bytes_written != buffered.len) return 0;
+            }
+
+            var total_len: usize = 0;
+            for (data[0 .. data.len - 1]) |slice| {
+                const bytes_written = w.write(slice) catch
+                    return error.WriteFailed;
+
+                total_len += bytes_written;
+
+                if (bytes_written < slice.len) return total_len;
+            }
+
+            const pattern = data[data.len - 1];
+            for (0..splat) |_| {
+                const bytes_written = w.write(pattern) catch
+                    return error.WriteFailed;
+
+                total_len += bytes_written;
+
+                if (bytes_written < pattern.len) return total_len;
+            }
+            return total_len;
+        }
+    };
+};
+
+/// Iterates over all of the codepoints in an area.
+pub const CodepointIterator = struct {
+    s: *const Screen,
+    rect: Rect,
+    /// Relative to `rect`.
+    row: u16 = 0,
+    /// Relative to `rect`.
+    col: u16 = 0,
+    n: ?u32 = null,
+
+    pub fn next(iter: *CodepointIterator) ?u21 {
+        if (iter.row >= iter.rect.height or iter.col >= iter.rect.width)
+            return null;
+
+        const cell = iter.s.getCellRowCol(iter.rect.y + iter.row, iter.rect.x + iter.col);
+        switch (cell.wide) {
+            .spacer_tail => {
+                iter.advance(1);
+                return iter.next();
+            },
+            .narrow, .wide, .spacer_head => {},
+        }
+
+        switch (cell.content_tag) {
+            .ascii, .codepoint => {
+                iter.advance(1);
+                return cell.codepoint;
+            },
+            .codepoint_grapheme => {
+                const n = iter.n orelse {
+                    iter.n = 0;
+                    return cell.codepoint;
+                };
+
+                const graphemes = iter.s.getGraphemes(cell);
+                const ret = graphemes[n];
+                if (n == graphemes.len - 1) {
+                    iter.n = null;
+                    iter.advance(1);
+                } else {
+                    iter.n = n + 1;
+                }
+                return ret;
+            },
+        }
+    }
+
+    fn advance(iter: *CodepointIterator, n: u32) void {
+        iter.row, iter.col = iter.rect.advance(iter.row, iter.col, n);
+    }
+};
+
+/// Returns a `Rect` the same size as the screen.
+pub fn screenRect(s: *const Screen) Rect {
     return .{
-        .cell_offset = row * s.width + col,
-        .text_offset = off,
-        .style = style,
+        .x = 0,
+        .y = 0,
+        .width = s.size.cols,
+        .height = s.size.rows,
     };
 }
 
-pub fn height(s: *const Screen) u16 {
-    return @intCast(s.lines.items.len);
-}
-
-/// Write out the entire contents of the screen.
-///
-/// Generally you should use `DoubleBuffer.dump` instead.
-pub fn dump(s: *const Screen, ti: *const TermInfo, w: *std.Io.Writer) !void {
-    var current_style: Style = .{};
-    var off: usize = 0;
-    var cell_off: usize = 0;
-    var y: u16 = 0;
-    const move = ti.getStringCapability(.cursor_address) orelse "";
-    while (cell_off < s.cells.len) : ({
-        cell_off += s.width;
-        y += 1;
-    }) {
-        const cells = s.cells.subslice(cell_off, s.width);
-        var last_wide = false;
-        for (cells.items(.lw), cells.items(.style), 0..) |lw, style, x| {
-            if (last_wide) {
-                last_wide = false;
-                // See comment in `dumpDiff`.
-                try w.writeByte(' ');
-                try TermInfo.writeParamSequence(move, w, .{
-                    @as(i32, @intCast(y)),
-                    @as(i32, @intCast(x + 1)),
-                });
-                continue;
-            }
-
-            const text = s.text.items[off..][0..lw.len];
-
-            if (!Style.eql(current_style, style)) {
-                try style.dump(w, .{ .terminfo = ti });
-                current_style = style;
-            }
-
-            if (text.len == 0) {
-                try w.writeByte(' ');
-            } else {
-                try w.writeAll(text);
-            }
-
-            off += lw.len;
-            last_wide = lw.wide;
-        }
-
-        if (cell_off < s.cells.len - s.width)
-            try w.writeAll("\r\n");
-    }
-}
-
-/// Writes the bytes necessary to transform `old` into `new` to the given writer.
-/// Works on a line by line basis.
-///
-/// If the supplied terminfo does not have a sequence to address the cursor, the entire
-/// contents of `new` will by output.
-pub fn dumpDiff(new: *Screen, old: *Screen, ti: *const TermInfo, w: *std.Io.Writer) !void {
-    assert(new.width == old.width);
-    assert(new.height() == old.height());
-
-    const move = ti.getStringCapability(.cursor_address) orelse {
-        // Very dumb terminal that doesn't have an addressable cursor, OR a messed up terminfo. The
-        // terminfo API in shovel has a way to specify fallbacks for things like this, so if we get
-        // here unintentionally it's a programmer error. Enjoy your lack of escape sequences!
-        //
-        // Redraw the whole UI because we can't address the cursor.
-        try new.dump(ti, w);
-        return;
+pub fn rowRect(s: *const Screen, row: u16, height: u16) Rect {
+    return .{
+        .height = height,
+        .width = s.size.cols,
+        .y = row,
+        .x = 0,
     };
-    var current_style: Style = .{};
-    try current_style.dump(w, .{ .terminfo = ti });
+}
 
-    var l1_off: usize = 0;
-    var l2_off: usize = 0;
-    for (new.lines.items, old.lines.items, 0..) |l1, l2, y| {
-        if (!l1.changed) continue;
-        // TODO
-        const l1_text = new.text.items[l1_off..][0..l1.len];
-        const l2_text = old.text.items[l2_off..][0..l2.len];
-        l2_off += l2.len;
-        if (std.mem.eql(u8, l1_text, l2_text)) {
-            const cell_off: u16 = @intCast(y * new.width);
-            const l1_cells = new.cells.subslice(cell_off, new.width);
-            const l2_cells = old.cells.subslice(cell_off, new.width);
-            for (
-                l1_cells.items(.lw),
-                l1_cells.items(.style),
-                l2_cells.items(.lw),
-                l2_cells.items(.style),
-            ) |lw1, style1, lw2, style2| {
-                if (lw1 != lw2 or !style1.eql(style2)) break;
-            } else {
-                l1_off += l1.len;
-                continue;
-            }
-        }
+const TermInfo = @import("TermInfo.zig");
 
-        try TermInfo.writeParamSequence(move, w, .{ @as(i32, @intCast(y)), 0 });
-        const cells = new.cells.subslice(y * new.width, new.width);
-        var total_len: usize = 0;
-        var blank_start: usize = 0;
-        var last_wide = false;
-        for (cells.items(.lw), cells.items(.style), 0..) |lw, style, x| {
-            if (last_wide) {
-                assert(lw.len == 0);
-                assert(blank_start == 0);
-                last_wide = false;
-                // Not all terminals display wide characters with the same width. For example, the
-                // linux TTY renders 🧑 as a single column, while sane terminals display it using
-                // two columns. We COULD try to detect this by writing out the string and querying
-                // the cursor position, but this would have to be done for every wide character
-                // in the screen, because for example the Linux TTY displays 🧑 as 1 column but
-                // japanese characters as two. And it's likely that terminals that don't display
-                // these properly also don't support querying the cursor position.
-                //
-                // So the only sane way to handle this is to manually position the cursor after
-                // writing such a character. As an optimization we could special case certain
-                // TERMs as not requiring this extra cursor move.
-                //
-                // For terminal that don't support cursor addressing, you're shit out of luck.
-                // We write a space after the character and THEN move the cursor, so this'll
-                // work fine if the terminal renders wide characters as a single column. That's
-                // likely anyway, because what kind of terminal exists that supports unicode
-                // but not cursor addressing?
-                try w.writeByte(' ');
-                try TermInfo.writeParamSequence(move, w, .{
-                    @as(i32, @intCast(y)),
-                    @as(i32, @intCast(x + 1)),
-                });
-                continue;
-            }
-
-            total_len += lw.len;
-
-            const text = new.text.items[l1_off..][0..lw.len];
-            l1_off += lw.len;
-
-            if ((text.len == 0 or text[0] == ' ') and style.eql(current_style)) {
-                blank_start += 1;
-                assert(!last_wide);
-                continue;
-            }
-            last_wide = lw.wide;
-
-            if (blank_start > 0) {
-                try w.splatByteAll(' ', blank_start);
-            }
-
-            if (!Style.eql(current_style, style)) {
-                try style.dump(w, .{ .terminfo = ti, .diff = current_style });
-                current_style = style;
-            }
-
-            if (text.len == 0) {
-                blank_start = 1;
-            } else {
-                try w.writeAll(text);
-                blank_start = 0;
-            }
-        }
-
-        if (blank_start > 0) {
-            try w.splatByteAll(' ', blank_start);
-        }
+pub fn getCellStyle(s: *const Screen, cell_style: Cell.CellStyle) Style {
+    if (cell_style.color_type == .rgb) {
+        const style = s.styles.items(.style)[cell_style.colors.rgb.id];
+        return .{
+            .attrs = cell_style.attrs,
+            .fg = switch (style.fg_tag) {
+                .none => .none,
+                .palette => .fromPalette(style.fg.palette.index),
+                .rgb => .{ .rgb = .{ style.fg.rgb.r, style.fg.rgb.g, style.fg.rgb.b } },
+            },
+            .bg = switch (style.bg_tag) {
+                .none => .none,
+                .palette => .fromPalette(style.bg.palette.index),
+                .rgb => .{ .rgb = .{ style.bg.rgb.r, style.bg.rgb.g, style.bg.rgb.b } },
+            },
+        };
     }
+
+    return .{
+        .attrs = cell_style.attrs,
+        .fg = if (cell_style.colors.palette.fg.none)
+            .none
+        else
+            .fromPalette(cell_style.colors.palette.fg.@"256"),
+        .bg = if (cell_style.colors.palette.bg.none)
+            .none
+        else
+            .fromPalette(cell_style.colors.palette.bg.@"256"),
+    };
 }
 
 pub const DoubleBuffer = struct {
-    read: Screen,
     write: Screen,
-    dump_all: bool,
+    read: Screen,
     ti: *const TermInfo,
 
-    pub fn init(
-        gpa: std.mem.Allocator,
-        ti: *const TermInfo,
-        grapheme_clustering_mode: GraphemeClusteringMode,
-    ) DoubleBuffer {
+    pub fn init(ti: *const TermInfo) DoubleBuffer {
         return .{
-            .read = .init(gpa, grapheme_clustering_mode),
-            .write = .init(gpa, grapheme_clustering_mode),
+            .read = .empty,
+            .write = .empty,
             .ti = ti,
-            .dump_all = false,
         };
     }
 
-    pub fn deinit(db: *DoubleBuffer) void {
-        db.read.deinit();
-        db.write.deinit();
+    pub fn deinit(db: *DoubleBuffer, gpa: Allocator) void {
+        db.write.deinit(gpa);
+        db.read.deinit(gpa);
     }
 
-    pub fn resize(d: *DoubleBuffer, new_width: u16, new_height: u16) !void {
-        try d.read.ensureResizeCapacity(new_width, new_height);
-        try d.write.ensureResizeCapacity(new_width, new_height);
-
-        d.read.resizeAssumeCapacity(new_width, new_height);
-        d.write.resizeAssumeCapacity(new_width, new_height);
-
-        // Screens are cleared on resize, but the terminal emulator's screen buffer isn't. So we use
-        // this flag to force redraw everything after a resize.
-        d.dump_all = true;
+    pub fn resize(db: *DoubleBuffer, gpa: Allocator, new_height: u16, new_width: u16) !void {
+        try db.read.resize(gpa, new_height, new_width);
+        try db.write.resize(gpa, new_height, new_width);
     }
 
-    pub fn dump(d: *DoubleBuffer, w: *std.Io.Writer) !void {
-        if (d.dump_all) {
-            if (d.ti.getStringCapability(.clear_screen) orelse d.ti.getStringCapability(.cursor_home)) |clear|
-                try w.writeAll(clear);
-
-            try d.write.dump(d.ti, w);
-            d.dump_all = false;
-        } else {
-            try d.write.dumpDiff(&d.read, d.ti, w);
-        }
-
-        // TODO: Elide this if nothing changed
-
-        try d.read.text.ensureTotalCapacity(d.read.gpa, d.write.text.items.len);
-        try d.read.ensureTotalCellCapacity(d.write.cells.len);
-        try d.read.lines.ensureTotalCapacity(d.read.gpa, d.write.lines.items.len);
-
-        d.read.text.clearRetainingCapacity();
-        d.read.text.appendSliceAssumeCapacity(d.write.text.items);
-        d.read.cells.len = d.write.cells.len;
-        @memcpy(d.read.cells.items(.lw), d.write.cells.items(.lw));
-        @memcpy(d.read.cells.items(.style), d.write.cells.items(.style));
-        d.read.lines.clearRetainingCapacity();
-        d.read.lines.appendSliceAssumeCapacity(d.write.lines.items);
+    pub fn dump(db: *DoubleBuffer, w: *std.Io.Writer) !void {
+        try dumpDiff(&db.read, &db.write, db.ti, w);
+        const temp = db.read;
+        db.read = db.write;
+        db.write = temp;
+        db.write.clear();
     }
 };
 
-pub fn ensureTotalCellCapacity(s: *Screen, n: usize) !void {
-    var m = s.cells.toMultiArrayList();
-    try m.ensureTotalCapacity(s.gpa, n);
-    s.cells = m.slice();
-}
+/// Dumps the contents of the screen to the given writer, with no escape sequences. Lines are
+/// separated with a carriage return and a newline.
+pub fn dump(s: *const Screen, r: Rect, ti: *const TermInfo, w: *std.Io.Writer) !void {
+    var current_style: Style = .{};
+    var current_cell_style: Cell.CellStyle = .default;
+    var row: u16 = 0;
+    var col: u16 = 0;
+    while (row < r.height) {
+        const cell = s.getCellRowCol(r.y + row, r.x + col);
 
-pub fn lineText(s: *const Screen, line: u16) []u8 {
-    var off: usize = 0;
-    for (s.lines.items[0..line]) |l| off += l.len;
-    return s.text.items[off..][0..s.lines.items[line].len];
-}
+        if (cell.style != current_cell_style) {
+            const new_style: Style = s.getCellStyle(cell.style);
+            try new_style.dump(w, .{ .terminfo = ti });
 
-pub fn colsText(s: *const Screen, line: u16, col: u16, n: u16) []u8 {
-    var off: usize = 0;
-    for (s.lines.items[0..line]) |l| off += l.len;
-    for (s.cells.items(.lw)[line * s.width ..][0..col]) |lw| off += lw.len;
-    var len: usize = 0;
-    for (s.cells.items(.lw)[line * s.width + col ..][0..n]) |lw| len += lw.len;
-    return s.text.items[off..][0..len];
-}
+            current_style = new_style;
+            current_cell_style = cell.style;
+        }
 
-pub fn cellInRect(s: *const Screen, cell: usize, rect: Rect) bool {
-    if (s.width == 0 or s.height() == 0) return false;
+        if (cell.codepoint != 0) {
+            switch (cell.content_tag) {
+                .ascii => {
+                    try w.writeByte(@intCast(cell.codepoint));
+                },
+                .codepoint => {
+                    try w.printUnicodeCodepoint(cell.codepoint);
+                },
+                .codepoint_grapheme => {
+                    try w.printUnicodeCodepoint(cell.codepoint);
+                    const graphemes = s.getGraphemes(cell);
+                    for (graphemes) |cp| {
+                        try w.printUnicodeCodepoint(cp);
+                    }
+                },
+            }
+        }
 
-    const x = cell % s.width;
-    const y = cell / s.width;
-    return y >= rect.y and y - rect.y < rect.height and
-        x >= rect.x and x - rect.x < rect.width;
-}
-
-/// Returns a writer to the specified rectangle on screen. If the writer encounters OOM, the
-/// rectangle area of the screen will be cleared.
-pub fn writer(
-    s: *Screen,
-    /// Writer buffer.
-    buffer: []u8,
-    /// The rectangular region of the screen to write to.
-    rect: Rect,
-    /// Behaviour when writing past the end of the rectangle.
-    overflow_mode: OverflowMode,
-    /// Write in ASCII or unicode mode. Unicode mode works for all text, but is slower. ASCII mode
-    /// is faster at writing but asserts that all text written is ASCII.
-    ///
-    /// Use unicode mode by default, and ASCII mode when you can guarantee all your text will be
-    /// ASCII.
-    ///
-    /// You can change the unicode mode at any point by calling `Writer.setUnicodeMode`.
-    unicode_mode: Writer.UnicodeMode,
-) Writer {
-    assert(buffer.len >= 4); // Required for buffering unicode codepoints
-    return .{
-        .overflow_mode = overflow_mode,
-        .s = s,
-        .rect = rect,
-        .cursor = s.cursorAt(rect.y, rect.x, .{}),
-        .interface = .{
-            .buffer = buffer,
-            .vtable = &.{
-                .drain = Writer.drain,
-                .flush = Writer.ioFlush,
+        switch (cell.wide) {
+            .narrow => {
+                row, col = r.advance(row, col, 1);
             },
-        },
-        .unicode_mode = unicode_mode,
-    };
-}
+            .wide => {
+                row, col = r.advance(row, col, 2);
+            },
+            .spacer_tail => unreachable,
+            .spacer_head => {
+                assert(cell.codepoint == 0);
+                try w.writeByte(' ');
+                row, col = r.advance(row, col, 1);
+            },
+        }
 
-/// Returns a writer covering the whole screen.
-pub fn writerFull(
-    s: *Screen,
-    buffer: []u8,
-    overflow_mode: OverflowMode,
-    unicode_mode: Writer.UnicodeMode,
-) Writer {
-    return s.writer(buffer, .init(0, 0, s.width, s.height()), overflow_mode, unicode_mode);
-}
+        if (col == 0 and row < r.height) {
+            if (cell.style != Cell.CellStyle.default) {
+                const new_style: Style = .{};
+                try new_style.dump(w, .{ .terminfo = ti });
 
-test "screen raw writes ascii" {
-    try initData();
-    defer deinitData();
-
-    var s: Screen = .init(std.testing.allocator, .grapheme);
-    defer s.deinit();
-
-    try s.resize(10, 3);
-
-    var buf: [128]u8 = undefined;
-    var w = s.writerFull(&buf, .wrap, .ascii);
-
-    var bytes_written = try w.write("idk someth");
-    try std.testing.expectEqual(10, bytes_written);
-    bytes_written = try w.write("some more");
-    try std.testing.expectEqual(9, bytes_written);
-    bytes_written = try w.write("wrap around");
-    try std.testing.expectEqual(1, bytes_written);
-    bytes_written = try w.write("rap around");
-    try std.testing.expectEqual(10, bytes_written);
-    bytes_written = try w.write("\x1b");
-    try std.testing.expectEqual(1, bytes_written);
-    bytes_written = try w.write("\x1b");
-    try std.testing.expectEqual(1, bytes_written);
-
-    try std.testing.expectEqualStrings("idk someth", s.lineText(0));
-    try std.testing.expectEqualStrings("some morew", s.lineText(1));
-    try std.testing.expectEqualStrings("rap around", s.lineText(2));
-}
-
-test "screen zero width writes ascii" {
-    try initData();
-    defer deinitData();
-
-    var s: Screen = .init(std.testing.allocator, .grapheme);
-    defer s.deinit();
-
-    try s.resize(10, 3);
-
-    var buf: [128]u8 = undefined;
-    var w = s.writerFull(&buf, .truncate, .ascii);
-
-    var bytes_written = try w.write("\x1b");
-    try std.testing.expectEqual(1, bytes_written);
-    bytes_written = try w.write("\x1b");
-    try std.testing.expectEqual(1, bytes_written);
-
-    try std.testing.expectEqualStrings("", s.lineText(0));
-    try std.testing.expectEqualStrings("", s.lineText(1));
-    try std.testing.expectEqualStrings("", s.lineText(2));
-}
-
-test "screen writer" {
-    try initData();
-    defer deinitData();
-
-    var s: Screen = .init(std.testing.allocator, .grapheme);
-    defer s.deinit();
-
-    try s.resize(10, 3);
-
-    var buf: [128]u8 = undefined;
-    var w = s.writerFull(&buf, .wrap, .ascii);
-
-    try w.interface.writeAll("idk someth");
-    try w.interface.writeAll("some more");
-    try w.interface.writeAll("wrap around");
-    try w.interface.flush();
-
-    try std.testing.expectEqualStrings("idk someth", s.lineText(0));
-    try std.testing.expectEqualStrings("some morew", s.lineText(1));
-    try std.testing.expectEqualStrings("rap around", s.lineText(2));
-}
-
-test "screen wide characters" {
-    try initData();
-    defer deinitData();
-
-    var s: Screen = .init(std.testing.allocator, .grapheme);
-    defer s.deinit();
-
-    try s.resize(10, 3);
-
-    var buf: [128]u8 = undefined;
-    var w = s.writerFull(&buf, .wrap, .unicode);
-
-    try w.interface.writeAll("🧑‍🌾🧑‍🌾🧑‍🌾🧑‍🌾🧑‍🌾🧑‍🌾");
-    try w.interface.writeAll("hi :)");
-    try w.setCursor(2, 0);
-    try w.interface.writeAll("h🧑‍🌾🧑‍🌾🧑‍🌾🧑‍🌾🧑‍🌾");
-    try w.interface.writeAll("guh");
-    try w.interface.flush();
-
-    try std.testing.expectEqualStrings("🧑‍🌾🧑‍🌾🧑‍🌾🧑‍🌾🧑‍🌾", s.lineText(0));
-    try std.testing.expectEqualStrings("🧑‍🌾hi :)", s.lineText(1));
-    try std.testing.expectEqualStrings("h🧑‍🌾🧑‍🌾🧑‍🌾🧑‍🌾", s.lineText(2));
-}
-
-test "screen split graphemes across writes" {
-    try initData();
-    defer deinitData();
-
-    var s: Screen = .init(std.testing.allocator, .grapheme);
-    defer s.deinit();
-
-    try s.resize(2, 1);
-    var buf: [128]u8 = undefined;
-    var w = s.writerFull(&buf, .wrap, .unicode);
-
-    try w.interface.writeAll("🧑");
-    try w.interface.flush();
-    try w.interface.writeAll("\u{200D}");
-    try w.interface.flush();
-    try w.interface.writeAll("🌾");
-    try w.interface.flush();
-
-    try std.testing.expectEqualStrings("🧑‍🌾", s.lineText(0));
-}
-
-test "screen graphemes to codepoints" {
-    try initData();
-    defer deinitData();
-
-    var s: Screen = .init(std.testing.allocator, .codepoint);
-    defer s.deinit();
-
-    try s.resize(6, 1);
-    var buf: [128]u8 = undefined;
-    var w = s.writerFull(&buf, .wrap, .unicode);
-
-    try w.interface.writeAll("🧑");
-    try w.interface.flush();
-    try w.interface.writeAll("\u{200D}🌾");
-    try w.interface.flush();
-    try w.interface.writeAll("🌾");
-    try w.interface.flush();
-
-    try std.testing.expectEqualStrings("🧑🌾🌾", s.lineText(0));
-}
-
-test "screen OOM handling" {
-    try initData();
-    defer deinitData();
-
-    for (0..500) |i| {
-        var fa: std.testing.FailingAllocator = .init(
-            std.testing.allocator,
-            .{ .fail_index = i },
-        );
-        var s: Screen = .init(fa.allocator(), .codepoint);
-        defer s.deinit();
-
-        s.resize(6, 3) catch continue;
-        var buf: [128]u8 = undefined;
-        var w = s.writerFull(&buf, .wrap, .ascii);
-
-        try w.interface.writeAll("l");
-        w.interface.flush() catch {
-            try expectEqualStrings("", s.lineText(0));
-            continue;
-        };
-        try w.interface.writeAll("y");
-        w.interface.flush() catch {
-            try expectEqualStrings("l", s.lineText(0));
-            continue;
-        };
-        try w.interface.writeAll("j");
-        w.setCursor(1, 1) catch {
-            try expectEqualStrings("ly", s.lineText(0));
-            continue;
-        };
-        try w.interface.writeAll("hi");
-        w.interface.flush() catch {
-            try expectEqualStrings("lyj", s.lineText(0));
-            try expectEqualStrings("", s.lineText(1));
-            continue;
-        };
-        break;
+                current_style = .{};
+                current_cell_style = .default;
+            }
+            try w.writeAll("\r\n");
+        }
     }
 }
 
-test "flush partial codepoint" {
-    try initData();
-    defer deinitData();
-
-    var s: Screen = .init(std.testing.allocator, .codepoint);
-    defer s.deinit();
-
-    try s.resize(80, 20);
-
-    var buf: [128]u8 = undefined;
-    var w = s.writerFull(&buf, .wrap, .unicode);
-
-    try w.interface.writeByte(0xc1);
-    try w.interface.flush();
+fn isBlank(cell: *const Cell) bool {
+    return cell.codepoint == ' ' or (cell.wide == .narrow and cell.codepoint == 0);
 }
 
-test "replace with wide character" {
-    try initData();
-    defer deinitData();
+/// Returns the number of trailing blanks that share the same style.
+fn countTrailingBlanks(cells: []const Cell) u16 {
+    if (cells.len == 0) {
+        @branchHint(.unlikely);
+        return 0;
+    }
 
-    var s: Screen = .init(std.testing.allocator, .grapheme);
-    defer s.deinit();
+    const style = cells[cells.len - 1].style;
 
-    try s.resize(80, 20);
+    var count: u16 = 0;
+    var i = cells.len;
+    while (i > 0) {
+        i -= 1;
+        const blank = isBlank(&cells[i]) and cells[i].style == style;
+        if (!blank) break;
+        count += 1;
+    }
 
-    var buf: [128]u8 = undefined;
-    var w = s.writerFull(&buf, .wrap, .unicode);
-
-    try w.interface.writeAll("aa");
-    try w.setCursor(0, 0);
-
-    try std.testing.expectEqual(1, s.cells.items(.lw)[0].len);
-    try std.testing.expectEqual(1, s.cells.items(.lw)[1].len);
-    try std.testing.expectEqual(0, s.cells.items(.lw)[2].len);
-    try std.testing.expectEqual(2, s.lines.items[0].len);
-    try std.testing.expectEqual(2, s.text.items.len);
-
-    const str = "🧑‍🌾";
-    try w.interface.writeAll(str);
-    try w.setCursor(0, 0);
-
-    try std.testing.expectEqual(str.len, s.cells.items(.lw)[0].len);
-    try std.testing.expectEqual(0, s.cells.items(.lw)[1].len);
-    try std.testing.expectEqual(0, s.cells.items(.lw)[2].len);
-    try std.testing.expectEqual(str.len, s.lines.items[0].len);
-    try std.testing.expectEqual(str.len, s.text.items.len);
+    return count;
 }
 
-test "guhbuhduh" {
-    try initData();
-    defer deinitData();
+// TODO: Clean this up
+/// Writes out the secape sequences necessary to transform `old` into `new`.
+///
+/// Any rows in `new` that do NOT have the dirty flag set are assumed to be unchanged.
+pub fn dumpDiff(
+    old: *const Screen,
+    new: *Screen,
+    ti: *const TermInfo,
+    wr: *std.Io.Writer,
+) !void {
+    var cw: @import("util.zig").CountingWriter = .init(wr);
+    const w: *std.Io.Writer = switch (@import("builtin").mode) {
+        .Debug => &cw.interface,
+        else => wr,
+    };
 
-    var s: Screen = .init(std.testing.allocator, .codepoint);
-    defer s.deinit();
+    defer if (@import("builtin").mode == .Debug) {
+        std.log.debug("Dumped {d} bytes", .{cw.bytes_written});
+    };
 
-    try s.resize(80, 20);
+    std.log.debug("  Start dump", .{});
 
-    var buf: [128]u8 = undefined;
-    var w = s.writerFull(&buf, .wrap, .unicode);
+    const move = ti.getStringCapability(.cursor_address) orelse {
+        // Without an adressable cursor there's no way to rerender only parts of the screen.
+        try new.dump(new.screenRect(), ti, wr);
+        return;
+    };
 
-    try w.interface.writeAll("aa");
-    try w.setCursor(0, 0);
+    const clear_to_eol = ti.getStringCapability(.clr_eol);
 
-    try std.testing.expectEqual(1, s.cells.items(.lw)[0].len);
-    try std.testing.expectEqual(1, s.cells.items(.lw)[1].len);
-    try std.testing.expectEqual(0, s.cells.items(.lw)[2].len);
-    try std.testing.expectEqual(2, s.lines.items[0].len);
-    try std.testing.expectEqual(2, s.text.items.len);
+    var current_style: ?Style = null;
+    var current_cell_style: ?Cell.CellStyle = null;
+    var y: u16 = 0;
+    while (y < new.size.rows) : (y += 1) {
+        const old_cells = old.getRowCells(y);
+        const new_cells = new.getRowCells(y);
 
-    const cp1 = "🧑";
-    const cp2 = "🌾";
-    const str = "🧑‍🌾";
-    try w.interface.writeAll(str);
-    try w.flush();
-    // try w.setCursor(0, 0);
+        const start: u16 = for (old_cells, new_cells, 0..) |oc, nc, i| {
+            if (oc != nc) break @intCast(i);
+        } else continue;
 
-    try std.testing.expectEqual(cp1.len + cp2.len, s.text.items.len);
-    try std.testing.expectEqual(cp1.len + cp2.len, s.lines.items[0].len);
-    try std.testing.expectEqual(cp1.len, s.cells.items(.lw)[0].len);
-    try std.testing.expectEqual(0, s.cells.items(.lw)[1].len);
-    try std.testing.expectEqual(cp2.len, s.cells.items(.lw)[2].len);
-    try std.testing.expectEqual(0, s.cells.items(.lw)[3].len);
+        const trailing_blanks = countTrailingBlanks(new_cells);
+
+        var i = new_cells.len;
+        const end = while (i > 0) {
+            i -= 1;
+            if (old_cells[i] != new_cells[i]) break i + 1;
+        } else unreachable;
+
+        const changed_trailing_blanks = end -| (new.size.cols - trailing_blanks);
+        const true_end = @max(start, @min(end, new.size.cols - trailing_blanks));
+
+        const buffer_start = w.end;
+
+        try TermInfo.writeParamSequence(move, w, .{ y, start });
+        i = start;
+        while (i < true_end) : (i += 1) {
+            const nc = &new_cells[i];
+            if (nc.style != current_cell_style) {
+                const new_style: Style = new.getCellStyle(nc.style);
+                try new_style.dump(w, .{
+                    .diff = current_style,
+                    .terminfo = ti,
+                });
+
+                current_style = new_style;
+                current_cell_style = nc.style;
+            }
+
+            // TODO: Consider using spaces for blank cells instead of doing this.
+            if (nc.codepoint == 0) {
+                try w.writeByte(' ');
+                continue;
+            }
+
+            switch (nc.content_tag) {
+                .ascii => {
+                    try w.writeByte(@intCast(nc.codepoint));
+                },
+                .codepoint => {
+                    try w.printUnicodeCodepoint(nc.codepoint);
+                },
+                .codepoint_grapheme => {
+                    try w.printUnicodeCodepoint(nc.codepoint);
+                    const graphemes = new.getGraphemes(nc);
+                    for (graphemes) |cp| {
+                        try w.printUnicodeCodepoint(cp);
+                    }
+                },
+            }
+
+            switch (nc.wide) {
+                .narrow => {},
+                .wide => i += 1,
+                .spacer_head, .spacer_tail => unreachable,
+            }
+        }
+
+        std.log.debug("Dumping line {d}, col {d}-{d}", .{
+            y, start, true_end,
+        });
+        std.log.debug("Line {d} \"{f}\"", .{
+            y,
+            std.ascii.hexEscape(w.buffered()[buffer_start..], .lower),
+        });
+
+        if (clear_to_eol) |clr_eol| {
+            @branchHint(.likely);
+            if (changed_trailing_blanks == 0) {
+                @branchHint(.likely);
+                continue;
+            }
+            var eol_style = new.getCellStyle(new_cells[new_cells.len - 1].style);
+            // Attributes are not propagated by clear_to_eol, so if we have the reverse
+            // attribute we need to manually implement it.
+            if (eol_style.attrs.reverse) {
+                eol_style.attrs.reverse = false;
+                const temp = eol_style.fg;
+                eol_style.fg = eol_style.bg;
+                eol_style.bg = temp;
+            }
+            try eol_style.dump(w, .{ .diff = current_style, .terminfo = ti });
+            current_style = eol_style;
+            current_cell_style = new_cells[new_cells.len - 1].style;
+
+            if (changed_trailing_blanks > clr_eol.len) {
+                try w.writeAll(clr_eol);
+            } else {
+                try w.splatByteAll(' ', changed_trailing_blanks);
+            }
+        }
+    }
+
+    if (@import("builtin").mode == .Debug) {
+        // std.log.debug("{x}", .{w.buffered()});
+        try w.flush();
+    }
 }
 
-test "newlines in truncate mode" {
-    try initData();
-    defer deinitData();
-
-    var db: DoubleBuffer = .init(std.testing.allocator, undefined, .codepoint);
-    defer db.deinit();
-    const s = &db.write;
-
-    try db.resize(80, 20);
-
-    var buf: [128]u8 = undefined;
-    var wr = s.writerFull(&buf, .truncate, .unicode);
-    const w = &wr.interface;
-
-    try w.writeAll("howdy\nnice");
-    try w.flush();
-
-    try expectEqualStrings("how", s.colsText(0, 0, 3));
-    try expectEqualStrings("howd", s.colsText(0, 0, 4));
-    try expectEqualStrings("howdy", s.colsText(0, 0, 5));
-    try expectEqualStrings("howdy", s.colsText(0, 0, 10));
-    try expectEqualStrings("dy", s.colsText(0, 3, 5));
-    try expectEqualStrings("", s.colsText(0, 5, 5));
-    try expectEqualStrings("nice", s.colsText(1, 0, 10));
-    try expectEqualStrings("ice", s.colsText(1, 1, 10));
-
-    try db.resize(3, 20);
-    wr = s.writerFull(&buf, .truncate, .unicode);
-
-    try w.writeAll("howdy\nnice\nguh\nbuh");
-    try w.flush();
-
-    try expectEqualStrings("how", s.colsText(0, 0, 3));
-    try expectEqualStrings("nic", s.colsText(1, 0, 3));
-    // try expectEqualStrings("guh", s.colsText(2, 0, 3));
-    // try expectEqualStrings("buh", s.colsText(3, 0, 3));
-    // try expectEqualStrings("ic", s.colsText(1, 1, 2));
+/// Clears the rectangle without setting any dirty flags.
+pub fn clearRect(s: *Screen, r: Rect, new_style: ?Cell.CellStyle) void {
+    // TODO: This could probably be done more efficiently
+    var row: u16 = 0;
+    while (row < r.height) : (row += 1) {
+        var col: u16 = 0;
+        while (col < r.width) : (col += 1) {
+            s.eraseCell(r.y + row, r.x + col, new_style);
+        }
+    }
 }
 
-test "rectangular writes" {
-    try initData();
-    defer deinitData();
+pub fn clear(s: *Screen) void {
+    @memset(s.cells.items, .{
+        .codepoint = 0,
+        .content_tag = .ascii,
+        .style = .default,
+        .wide = .narrow,
+    });
 
-    var s: Screen = .init(std.testing.allocator, .codepoint);
-    defer s.deinit();
+    @memset(s.rows.items, .{ .grapheme = false });
+    s.styles.clearRetainingCapacity();
 
-    try s.resize(80, 20);
-
-    var buf: [128]u8 = undefined;
-    var wr = s.writer(&buf, .init(10, 10, 10, 10), .wrap, .unicode);
-    const w = &wr.interface;
-
-    try w.writeAll("howdy\nnice");
-    try wr.flush();
-
-    try expectEqualStrings("", s.colsText(10, 0, 10));
-    try expectEqualStrings("", s.colsText(10, 10, 0));
-    try expectEqualStrings("how", s.colsText(10, 10, 3));
-    try expectEqualStrings("howd", s.colsText(10, 10, 4));
-    try expectEqualStrings("howdy", s.colsText(10, 10, 5));
-    try expectEqualStrings("howdy", s.colsText(10, 10, 10));
-    try expectEqualStrings("dy", s.colsText(10, 13, 5));
-    try expectEqualStrings("", s.colsText(10, 15, 5));
-    try expectEqualStrings("nice", s.colsText(11, 10, 10));
-
-    try wr.setCursor(0, 5);
-    try w.writeAll("This is a long string");
-    try w.flush();
-
-    try expectEqualStrings("howdyThis ", s.colsText(10, 10, 10));
-    try expectEqualStrings("is a long ", s.colsText(11, 10, 10));
-    try expectEqualStrings("string", s.colsText(12, 10, 10));
-
-    try wr.setRect(.init(0, 0, 5, 1));
-    try w.writeAll("hey there");
-    try w.flush();
-
-    try expectEqualStrings("hey t", s.colsText(0, 0, 80));
-
-    try w.writeAll("More stuff");
-    try w.flush();
-
-    try expectEqualStrings("hey t", s.colsText(0, 0, 80));
-
-    try wr.setRect(.init(1, 1, 0, 0));
-    try w.writeAll("Howdy");
-    try w.flush();
-
-    try expectEqualStrings("", s.colsText(1, 1, 80));
+    s.grapheme_alloc.clearRetainingCapacity();
+    s.grapheme_map.clearRetainingCapacity();
 }
 
-// fn fuzz(_: void, smith: *std.testing.Smith) !void {
-//     var s: Screen = .init(std.testing.allocator, .grapheme);
-//     defer s.deinit();
+pub fn getGraphemes(s: *const Screen, cell: *Cell) []u21 {
+    assert(cell.content_tag == .codepoint_grapheme);
+    const graphemes = s.grapheme_map.get(s.cellIndexPtr(cell)).?;
+    return s.grapheme_alloc.chunkPtr(u21, graphemes.offset)[0..graphemes.len];
+}
 
-//     try s.resize(256, 256);
+fn expectRowText(w: *Writer, row: u16, expected_text: []const u8) !void {
+    var screen_cp_iter: CodepointIterator = .{
+        .s = w.s,
+        .rect = .{
+            .x = w.rect.x,
+            .y = w.rect.y + row,
+            .width = w.rect.width,
+            .height = 1,
+        },
+    };
+    var expected_cp_iter: std.unicode.Utf8Iterator = .{
+        .bytes = expected_text,
+        .i = 0,
+    };
+    while (expected_cp_iter.nextCodepoint()) |expected| {
+        const actual = screen_cp_iter.next().?;
+        try expectEqualCodepoints(expected, actual);
+    }
 
-//     var buf: [128]u8 = undefined;
-//     var w = s.writerFull(&buf, .wrap, .unicode);
+    try std.testing.expectEqual(null, screen_cp_iter.next());
+}
 
-//     for (bytes, 0..) |c, i| {
-//         try w.interface.writeByte(c);
-//         try w.interface.flush();
-//         if (i > 0 and i % 40 == 0) {
-//             try w.setCursor(bytes[i - 1], bytes[i - 2]);
-//         }
-//     }
-// }
+fn expectEqualCodepoints(expected: u21, actual: u21) !void {
+    if (actual != expected) {
+        std.debug.print("expected '{u}' ({d}), found '{u}' ({d})\n", .{
+            expected, expected,
+            actual,   actual,
+        });
+        return error.TestExpectedEqual;
+    }
+}
 
-// test "screen fuzz" {
+fn expectEmpty(s: *Screen, rect: Rect) !void {
+    var iter: CodepointIterator = .{
+        .s = s,
+        .rect = rect,
+    };
+    while (iter.next()) |cp| {
+        if (cp != 0) return error.ExpectedEmpty;
+    }
+}
+
+test "unicode" {
+    try initData();
+    defer deinitData();
+    const gpa = std.testing.allocator;
+
+    var s: Screen = .empty;
+    defer s.deinit(gpa);
+    try s.resize(gpa, 20, 80);
+
+    var wr = s.writer(gpa, .{
+        .height = 3,
+        .width = 3,
+        .x = 0,
+        .y = 0,
+    });
+
+    wr.setCursor(0, 0);
+    try wr.writeAll("🧑‍🌾");
+
+    try std.testing.expectEqual(0, wr.cursor.row);
+    try std.testing.expectEqual(2, wr.cursor.col);
+}
+
+test "basic ASCII" {
+    try initData();
+    defer deinitData();
+    const gpa = std.testing.allocator;
+
+    var s: Screen = .empty;
+    defer s.deinit(gpa);
+    try s.resize(gpa, 20, 80);
+
+    var wr = s.writer(gpa, .{
+        .height = 3,
+        .width = 3,
+        .x = 0,
+        .y = 0,
+    });
+
+    try wr.writeAll("This is really epic!");
+
+    try expectRowText(&wr, 0, "Thi");
+    try expectRowText(&wr, 1, "s i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+
+    wr.setCursor(0, 0);
+    try wr.writeAll("g");
+
+    try expectRowText(&wr, 0, "ghi");
+    try expectRowText(&wr, 1, "s i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+}
+
+test "wide characters" {
+    try initData();
+    defer deinitData();
+    const gpa = std.testing.allocator;
+
+    var s: Screen = .empty;
+    defer s.deinit(gpa);
+    try s.resize(gpa, 20, 80);
+
+    var wr = s.writer(gpa, .{
+        .height = 3,
+        .width = 3,
+        .x = 0,
+        .y = 0,
+    });
+    try wr.writeAll("This is really epic!");
+
+    try expectRowText(&wr, 0, "Thi");
+    try expectRowText(&wr, 1, "s i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+
+    wr.setCursor(0, 0);
+    try wr.writeAll("🧑‍🌾");
+
+    try std.testing.expectEqual(0, wr.cursor.row);
+    try std.testing.expectEqual(2, wr.cursor.col);
+
+    try expectRowText(&wr, 0, "🧑‍🌾i");
+    try expectRowText(&wr, 1, "s i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+}
+
+test "wrap wide characters" {
+    try initData();
+    defer deinitData();
+    const gpa = std.testing.allocator;
+
+    var s: Screen = .empty;
+    defer s.deinit(gpa);
+    try s.resize(gpa, 20, 80);
+
+    var wr = s.writer(gpa, .{
+        .height = 3,
+        .width = 3,
+        .x = 0,
+        .y = 0,
+    });
+    try wr.writeAll("This is really epic!");
+
+    try expectRowText(&wr, 0, "Thi");
+    try expectRowText(&wr, 1, "s i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+
+    wr.setCursor(0, 2);
+    try wr.writeAll("🧑‍🌾");
+
+    try expectRowText(&wr, 0, "Th\x00");
+    try expectRowText(&wr, 1, "🧑‍🌾i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+}
+
+test "overwrite wide char start" {
+    try initData();
+    defer deinitData();
+    const gpa = std.testing.allocator;
+
+    var s: Screen = .empty;
+    defer s.deinit(gpa);
+    try s.resize(gpa, 20, 80);
+
+    var wr = s.writer(gpa, .{
+        .height = 3,
+        .width = 3,
+        .x = 0,
+        .y = 0,
+    });
+    try wr.writeAll("This is really epic!");
+
+    try expectRowText(&wr, 0, "Thi");
+    try expectRowText(&wr, 1, "s i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+
+    wr.setCursor(0, 0);
+    try wr.writeAll("🧑‍🌾");
+
+    try expectRowText(&wr, 0, "🧑‍🌾i");
+    try expectRowText(&wr, 1, "s i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+
+    wr.setCursor(0, 0);
+    try wr.writeAll("T");
+
+    try expectRowText(&wr, 0, "T\x00i");
+    try expectRowText(&wr, 1, "s i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+
+    try wr.writeAll("h");
+
+    try expectRowText(&wr, 0, "Thi");
+    try expectRowText(&wr, 1, "s i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+}
+
+test "overwrite wide char spacer tail" {
+    try initData();
+    defer deinitData();
+    const gpa = std.testing.allocator;
+
+    var s: Screen = .empty;
+    defer s.deinit(gpa);
+    try s.resize(gpa, 20, 80);
+
+    var wr = s.writer(gpa, .{
+        .height = 3,
+        .width = 3,
+        .x = 0,
+        .y = 0,
+    });
+    try wr.writeAll("This is really epic!");
+
+    try expectRowText(&wr, 0, "Thi");
+    try expectRowText(&wr, 1, "s i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+
+    wr.setCursor(0, 0);
+    try wr.writeAll("🧑‍🌾");
+
+    try expectRowText(&wr, 0, "🧑‍🌾i");
+    try expectRowText(&wr, 1, "s i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+
+    wr.setCursor(0, 1);
+    try wr.writeAll("h");
+
+    try expectRowText(&wr, 0, "\x00hi");
+    try expectRowText(&wr, 1, "s i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+
+    wr.setCursor(0, 0);
+    try wr.writeAll("T");
+
+    try expectRowText(&wr, 0, "Thi");
+    try expectRowText(&wr, 1, "s i");
+    try expectRowText(&wr, 2, "s r");
+    try expectEmpty(&s, s.screenRect().extended(0, 3));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+}
+
+test "single width rect" {
+    try initData();
+    defer deinitData();
+    const gpa = std.testing.allocator;
+
+    var s: Screen = .empty;
+    defer s.deinit(gpa);
+    try s.resize(gpa, 20, 80);
+
+    var wr = s.writer(gpa, .{
+        .height = 3,
+        .width = 1,
+        .x = 0,
+        .y = 0,
+    });
+    try wr.writeAll("T");
+
+    try expectRowText(&wr, 0, "T");
+
+    wr.setCursor(0, 0);
+    try wr.writeAll("🧑‍🌾");
+
+    try expectRowText(&wr, 0, "\x00");
+}
+
+test "zero width rect" {
+    try initData();
+    defer deinitData();
+    const gpa = std.testing.allocator;
+
+    var s: Screen = .empty;
+    defer s.deinit(gpa);
+    try s.resize(gpa, 20, 80);
+
+    var wr = s.writer(gpa, .{
+        .height = 3,
+        .width = 0,
+        .x = 0,
+        .y = 0,
+    });
+    try wr.writeAll("This");
+
+    try expectRowText(&wr, 0, "");
+
+    wr.setCursor(0, 0);
+    try wr.writeAll("🧑‍🌾");
+
+    try expectRowText(&wr, 0, "");
+}
+
+test "variation selectors" {
+    try initData();
+    defer deinitData();
+    const gpa = std.testing.allocator;
+
+    var s: Screen = .empty;
+    defer s.deinit(gpa);
+    try s.resize(gpa, 20, 80);
+
+    var wr = s.writer(gpa, .{
+        .height = 3,
+        .width = 3,
+        .x = 0,
+        .y = 0,
+    });
+    try expectRowText(&wr, 0, "\x00\x00\x00");
+    // Text variation - narrow width. (TODO: Is it *always* narrow?)
+    try wr.writeAll("❤\u{FE0E}");
+    try expectRowText(&wr, 0, "❤\u{FE0E}\x00\x00");
+    try std.testing.expectEqual(1, wr.cursor.col);
+
+    wr.setCursor(0, 0);
+    try wr.writeAll("❤\u{FE0F}");
+
+    try std.testing.expectEqual(2, wr.cursor.col);
+    try expectRowText(&wr, 0, "❤\u{FE0F}\x00");
+}
+
+test "no grapheme clustering" {
+    try initData();
+    defer deinitData();
+    const gpa = std.testing.allocator;
+
+    var s: Screen = .empty;
+    defer s.deinit(gpa);
+    try s.resize(gpa, 20, 80);
+
+    var wr = s.writer(gpa, .{
+        .height = 3,
+        .width = 4,
+        .x = 0,
+        .y = 0,
+    });
+    wr.grapheme_clustering_mode = .codepoint;
+    try wr.writeAll("123412341234");
+
+    try expectRowText(&wr, 0, "1234");
+    try expectRowText(&wr, 1, "1234");
+    try expectRowText(&wr, 2, "1234");
+    try expectEmpty(&s, s.screenRect().extended(0, 4));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+
+    wr.setCursor(0, 0);
+    try wr.writeAll("🧑‍🌾");
+
+    try expectRowText(&wr, 0, "🧑🌾");
+    try expectRowText(&wr, 1, "1234");
+    try expectRowText(&wr, 2, "1234");
+    try expectEmpty(&s, s.screenRect().extended(0, 4));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+
+    wr.setCursor(1, 1);
+    try wr.writeAll("🧑‍🌾");
+
+    try expectRowText(&wr, 0, "🧑🌾");
+    try expectRowText(&wr, 1, "1🧑\x00");
+    try expectRowText(&wr, 2, "🌾34");
+    try expectEmpty(&s, s.screenRect().extended(0, 4));
+    try expectEmpty(&s, s.screenRect().extended(3, 0));
+}
+
+test "truncating" {
+    try initData();
+    defer deinitData();
+    const gpa = std.testing.allocator;
+
+    var s: Screen = .empty;
+    defer s.deinit(gpa);
+
+    try s.resize(gpa, 20, 80);
+
+    var wr = s.writer(gpa, .{
+        .height = 3,
+        .width = 4,
+        .x = 0,
+        .y = 0,
+    });
+    wr.edge_mode = .truncate;
+    wr.grapheme_clustering_mode = .codepoint;
+    try wr.writeAll("123412341234");
+
+    try expectRowText(&wr, 0, "1234");
+    try expectEmpty(&s, s.screenRect().extended(1, 0));
+
+    wr.setCursor(0, 3);
+    try wr.writeAll("🧑");
+
+    try expectRowText(&wr, 0, "123\x00");
+    try expectEmpty(&s, s.screenRect().extended(1, 0));
+}
+
+// test "styling" {
 //     try initData();
 //     defer deinitData();
 
-//     try std.testing.fuzz({}, fuzz, .{});
+//     var s: Screen = try .init(.{});
+//     defer s.deinit();
+
+//     var wr = s.writer(.{
+//         .height = 3,
+//         .width = 5,
+//         .x = 0,
+//         .y = 0,
+//     });
+//     try wr.writeAll("hi :)");
+//     try std.testing.expectEqual(Style.Attribute.none, s.getCellRowCol(0, 0).style.attrs);
+//     try std.testing.expectEqual(.palette, s.getCellRowCol(0, 0).style.color_type);
+//     try std.testing.expectEqual(true, s.getCellRowCol(0, 0).style.colors.palette.fg.none);
+//     try std.testing.expectEqual(true, s.getCellRowCol(0, 0).style.colors.palette.bg.none);
+
+//     wr.setCursor(0, 0);
+//     try wr.setStyle(.{ .attrs = .{ .bold = true }, .fg = .black, .bg = .blue });
+//     try wr.writeAll("h");
+
+//     try std.testing.expectEqual(Style.Attribute{ .bold = true }, s.getCellRowCol(0, 0).style.attrs);
+//     try std.testing.expectEqual(.palette, s.getCellRowCol(0, 0).style.color_type);
+//     try std.testing.expectEqual(false, s.getCellRowCol(0, 0).style.colors.palette.fg.none);
+//     try std.testing.expectEqual(false, s.getCellRowCol(0, 0).style.colors.palette.bg.none);
+//     try std.testing.expectEqual(0, s.getCellRowCol(0, 0).style.colors.palette.fg.@"256");
+//     try std.testing.expectEqual(4, s.getCellRowCol(0, 0).style.colors.palette.bg.@"256");
+
+//     try wr.setStyle(.{
+//         .attrs = .{ .underline = true },
+//         .fg = .{ .rgb = .{ 0xff, 0x00, 0xff } },
+//         .bg = .white,
+//     });
+//     try wr.writeAll("i");
+
+//     const cell = s.getCellRowCol(0, 1);
+//     try std.testing.expectEqual(Style.Attribute{ .underline = true }, cell.style.attrs);
+//     try std.testing.expectEqual(.rgb, cell.style.color_type);
+//     const style = s.styles.get(s.memory, cell.style.colors.rgb.id);
+//     try std.testing.expectEqual(.rgb, style.fg_tag);
+//     try std.testing.expectEqual(0xff, style.fg.rgb.r);
+//     try std.testing.expectEqual(0x00, style.fg.rgb.g);
+//     try std.testing.expectEqual(0xff, style.fg.rgb.b);
+//     try std.testing.expectEqual(.palette, style.bg_tag);
+//     try std.testing.expectEqual(7, style.bg.palette.index);
 // }
+
+// test "dumpDiff" {
+//     if (true) return error.SkipZigTest;
+//     try initData();
+//     defer deinitData();
+
+//     var source: Screen = try .init(.{
+//         .rows = 10,
+//         .cols = 5,
+//     });
+//     defer source.deinit();
+
+//     var dest: Screen = try .init(.{
+//         .rows = 10,
+//         .cols = 5,
+//     });
+//     defer dest.deinit();
+
+//     try dest.resize(gpa, 10, 5);
+
+//     var swr = source.writerFull();
+//     var dwr = dest.writerFull();
+
+//     try swr.writeAll("This is nice!");
+//     try dwr.writeAll("This is bad!");
+
+//     var ti = try TermInfo.Fallback.getTermInfo(.@"xterm-256color", std.testing.allocator, .failing, .empty);
+//     defer ti.deinit(std.testing.allocator);
+
+//     var buffer: [16384]u8 = undefined;
+//     var w: std.Io.Writer = .fixed(&buffer);
+//     try dumpDiff(&source, &dest, &ti, &w);
+//     try std.testing.expectEqualSlices(u8, "", w.buffered());
+// }
+
+test "erase" {
+    try initData();
+    defer deinitData();
+    const gpa = std.testing.allocator;
+
+    var s: Screen = .empty;
+    defer s.deinit(gpa);
+
+    try s.resize(gpa, 10, 5);
+
+    var wr = s.writerFull(gpa);
+    wr.clear();
+    try wr.writeAll("☀️");
+    wr.setCursor(0, 0);
+    wr.clear();
+    try wr.writeAll("☀️");
+    wr.clear();
+}
+
+test "guhbuh" {
+    try initData();
+    defer deinitData();
+
+    const res = zg.display_width.codePointWidth('☀');
+    try std.testing.expectEqual(1, res);
+}
 
 fn initData() !void {
     try @import("main.zig").initUnicodeData(std.testing.allocator);
@@ -1613,13 +1763,28 @@ fn deinitData() void {
     @import("main.zig").deinitUnicodeData(std.testing.allocator);
 }
 
-const ascii_widths: [128]u8 = .{
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
-};
+// This file uses code adapted from [Ghostty](https://github.com/ghostty-org/ghostty)
+//
+//
+// MIT License
+//
+// Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//

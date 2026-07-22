@@ -38,7 +38,7 @@ pub fn isZigString(comptime T: type) bool {
 
         const ptr = &info.pointer;
         // Check for CV qualifiers that would prevent coerction to []const u8
-        if (ptr.is_volatile or ptr.is_allowzero) break :blk false;
+        if (ptr.attrs.@"volatile" or ptr.attrs.@"allowzero") break :blk false;
 
         // If it's already a slice, simple check.
         if (ptr.size == .slice) {
@@ -104,3 +104,32 @@ pub fn formatInt(
         try writer.splatByteAll(' ', width -| precision -| digit_count -| write_sign);
     }
 }
+
+pub const CountingWriter = struct {
+    child: *std.Io.Writer,
+    bytes_written: u64 = 0,
+    interface: std.Io.Writer,
+
+    pub fn init(child: *std.Io.Writer) CountingWriter {
+        return .{
+            .child = child,
+            .interface = .{
+                .buffer = child.buffer,
+                .end = child.end,
+                .vtable = &.{ .drain = drain },
+            },
+        };
+    }
+
+    pub fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) !usize {
+        const cw: *CountingWriter = @fieldParentPtr("interface", io_writer);
+        cw.child.buffer = io_writer.buffer;
+        cw.child.end = io_writer.end;
+        const ret = try cw.child.vtable.drain(cw.child, data, splat);
+        cw.bytes_written += ret + (io_writer.end - cw.child.end);
+
+        io_writer.buffer = cw.child.buffer;
+        io_writer.end = cw.child.end;
+        return ret;
+    }
+};

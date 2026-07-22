@@ -199,5 +199,6 @@ pub fn writeTruncating(
 }
 
 test {
+    _ = @import("bma.zig");
     @import("std").testing.refAllDecls(@This());
 }

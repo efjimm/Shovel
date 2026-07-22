@@ -20,6 +20,20 @@ const Style = @This();
 const TermInfo = @import("TermInfo.zig");
 const log = std.log.scoped(.shovel);
 
+pub fn format(style: Style, w: *std.Io.Writer) !void {
+    try w.writeAll("{ ");
+    try style.fg.format(w);
+    try w.writeByte(' ');
+    try style.bg.format(w);
+    try w.writeByte(' ');
+    inline for (@typeInfo(Attribute).@"struct".field_names) |name| {
+        if (@field(style.attrs, name)) {
+            try w.writeAll(name ++ " ");
+        }
+    }
+    try w.writeByte('}');
+}
+
 pub const Colour = union(enum(u5)) {
     const colour_desc = @import("colour_description.zig");
     pub const FromDescriptionError = colour_desc.ParseError;
@@ -48,8 +62,64 @@ pub const Colour = union(enum(u5)) {
 
     @"256": u8,
     rgb: [3]u8,
+
+    pub fn format(colour: Colour, w: *std.Io.Writer) !void {
+        switch (colour) {
+            .@"256" => |n| try w.printInt(n, 10, .lower, .{}),
+            .rgb => |rgb| try w.print("#{x:02}{x:02}{x:02}", .{ rgb[0], rgb[1], rgb[2] }),
+            inline else => |_, t| try w.writeAll(@tagName(t)),
+        }
+    }
+
+    pub fn palette(colour: Colour) ?u8 {
+        return switch (colour) {
+            .none => null,
+            .black => 0,
+            .red => 1,
+            .green => 2,
+            .yellow => 3,
+            .blue => 4,
+            .magenta => 5,
+            .cyan => 6,
+            .white => 7,
+            .bright_black => 8,
+            .bright_red => 9,
+            .bright_green => 10,
+            .bright_yellow => 11,
+            .bright_blue => 12,
+            .bright_magenta => 13,
+            .bright_cyan => 14,
+            .bright_white => 15,
+
+            .@"256" => |n| n,
+            .rgb => null,
+        };
+    }
+
+    pub fn fromPalette(p: u8) Colour {
+        return switch (p) {
+            0 => .black,
+            1 => .red,
+            2 => .green,
+            3 => .yellow,
+            4 => .blue,
+            5 => .magenta,
+            6 => .cyan,
+            7 => .white,
+            8 => .bright_black,
+            9 => .bright_red,
+            10 => .bright_green,
+            11 => .bright_yellow,
+            12 => .bright_blue,
+            13 => .bright_magenta,
+            14 => .bright_cyan,
+            15 => .bright_white,
+            else => .{ .@"256" = p },
+        };
+    }
 };
 
+// TODO: This should be plural
 pub const Attribute = packed struct {
     bold: bool = false,
     dimmed: bool = false,
@@ -68,11 +138,63 @@ fg: Colour = .none,
 bg: Colour = .none,
 attrs: Attribute = .{},
 
+pub const Packed = packed struct(u64) {
+    fg_tag: Tag,
+    bg_tag: Tag,
+    fg: Packed.Colour,
+    bg: Packed.Colour,
+    attrs: Attribute,
+    unused: u3 = 0,
+
+    pub const Tag = enum(u2) { none, palette, rgb };
+    pub const Colour = packed union(u24) {
+        none: u24,
+        palette: packed struct(u24) {
+            index: u8,
+            unused: u16 = 0,
+        },
+        rgb: packed struct(u24) {
+            r: u8,
+            g: u8,
+            b: u8,
+        },
+    };
+};
+
 pub fn init(fg: Colour, bg: Colour, attrs: Attribute) Style {
     return .{
         .fg = fg,
         .bg = bg,
         .attrs = attrs,
+    };
+}
+
+pub fn toPacked(style: Style) Packed {
+    const fg_tag: Packed.Tag, const fg: Packed.Colour = switch (style.fg) {
+        .none => .{ .none, .{ .none = 0 } },
+        .rgb => |rgb| .{ .rgb, .{ .rgb = .{
+            .r = rgb[0],
+            .g = rgb[1],
+            .b = rgb[2],
+        } } },
+        else => .{ .palette, .{ .palette = .{ .index = style.fg.palette().? } } },
+    };
+    const bg_tag: Packed.Tag, const bg: Packed.Colour = switch (style.bg) {
+        .none => .{ .none, .{ .none = 0 } },
+        .rgb => |rgb| .{ .rgb, .{ .rgb = .{
+            .r = rgb[0],
+            .g = rgb[1],
+            .b = rgb[2],
+        } } },
+        else => .{ .palette, .{ .palette = .{ .index = style.bg.palette().? } } },
+    };
+
+    return .{
+        .attrs = style.attrs,
+        .fg_tag = fg_tag,
+        .bg_tag = bg_tag,
+        .fg = fg,
+        .bg = bg,
     };
 }
 
