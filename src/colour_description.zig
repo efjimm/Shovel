@@ -50,7 +50,8 @@ pub fn parseColourDescription(s: []const u8) ParseError!Colour {
         }
 
         return .{
-            .@"256" = fmt.parseUnsigned(u8, s, 10) catch return error.BadColourDescription,
+            .palette = @enumFromInt(fmt.parseUnsigned(u8, s, 10) catch
+                return error.BadColourDescription),
         };
     }
 
@@ -125,22 +126,22 @@ const colour_names = blk: {
     break :blk std.StaticStringMap(Colour).initComptime(.{
         // Terminal colours.
         .{ "none", .none },
-        .{ "black", .black },
-        .{ "red", .red },
-        .{ "green", .green },
-        .{ "yellow", .yellow },
-        .{ "blue", .blue },
-        .{ "magenta", .magenta },
-        .{ "cyan", .cyan },
-        .{ "white", .white },
-        .{ "bright_black", .bright_black },
-        .{ "bright_red", .bright_red },
-        .{ "bright_green", .bright_green },
-        .{ "bright_yellow", .bright_yellow },
-        .{ "bright_blue", .bright_blue },
-        .{ "bright_magenta", .bright_magenta },
-        .{ "bright_cyan", .bright_cyan },
-        .{ "bright_white", .bright_white },
+        .{ "black", Colour.black },
+        .{ "red", Colour.red },
+        .{ "green", Colour.green },
+        .{ "yellow", Colour.yellow },
+        .{ "blue", Colour.blue },
+        .{ "magenta", Colour.magenta },
+        .{ "cyan", Colour.cyan },
+        .{ "white", Colour.white },
+        .{ "bright_black", Colour.bright_black },
+        .{ "bright_red", Colour.bright_red },
+        .{ "bright_green", Colour.bright_green },
+        .{ "bright_yellow", Colour.bright_yellow },
+        .{ "bright_blue", Colour.bright_blue },
+        .{ "bright_magenta", Colour.bright_magenta },
+        .{ "bright_cyan", Colour.bright_cyan },
+        .{ "bright_white", Colour.bright_white },
 
         // HTML colours
         .{ "html:IndianRed", Colour{ .rgb = hexToRgb("CD5C5C") catch @compileError("Bad colour code.") } },

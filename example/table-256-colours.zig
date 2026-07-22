@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
 
     try writeTitle(term.terminfo, writer, "Standard colours (0 to 15)");
     while (colour < 16) : (colour += 1) {
-        const attr = shovel.Style{ .bg = .{ .@"256" = colour } };
+        const attr = shovel.Style{ .bg = .{ .palette = @enumFromInt(colour) } };
 
         try attr.dump(writer, dump_opts);
         try writer.writeAll("    ");
@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
     try writeTitle(term.terminfo, writer, "\n6x6x6 cubic palette (16 to 231)");
     column = 0;
     while (colour < 232) : (colour += 1) {
-        const attr = shovel.Style{ .bg = .{ .@"256" = colour } };
+        const attr = shovel.Style{ .bg = .{ .palette = @enumFromInt(colour) } };
 
         if (column == 16) {
             column = 0;
@@ -66,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
     try writeTitle(term.terminfo, writer, "\nGrayscale (232 to 255)");
     column = 0;
     while (colour < 256) : (colour += 1) {
-        const attr = shovel.Style{ .bg = .{ .@"256" = colour } };
+        const attr = shovel.Style{ .bg = .{ .palette = @enumFromInt(colour) } };
 
         if (column == 16) {
             column = 0;

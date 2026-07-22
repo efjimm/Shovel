@@ -87,28 +87,32 @@ pub const Cell = packed struct(u64) {
             palette: packed struct(u18) {
                 fg: packed struct(u9) {
                     none: bool,
-                    @"256": u8,
+                    palette: Style.Colour.Palette,
                 },
                 bg: packed struct(u9) {
                     none: bool,
-                    @"256": u8,
+                    palette: Style.Colour.Palette,
                 },
             },
             rgb: packed struct(u18) {
                 unused: u2 = 0,
                 id: u16,
             },
+
+            pub fn initPalette(p1: ?Style.Colour.Palette, p2: ?Style.Colour.Palette) @This() {
+                return .{
+                    .palette = .{
+                        .fg = .{ .none = p1 == null, .palette = p1 orelse .black },
+                        .bg = .{ .none = p2 == null, .palette = p2 orelse .black },
+                    },
+                };
+            }
         },
 
         pub const default: CellStyle = .{
             .attrs = .none,
             .color_type = .palette,
-            .colors = .{
-                .palette = .{
-                    .fg = .{ .none = true, .@"256" = 0 },
-                    .bg = .{ .none = true, .@"256" = 0 },
-                },
-            },
+            .colors = .initPalette(null, null),
         };
     };
 
@@ -384,13 +388,22 @@ pub fn styleToCellStyle(s: *Screen, gpa: Allocator, style: Style) !Cell.CellStyl
             .colors = .{ .rgb = .{ .id = id } },
         };
     }
+
     return .{
         .attrs = style.attrs,
         .color_type = .palette,
-        .colors = .{ .palette = .{
-            .fg = .{ .none = style.fg == .none, .@"256" = style.fg.palette() orelse 0 },
-            .bg = .{ .none = style.bg == .none, .@"256" = style.bg.palette() orelse 0 },
-        } },
+        .colors = .initPalette(
+            switch (style.fg) {
+                .none => null,
+                .palette => |p| p,
+                .rgb => unreachable,
+            },
+            switch (style.bg) {
+                .none => null,
+                .palette => |p| p,
+                .rgb => unreachable,
+            },
+        ),
     };
 }
 
@@ -908,12 +921,12 @@ pub fn getCellStyle(s: *const Screen, cell_style: Cell.CellStyle) Style {
             .attrs = cell_style.attrs,
             .fg = switch (style.fg_tag) {
                 .none => .none,
-                .palette => .fromPalette(style.fg.palette.index),
+                .palette => .{ .palette = style.fg.palette.index },
                 .rgb => .{ .rgb = .{ style.fg.rgb.r, style.fg.rgb.g, style.fg.rgb.b } },
             },
             .bg = switch (style.bg_tag) {
                 .none => .none,
-                .palette => .fromPalette(style.bg.palette.index),
+                .palette => .{ .palette = style.bg.palette.index },
                 .rgb => .{ .rgb = .{ style.bg.rgb.r, style.bg.rgb.g, style.bg.rgb.b } },
             },
         };
@@ -924,11 +937,11 @@ pub fn getCellStyle(s: *const Screen, cell_style: Cell.CellStyle) Style {
         .fg = if (cell_style.colors.palette.fg.none)
             .none
         else
-            .fromPalette(cell_style.colors.palette.fg.@"256"),
+            .{ .palette = cell_style.colors.palette.fg.palette },
         .bg = if (cell_style.colors.palette.bg.none)
             .none
         else
-            .fromPalette(cell_style.colors.palette.bg.@"256"),
+            .{ .palette = cell_style.colors.palette.bg.palette },
     };
 }
 

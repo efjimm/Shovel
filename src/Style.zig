@@ -39,83 +39,57 @@ pub const Colour = union(enum(u5)) {
     pub const FromDescriptionError = colour_desc.ParseError;
     pub const fromDescription = colour_desc.parseColourDescription;
 
-    // TODO since the default colours are also part of the 256 colour spec,
-    //      maybe we should just use that. The dump function would then special
-    //      case them and use legacy escape sequences.
     none,
-    black,
-    red,
-    green,
-    yellow,
-    blue,
-    magenta,
-    cyan,
-    white,
-    bright_black,
-    bright_red,
-    bright_green,
-    bright_yellow,
-    bright_blue,
-    bright_magenta,
-    bright_cyan,
-    bright_white,
-
-    @"256": u8,
+    palette: Palette,
     rgb: [3]u8,
+
+    pub const Palette = enum(u8) {
+        black = 0,
+        red,
+        green,
+        yellow,
+        blue,
+        magenta,
+        cyan,
+        white,
+        bright_black,
+        bright_red,
+        bright_green,
+        bright_yellow,
+        bright_blue,
+        bright_magenta,
+        bright_cyan,
+        bright_white,
+        _,
+    };
+
+    pub const black: Colour = .{ .palette = .black };
+    pub const red: Colour = .{ .palette = .red };
+    pub const green: Colour = .{ .palette = .green };
+    pub const yellow: Colour = .{ .palette = .yellow };
+    pub const blue: Colour = .{ .palette = .blue };
+    pub const magenta: Colour = .{ .palette = .magenta };
+    pub const cyan: Colour = .{ .palette = .cyan };
+    pub const white: Colour = .{ .palette = .white };
+    pub const bright_black: Colour = .{ .palette = .bright_black };
+    pub const bright_red: Colour = .{ .palette = .bright_red };
+    pub const bright_green: Colour = .{ .palette = .bright_green };
+    pub const bright_yellow: Colour = .{ .palette = .bright_yellow };
+    pub const bright_blue: Colour = .{ .palette = .bright_blue };
+    pub const bright_magenta: Colour = .{ .palette = .bright_magenta };
+    pub const bright_cyan: Colour = .{ .palette = .bright_cyan };
+    pub const bright_white: Colour = .{ .palette = .bright_white };
 
     pub fn format(colour: Colour, w: *std.Io.Writer) !void {
         switch (colour) {
-            .@"256" => |n| try w.printInt(n, 10, .lower, .{}),
+            .palette => |p| switch (p) {
+                inline 0...15 => |t| {
+                    try w.writeAll(@tagName(t));
+                },
+                else => try w.printInt(@intFromEnum(p), 10, .lower, .{}),
+            },
             .rgb => |rgb| try w.print("#{x:02}{x:02}{x:02}", .{ rgb[0], rgb[1], rgb[2] }),
-            inline else => |_, t| try w.writeAll(@tagName(t)),
         }
-    }
-
-    pub fn palette(colour: Colour) ?u8 {
-        return switch (colour) {
-            .none => null,
-            .black => 0,
-            .red => 1,
-            .green => 2,
-            .yellow => 3,
-            .blue => 4,
-            .magenta => 5,
-            .cyan => 6,
-            .white => 7,
-            .bright_black => 8,
-            .bright_red => 9,
-            .bright_green => 10,
-            .bright_yellow => 11,
-            .bright_blue => 12,
-            .bright_magenta => 13,
-            .bright_cyan => 14,
-            .bright_white => 15,
-
-            .@"256" => |n| n,
-            .rgb => null,
-        };
-    }
-
-    pub fn fromPalette(p: u8) Colour {
-        return switch (p) {
-            0 => .black,
-            1 => .red,
-            2 => .green,
-            3 => .yellow,
-            4 => .blue,
-            5 => .magenta,
-            6 => .cyan,
-            7 => .white,
-            8 => .bright_black,
-            9 => .bright_red,
-            10 => .bright_green,
-            11 => .bright_yellow,
-            12 => .bright_blue,
-            13 => .bright_magenta,
-            14 => .bright_cyan,
-            15 => .bright_white,
-            else => .{ .@"256" = p },
-        };
     }
 };
 
@@ -150,7 +124,7 @@ pub const Packed = packed struct(u64) {
     pub const Colour = packed union(u24) {
         none: u24,
         palette: packed struct(u24) {
-            index: u8,
+            index: Style.Colour.Palette,
             unused: u16 = 0,
         },
         rgb: packed struct(u24) {
@@ -172,21 +146,21 @@ pub fn init(fg: Colour, bg: Colour, attrs: Attribute) Style {
 pub fn toPacked(style: Style) Packed {
     const fg_tag: Packed.Tag, const fg: Packed.Colour = switch (style.fg) {
         .none => .{ .none, .{ .none = 0 } },
+        .palette => |p| .{ .palette, .{ .palette = .{ .index = p } } },
         .rgb => |rgb| .{ .rgb, .{ .rgb = .{
             .r = rgb[0],
             .g = rgb[1],
             .b = rgb[2],
         } } },
-        else => .{ .palette, .{ .palette = .{ .index = style.fg.palette().? } } },
     };
     const bg_tag: Packed.Tag, const bg: Packed.Colour = switch (style.bg) {
         .none => .{ .none, .{ .none = 0 } },
+        .palette => |p| .{ .palette, .{ .palette = .{ .index = p } } },
         .rgb => |rgb| .{ .rgb, .{ .rgb = .{
             .r = rgb[0],
             .g = rgb[1],
             .b = rgb[2],
         } } },
-        else => .{ .palette, .{ .palette = .{ .index = style.bg.palette().? } } },
     };
 
     return .{
@@ -373,51 +347,51 @@ pub fn dumpFg(fg: Colour, ti: *const TermInfo, w: *std.Io.Writer) !bool {
                 return true;
             }
         },
-        .black, .red, .green, .yellow, .blue, .magenta, .cyan, .white => {
-            const n = @intFromEnum(fg) - 1;
-            if (ti.getStringCapability(.set_a_foreground)) |setaf| {
-                try TermInfo.writeParamSequence(setaf, w, .{n});
-            } else if (ti.getStringCapability(.set_foreground)) |setf| {
-                // Rare case where setaf is not defined.
-                // Red/blue are swapped for setf.
-                const t = switch (fg) {
-                    .cyan => .yellow,
-                    .yellow => .cyan,
-                    .red => .blue,
-                    .blue => .red,
-                    else => fg,
-                };
-                try TermInfo.writeParamSequence(setf, w, .{@intFromEnum(t) - 1});
-            } else {
-                // No color support!
-            }
-        },
-        .bright_black,
-        .bright_red,
-        .bright_green,
-        .bright_yellow,
-        .bright_blue,
-        .bright_magenta,
-        .bright_cyan,
-        .bright_white,
-        => {
-            const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
-            if (num_colors >= 16) {
+        .palette => |p| switch (p) {
+            .black, .red, .green, .yellow, .blue, .magenta, .cyan, .white => {
                 if (ti.getStringCapability(.set_a_foreground)) |setaf| {
-                    try TermInfo.writeParamSequence(setaf, w, .{@intFromEnum(fg) - 1});
+                    try TermInfo.writeParamSequence(setaf, w, .{@intFromEnum(p)});
+                } else if (ti.getStringCapability(.set_foreground)) |setf| {
+                    // Niche case where setaf is not defined.
+                    // Red/blue are swapped for setf.
+                    const t = switch (p) {
+                        .cyan => .yellow,
+                        .yellow => .cyan,
+                        .red => .blue,
+                        .blue => .red,
+                        else => p,
+                    };
+                    try TermInfo.writeParamSequence(setf, w, .{@intFromEnum(t)});
+                } else {
+                    // No color support!
                 }
-            }
-        },
-
-        .@"256" => |value| {
-            // TODO: If we don't support 256 colours it would be a good idea to approximate them
-            //       via the 8/16 available colours.
-            const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
-            if (num_colors >= 256) {
-                if (ti.getStringCapability(.set_a_foreground)) |setaf| {
-                    try TermInfo.writeParamSequence(setaf, w, .{value});
+            },
+            .bright_black,
+            .bright_red,
+            .bright_green,
+            .bright_yellow,
+            .bright_blue,
+            .bright_magenta,
+            .bright_cyan,
+            .bright_white,
+            => {
+                const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
+                if (num_colors >= 16) {
+                    if (ti.getStringCapability(.set_a_foreground)) |setaf| {
+                        try TermInfo.writeParamSequence(setaf, w, .{@intFromEnum(p)});
+                    }
                 }
-            }
+            },
+            else => |value| {
+                // TODO: If we don't support 256 colours it would be a good idea to approximate them
+                //       via the 8/16 available colours.
+                const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
+                if (num_colors >= 256) {
+                    if (ti.getStringCapability(.set_a_foreground)) |setaf| {
+                        try TermInfo.writeParamSequence(setaf, w, .{@intFromEnum(value)});
+                    }
+                }
+            },
         },
         .rgb => |rgb| switch (ti.truecolour) {
             .none => {
@@ -456,47 +430,47 @@ pub fn dumpBg(bg: Colour, ti: *const TermInfo, w: *std.Io.Writer) !bool {
                 return true;
             }
         },
-        .black, .red, .green, .yellow, .blue, .magenta, .cyan, .white => {
-            const n = @intFromEnum(bg) - 1;
-            if (ti.getStringCapability(.set_a_background)) |setab| {
-                try TermInfo.writeParamSequence(setab, w, .{n});
-            } else if (ti.getStringCapability(.set_background)) |setb| {
-                // Rare case where setab is not defined.
-                // Red/blue are swapped for setb.
-                const t = switch (bg) {
-                    .cyan => .yellow,
-                    .yellow => .cyan,
-                    .red => .blue,
-                    .blue => .red,
-                    else => bg,
-                };
-                try TermInfo.writeParamSequence(setb, w, .{@intFromEnum(t) - 1});
-            } else {
-                // No color support!
-            }
-        },
-        .bright_black,
-        .bright_red,
-        .bright_green,
-        .bright_yellow,
-        .bright_blue,
-        .bright_magenta,
-        .bright_cyan,
-        .bright_white,
-        => {
-            const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
-            if (num_colors >= 16) {
+        .palette => |p| switch (p) {
+            .black, .red, .green, .yellow, .blue, .magenta, .cyan, .white => {
                 if (ti.getStringCapability(.set_a_background)) |setab| {
-                    try TermInfo.writeParamSequence(setab, w, .{@intFromEnum(bg) - 1});
+                    try TermInfo.writeParamSequence(setab, w, .{@intFromEnum(p)});
+                } else if (ti.getStringCapability(.set_background)) |setb| {
+                    // Niche case where setab is not defined.
+                    // Red/blue are swapped for setb.
+                    const t = switch (p) {
+                        .cyan => .yellow,
+                        .yellow => .cyan,
+                        .red => .blue,
+                        .blue => .red,
+                        else => p,
+                    };
+                    try TermInfo.writeParamSequence(setb, w, .{@intFromEnum(t)});
+                } else {
+                    // No color support!
                 }
-            }
-        },
-
-        .@"256" => |value| {
-            const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
-            if (num_colors >= 256) {
-                try ti.write(w, .set_a_background, .{value});
-            }
+            },
+            .bright_black,
+            .bright_red,
+            .bright_green,
+            .bright_yellow,
+            .bright_blue,
+            .bright_magenta,
+            .bright_cyan,
+            .bright_white,
+            => {
+                const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
+                if (num_colors >= 16) {
+                    if (ti.getStringCapability(.set_a_background)) |setab| {
+                        try TermInfo.writeParamSequence(setab, w, .{@intFromEnum(p)});
+                    }
+                }
+            },
+            else => |value| {
+                const num_colors = ti.getNumberCapability(.max_colors) orelse 8;
+                if (num_colors >= 256) {
+                    try ti.write(w, .set_a_background, .{@intFromEnum(value)});
+                }
+            },
         },
         .rgb => |rgb| switch (ti.truecolour) {
             .none => {
@@ -550,24 +524,26 @@ pub fn dumpEcma48(style: Style, w: *std.Io.Writer) !void {
 
     switch (style.fg) {
         .none => buf.appendSliceAssumeCapacity("39;"),
-        .black => buf.appendSliceAssumeCapacity("30;"),
-        .red => buf.appendSliceAssumeCapacity("31;"),
-        .green => buf.appendSliceAssumeCapacity("32;"),
-        .yellow => buf.appendSliceAssumeCapacity("33;"),
-        .blue => buf.appendSliceAssumeCapacity("34;"),
-        .magenta => buf.appendSliceAssumeCapacity("35;"),
-        .cyan => buf.appendSliceAssumeCapacity("36;"),
-        .white => buf.appendSliceAssumeCapacity("37;"),
-        .bright_black => buf.appendSliceAssumeCapacity("90;"),
-        .bright_red => buf.appendSliceAssumeCapacity("91;"),
-        .bright_green => buf.appendSliceAssumeCapacity("92;"),
-        .bright_yellow => buf.appendSliceAssumeCapacity("93;"),
-        .bright_blue => buf.appendSliceAssumeCapacity("94;"),
-        .bright_magenta => buf.appendSliceAssumeCapacity("95;"),
-        .bright_cyan => buf.appendSliceAssumeCapacity("96;"),
-        .bright_white => buf.appendSliceAssumeCapacity("97;"),
-        .@"256" => |n| {
-            buf.printAssumeCapacity("38;5;{d};", .{n});
+        .palette => |p| switch (p) {
+            .black => buf.appendSliceAssumeCapacity("30;"),
+            .red => buf.appendSliceAssumeCapacity("31;"),
+            .green => buf.appendSliceAssumeCapacity("32;"),
+            .yellow => buf.appendSliceAssumeCapacity("33;"),
+            .blue => buf.appendSliceAssumeCapacity("34;"),
+            .magenta => buf.appendSliceAssumeCapacity("35;"),
+            .cyan => buf.appendSliceAssumeCapacity("36;"),
+            .white => buf.appendSliceAssumeCapacity("37;"),
+            .bright_black => buf.appendSliceAssumeCapacity("90;"),
+            .bright_red => buf.appendSliceAssumeCapacity("91;"),
+            .bright_green => buf.appendSliceAssumeCapacity("92;"),
+            .bright_yellow => buf.appendSliceAssumeCapacity("93;"),
+            .bright_blue => buf.appendSliceAssumeCapacity("94;"),
+            .bright_magenta => buf.appendSliceAssumeCapacity("95;"),
+            .bright_cyan => buf.appendSliceAssumeCapacity("96;"),
+            .bright_white => buf.appendSliceAssumeCapacity("97;"),
+            else => {
+                buf.printAssumeCapacity("38;5;{d};", .{@intFromEnum(p)});
+            },
         },
         .rgb => |rgb| {
             // TODO: These aren't in the ECMA-48 standard, we should pass a flag indicating
@@ -578,24 +554,26 @@ pub fn dumpEcma48(style: Style, w: *std.Io.Writer) !void {
     }
     switch (style.bg) {
         .none => buf.appendSliceAssumeCapacity("49;"),
-        .black => buf.appendSliceAssumeCapacity("40;"),
-        .red => buf.appendSliceAssumeCapacity("41;"),
-        .green => buf.appendSliceAssumeCapacity("42;"),
-        .yellow => buf.appendSliceAssumeCapacity("43;"),
-        .blue => buf.appendSliceAssumeCapacity("44;"),
-        .magenta => buf.appendSliceAssumeCapacity("45;"),
-        .cyan => buf.appendSliceAssumeCapacity("46;"),
-        .white => buf.appendSliceAssumeCapacity("74;"),
-        .bright_black => buf.appendSliceAssumeCapacity("100;"),
-        .bright_red => buf.appendSliceAssumeCapacity("101;"),
-        .bright_green => buf.appendSliceAssumeCapacity("102;"),
-        .bright_yellow => buf.appendSliceAssumeCapacity("103;"),
-        .bright_blue => buf.appendSliceAssumeCapacity("104;"),
-        .bright_magenta => buf.appendSliceAssumeCapacity("105;"),
-        .bright_cyan => buf.appendSliceAssumeCapacity("106;"),
-        .bright_white => buf.appendSliceAssumeCapacity("107;"),
-        .@"256" => |n| {
-            buf.printAssumeCapacity("48;5;{d};", .{n});
+        .palette => |p| switch (p) {
+            .black => buf.appendSliceAssumeCapacity("40;"),
+            .red => buf.appendSliceAssumeCapacity("41;"),
+            .green => buf.appendSliceAssumeCapacity("42;"),
+            .yellow => buf.appendSliceAssumeCapacity("43;"),
+            .blue => buf.appendSliceAssumeCapacity("44;"),
+            .magenta => buf.appendSliceAssumeCapacity("45;"),
+            .cyan => buf.appendSliceAssumeCapacity("46;"),
+            .white => buf.appendSliceAssumeCapacity("74;"),
+            .bright_black => buf.appendSliceAssumeCapacity("100;"),
+            .bright_red => buf.appendSliceAssumeCapacity("101;"),
+            .bright_green => buf.appendSliceAssumeCapacity("102;"),
+            .bright_yellow => buf.appendSliceAssumeCapacity("103;"),
+            .bright_blue => buf.appendSliceAssumeCapacity("104;"),
+            .bright_magenta => buf.appendSliceAssumeCapacity("105;"),
+            .bright_cyan => buf.appendSliceAssumeCapacity("106;"),
+            .bright_white => buf.appendSliceAssumeCapacity("107;"),
+            else => {
+                buf.printAssumeCapacity("48;5;{d};", .{p});
+            },
         },
         .rgb => |rgb| {
             // TODO: These aren't in the ECMA-48 standard, we should pass a flag indicating
